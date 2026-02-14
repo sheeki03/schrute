@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { chromium } from 'playwright';
 import type { Browser, BrowserContext } from 'playwright';
 import { getConfig, getBrowserDataDir, getTmpDir } from '../core/config.js';
+import type { OneAgentConfig } from '../skill/types.js';
+import { launchBrowserEngine, type EngineCapabilities } from './engine.js';
+import type { BrowserEngine } from '../skill/types.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -25,9 +27,22 @@ interface ManagedContext {
 export class BrowserManager {
   private browser: Browser | null = null;
   private contexts = new Map<string, ManagedContext>();
+  private lastHarPaths = new Map<string, string>();
+  private config?: OneAgentConfig;
+  private capabilities: EngineCapabilities | null = null;
+  private engine: BrowserEngine;
+
+  constructor(config?: OneAgentConfig) {
+    this.config = config;
+    this.engine = config?.browser?.engine ?? 'patchright';
+  }
+
+  private getResolvedConfig(): OneAgentConfig {
+    return this.config ?? getConfig();
+  }
 
   /**
-   * Launch the shared Chromium browser instance.
+   * Launch the shared browser instance.
    * Idempotent — returns immediately if already launched.
    */
   async launchBrowser(): Promise<Browser> {
@@ -35,10 +50,16 @@ export class BrowserManager {
       return this.browser;
     }
 
-    log.info('Launching Chromium browser');
-    this.browser = await chromium.launch({
-      headless: true,
-    });
+    log.info({ engine: this.engine }, 'Launching browser');
+    const result = await launchBrowserEngine(this.engine, { headless: true });
+    this.browser = result.browser;
+    this.capabilities = result.capabilities;
+    if (result.capabilities.configuredEngine !== result.capabilities.effectiveEngine) {
+      log.warn(
+        { configured: result.capabilities.configuredEngine, effective: result.capabilities.effectiveEngine },
+        'Browser engine fallback active — running without stealth',
+      );
+    }
 
     this.browser.on('disconnected', () => {
       log.warn('Browser disconnected');
@@ -62,7 +83,7 @@ export class BrowserManager {
     }
 
     const browser = await this.launchBrowser();
-    const config = getConfig();
+    const config = this.getResolvedConfig();
 
     // Persistent storage directory for this site
     const storageDir = path.join(getBrowserDataDir(config), siteId);
@@ -86,8 +107,6 @@ export class BrowserManager {
         mode: 'full',
       },
       storageState,
-      // NOTE: Keep this Chrome version reasonably current (update ~quarterly)
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     });
 
     this.contexts.set(siteId, {
@@ -113,7 +132,7 @@ export class BrowserManager {
       return;
     }
 
-    const config = getConfig();
+    const config = this.getResolvedConfig();
     const storageDir = path.join(getBrowserDataDir(config), siteId);
     const storageStatePath = path.join(storageDir, 'storage-state.json');
 
@@ -131,10 +150,12 @@ export class BrowserManager {
 
     try {
       await managed.context.close();
-    } catch {
-      // Context may already be closed
+    } catch (err) {
+      log.warn({ err, siteId }, 'Error closing browser context');
     }
 
+    // Preserve HAR path so it survives context close (needed by capture pipeline)
+    this.lastHarPaths.set(siteId, managed.harPath);
     this.contexts.delete(siteId);
     log.info({ siteId }, 'Closed browser context');
   }
@@ -151,8 +172,8 @@ export class BrowserManager {
     if (this.browser) {
       try {
         await this.browser.close();
-      } catch {
-        // Browser may already be closed
+      } catch (err) {
+        log.warn({ err }, 'Error closing browser instance');
       }
       this.browser = null;
     }
@@ -164,7 +185,7 @@ export class BrowserManager {
    * Get the HAR path for a site's context.
    */
   getHarPath(siteId: string): string | undefined {
-    return this.contexts.get(siteId)?.harPath;
+    return this.contexts.get(siteId)?.harPath ?? this.lastHarPaths.get(siteId);
   }
 
   /**
@@ -179,5 +200,12 @@ export class BrowserManager {
    */
   getBrowser(): Browser | null {
     return this.browser;
+  }
+
+  /**
+   * Get the engine capabilities (available after launch).
+   */
+  getCapabilities(): EngineCapabilities | null {
+    return this.capabilities;
   }
 }

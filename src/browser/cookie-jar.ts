@@ -1,8 +1,7 @@
 import { getLogger } from '../core/logger.js';
+import { SERVICE_NAME } from '../storage/secrets.js';
 
 const log = getLogger();
-
-const SERVICE_NAME = 'oneagent';
 
 interface CookieEntry {
   name: string;
@@ -21,7 +20,7 @@ interface SiteState {
 }
 
 /**
- * Cookie persistence with encrypted keychain storage.
+ * Cookie persistence with OS keychain storage.
  *
  * In normal mode: cookies are stored per-site via the OS keychain (keytar).
  * In locked mode: cookies are only in-memory for the current session — not persisted.
@@ -202,7 +201,8 @@ export class CookieJar {
       const state: SiteState = JSON.parse(serialized);
       this.inMemoryStore.set(siteId, state); // Cache it
       return Date.now() - state.lastRefresh > this.refreshIntervalMs;
-    } catch {
+    } catch (err) {
+      log.warn({ err }, 'Error checking cookie refresh status — defaulting to refresh');
       return true;
     }
   }

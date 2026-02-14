@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { getConfig, getTmpDir } from '../core/config.js';
 import { getLogger } from '../core/logger.js';
+import { withTimeout } from '../core/utils.js';
 
 const log = getLogger();
 
@@ -53,7 +54,8 @@ export class HarRecorder {
         { existingSiteId: this.activeSession.siteId },
         'Recording already active, stopping previous session',
       );
-      // Don't await — fire-and-forget the stop of the previous session
+      // Design choice: fire-and-forget cleanup on browser disconnect. Awaiting would block
+      // the disconnect handler, and the recording data is best-effort at this point.
       void this.stopRecording().catch((err) => {
         log.warn({ err }, 'Failed to stop HAR recording on disconnect');
       });
@@ -122,9 +124,10 @@ export class HarRecorder {
     const timeoutMs = config.payloadLimits.redactorTimeoutMs;
 
     try {
-      const redactedPath = await this.withTimeout(
+      const redactedPath = await withTimeout(
         this.redactFn(session.harPath),
         timeoutMs,
+        'HAR redaction',
       );
 
       // Redaction succeeded — delete raw HAR
@@ -177,7 +180,8 @@ export class HarRecorder {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(tmpDir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      log.warn({ err, tmpDir }, 'HAR recorder GC: failed to read tmp directory');
       return;
     }
 
@@ -197,8 +201,8 @@ export class HarRecorder {
           if (this.isProcessRunning(pid)) {
             continue; // Skip — active process owns this dir
           }
-        } catch {
-          // Can't read lock — treat as stale
+        } catch (err) {
+          log.warn({ err, lockPath }, 'HAR recorder GC: failed to read lock file');
         }
       }
 
@@ -210,8 +214,8 @@ export class HarRecorder {
           fs.rmSync(dirPath, { recursive: true, force: true });
           cleaned++;
         }
-      } catch {
-        // Skip dirs we can't stat
+      } catch (err) {
+        log.warn({ err, dirPath }, 'HAR recorder GC: failed to stat or remove stale directory');
       }
     }
 
@@ -264,25 +268,4 @@ export class HarRecorder {
     }
   }
 
-  /**
-   * Run a promise with a timeout. Rejects if the promise doesn't resolve
-   * within the given time.
-   */
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Operation timed out after ${ms}ms`));
-      }, ms);
-
-      promise
-        .then((value) => {
-          clearTimeout(timer);
-          resolve(value);
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-    });
-  }
 }
