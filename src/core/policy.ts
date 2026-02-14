@@ -11,7 +11,7 @@ import type {
 } from '../skill/types.js';
 import {
   V01_DEFAULT_CAPABILITIES,
-  V01_DISABLED_CAPABILITIES,
+  DISABLED_BY_DEFAULT_CAPABILITIES,
   TIER1_ALLOWED_HEADERS,
   BLOCKED_HOP_BY_HOP_HEADERS,
   DESTRUCTIVE_GET_PATTERNS,
@@ -51,13 +51,21 @@ const DEFAULT_SITE_POLICY: Omit<SitePolicy, 'siteId'> = {
   capabilities: [...V01_DEFAULT_CAPABILITIES],
 };
 
-const sitePolicies = new Map<string, SitePolicy>();
+const POLICY_CACHE_TTL_MS = 300_000; // 5 minutes
+// Module-level singleton — intentional for process-scoped daemon state
+// Cache key = "dataDir:siteId" to isolate policies across config contexts
+const sitePolicies = new Map<string, { policy: SitePolicy; cachedAt: number }>();
+
+function policyCacheKey(siteId: string, config?: OneAgentConfig): string {
+  const dataDir = config?.dataDir ?? '';
+  return dataDir ? `${dataDir}:${siteId}` : siteId;
+}
 
 // ─── Policy Store ─────────────────────────────────────────────────
 
-function loadPolicyFromDb(siteId: string): SitePolicy | null {
+function loadPolicyFromDb(siteId: string, config?: OneAgentConfig): SitePolicy | null {
   try {
-    const db = getDatabase();
+    const db = getDatabase(config);
     const row = db.get<{
       site_id: string;
       allowed_methods: string;
@@ -83,44 +91,69 @@ function loadPolicyFromDb(siteId: string): SitePolicy | null {
       redactionRules: JSON.parse(row.redaction_rules),
       capabilities: JSON.parse(row.capabilities),
     };
-  } catch {
+  } catch (err) {
+    const policyLog = getLogger();
+    policyLog.error(
+      { siteId, err },
+      'Failed to load site policy from database — falling back to restrictive defaults',
+    );
     return null;
   }
 }
 
-export function getSitePolicy(siteId: string): SitePolicy {
-  const existing = sitePolicies.get(siteId);
-  if (existing) return existing;
+export function getSitePolicy(siteId: string, config?: OneAgentConfig): SitePolicy {
+  const key = policyCacheKey(siteId, config);
+  const cached = sitePolicies.get(key);
+  if (cached && (Date.now() - cached.cachedAt) < POLICY_CACHE_TTL_MS) {
+    return cached.policy;
+  }
 
   // Try loading from DB
-  const dbPolicy = loadPolicyFromDb(siteId);
+  const dbPolicy = loadPolicyFromDb(siteId, config);
   if (dbPolicy) {
-    sitePolicies.set(siteId, dbPolicy); // cache it
+    sitePolicies.set(key, { policy: dbPolicy, cachedAt: Date.now() });
     return dbPolicy;
   }
 
   return { siteId, ...DEFAULT_SITE_POLICY };
 }
 
-export function setSitePolicy(policy: SitePolicy): void {
-  sitePolicies.set(policy.siteId, policy);
+export function setSitePolicy(policy: SitePolicy, config?: OneAgentConfig): void {
+  const key = policyCacheKey(policy.siteId, config);
+  sitePolicies.set(key, { policy, cachedAt: Date.now() });
+}
+
+export function invalidatePolicyCache(siteId?: string, config?: OneAgentConfig): void {
+  if (siteId) {
+    sitePolicies.delete(policyCacheKey(siteId, config));
+  } else {
+    sitePolicies.clear();
+  }
 }
 
 // ─── Capabilities ─────────────────────────────────────────────────
 
+/**
+ * Check if a capability is allowed for a site.
+ *
+ * Note: Capabilities in DISABLED_BY_DEFAULT_CAPABILITIES are always blocked
+ * regardless of site policy. Site policy can only further restrict capabilities,
+ * never enable disabled-by-default ones.
+ */
 export function checkCapability(
   siteId: string,
   capability: CapabilityName,
+  config?: OneAgentConfig,
 ): PolicyResult {
-  if ((V01_DISABLED_CAPABILITIES as readonly string[]).includes(capability)) {
+  if ((DISABLED_BY_DEFAULT_CAPABILITIES as readonly string[]).includes(capability)) {
     return {
       allowed: false,
-      rule: 'capability.v01_disabled',
-      reason: `Capability '${capability}' is disabled in v0.1`,
+      rule: 'capability.disabled_by_default',
+      reason: `Capability '${capability}' is disabled by default`,
     };
   }
 
-  const policy = getSitePolicy(siteId);
+  const policy = getSitePolicy(siteId, config);
   if (policy.capabilities.includes(capability)) {
     return { allowed: true, rule: 'capability.site_allowed' };
   }
@@ -134,7 +167,7 @@ export function checkCapability(
 
 // ─── Domain Allowlist ─────────────────────────────────────────────
 
-function normalizeDomain(domain: string): string {
+export function normalizeDomain(domain: string): string {
   let d = domain.toLowerCase();
   // Strip trailing dots
   while (d.endsWith('.')) {
@@ -154,8 +187,9 @@ function normalizeDomain(domain: string): string {
 export function enforceDomainAllowlist(
   siteId: string,
   targetDomain: string,
+  config?: OneAgentConfig,
 ): PolicyResult {
-  const policy = getSitePolicy(siteId);
+  const policy = getSitePolicy(siteId, config);
   const normalizedTarget = normalizeDomain(targetDomain);
 
   if (policy.domainAllowlist.length === 0) {
@@ -183,20 +217,32 @@ export function enforceDomainAllowlist(
   };
 }
 
-// ─── Private Network Egress Blocking ──────────────────────────────
+export function matchesDomainAllowlist(
+  targetDomain: string,
+  allowlist: string[],
+): boolean {
+  const normalizedTarget = normalizeDomain(targetDomain);
+  return allowlist.some(allowed => {
+    const normalizedAllowed = normalizeDomain(allowed);
+    return normalizedTarget === normalizedAllowed ||
+      normalizedTarget.endsWith('.' + normalizedAllowed);
+  });
+}
 
-const BLOCKED_IPV4_RANGES: string[] = [
-  'private',
-  'loopback',
-  'linkLocal',
-  'carrierGradeNat',
-  'reserved',
-  'benchmarking',
-  'broadcast',
-  'unspecified',
-  'amt',
-  'as112',
-];
+export function sanitizeImplicitAllowlist(domains: string[]): string[] {
+  return domains
+    .filter(d => {
+      if (!d || typeof d !== 'string') return false;
+      if (d.includes('*')) return false;
+      return true;
+    })
+    .map(d => normalizeDomain(d));
+}
+
+// ─── Private Network Egress Blocking ──────────────────────────────
+// IPv4: Whitelist approach — only 'unicast' range is allowed. All other ranges blocked.
+// IPv6: Blacklist approach — specific ranges (loopback, link-local, etc.) are blocked.
+// Implication: New IPv6 range types are allowed by default. Review if new ranges are added.
 
 const BLOCKED_IPV6_RANGES: string[] = [
   'loopback',
@@ -236,8 +282,10 @@ function matchesCidr(addr: ipaddr.IPv4 | ipaddr.IPv6, cidr: string): boolean {
   try {
     const [base, bits] = ipaddr.parseCIDR(cidr);
     return addr.match(base, bits);
-  } catch {
-    return false;
+  } catch (err) {
+    const log = getLogger();
+    log.error({ cidr, addr: addr.toString(), err }, 'CIDR match failed — treating as blocked for safety');
+    return true;  // fail-closed: treat parse error as "matches blocked range"
   }
 }
 
@@ -283,8 +331,16 @@ export function isPublicIp(ip: string): boolean {
 }
 
 const DNS_CACHE = new Map<string, { result: IpValidationResult; expiresAt: number }>();
-const DNS_TTL_MS = 60_000; // 1 minute
+const DNS_CACHE_TTL_MS = 60_000;        // 60s for confirmed blocks
+const DNS_FAILURE_CACHE_TTL_MS = 10_000; // 10s for resolution failures
 
+/**
+ * Resolve a hostname to an IP and validate it is not in a private range.
+ *
+ * Returns the resolved IP so callers can pin the connection to that exact address,
+ * preventing DNS rebinding TOCTOU attacks where a second resolution could return
+ * a different (private) IP.
+ */
 export async function resolveAndValidate(
   hostname: string,
 ): Promise<IpValidationResult> {
@@ -300,7 +356,7 @@ export async function resolveAndValidate(
 
     if (!ipaddr.isValid(address)) {
       const result: IpValidationResult = { ip: address, allowed: false, category: 'invalid' };
-      DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+      DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
       return result;
     }
 
@@ -313,12 +369,13 @@ export async function resolveAndValidate(
     }
 
     const result: IpValidationResult = { ip: address, allowed, category: range };
-    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
     return result;
   } catch (err) {
     log.error({ hostname, err }, 'DNS resolution failed');
     const result: IpValidationResult = { ip: '', allowed: false, category: 'dns_error' };
-    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+    // Use shorter TTL for DNS failures so transient issues resolve quickly
+    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_FAILURE_CACHE_TTL_MS });
     return result;
   }
 }
@@ -436,9 +493,10 @@ export function checkMethodAllowed(
   siteId: string,
   method: string,
   sideEffectClass?: SideEffectClassName,
+  config?: OneAgentConfig,
 ): boolean {
   const upperMethod = method.toUpperCase();
-  const policy = getSitePolicy(siteId);
+  const policy = getSitePolicy(siteId, config);
 
   // GET and HEAD always allowed
   if (upperMethod === 'GET' || upperMethod === 'HEAD') {
@@ -463,10 +521,12 @@ export function checkMethodAllowed(
 export function checkRedirectAllowed(
   siteId: string,
   targetUrl: string,
+  baseUrl?: string,
+  config?: OneAgentConfig,
 ): PolicyResult {
   try {
-    const url = new URL(targetUrl);
-    return enforceDomainAllowlist(siteId, url.hostname);
+    const url = baseUrl ? new URL(targetUrl, baseUrl) : new URL(targetUrl);
+    return enforceDomainAllowlist(siteId, url.hostname, config);
   } catch {
     return {
       allowed: false,

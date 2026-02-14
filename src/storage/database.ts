@@ -12,7 +12,7 @@ const MIGRATIONS: Array<{ filename: string; sql: string }> = [
   {
     filename: '001_initial.sql',
     sql: `
--- OneAgent v0.1 initial schema
+-- OneAgent initial schema
 
 CREATE TABLE IF NOT EXISTS sites (
   id              TEXT PRIMARY KEY,
@@ -164,6 +164,17 @@ CREATE TABLE IF NOT EXISTS webmcp_tools (
 CREATE INDEX IF NOT EXISTS idx_webmcp_tools_site ON webmcp_tools(site_id);
 `,
   },
+  {
+    filename: '003_skill_extra_fields.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN allowed_domains TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE skills ADD COLUMN required_capabilities TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE skills ADD COLUMN parameters TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE skills ADD COLUMN validation TEXT NOT NULL DEFAULT '{"semanticChecks":[],"customInvariants":[]}';
+ALTER TABLE skills ADD COLUMN redaction TEXT NOT NULL DEFAULT '{"piiClassesFound":[],"fieldsRedacted":0}';
+ALTER TABLE skills ADD COLUMN replay_strategy TEXT NOT NULL DEFAULT 'prefer_tier_3';
+`,
+  },
 ];
 
 export class AgentDatabase {
@@ -260,20 +271,42 @@ export class AgentDatabase {
 }
 
 let defaultDb: AgentDatabase | null = null;
+let defaultDbPath: string | null = null;
+let exitHandler: (() => void) | null = null;
 
 export function getDatabase(config?: OneAgentConfig): AgentDatabase {
-  if (!defaultDb) {
-    defaultDb = new AgentDatabase(config);
-    defaultDb.open();
+  const requestedPath = getDbPath(config);
 
-    // Register atexit handler for WAL checkpoint
-    process.on('exit', () => {
-      if (defaultDb) {
-        try { defaultDb.close(); } catch { /* best effort */ }
-        defaultDb = null;
-      }
-    });
+  if (defaultDb) {
+    // Guard: reject if a different config/dataDir tries to reuse the singleton
+    if (defaultDbPath && requestedPath !== defaultDbPath) {
+      throw new Error(
+        `Database singleton already initialized for "${defaultDbPath}". ` +
+        `Cannot reinitialize for "${requestedPath}". ` +
+        `Close the existing database first with closeDatabase().`,
+      );
+    }
+    return defaultDb;
   }
+
+  defaultDb = new AgentDatabase(config);
+  defaultDbPath = requestedPath;
+  defaultDb.open();
+
+  // Register atexit handler for WAL checkpoint — once only, removable on close
+  if (!exitHandler) {
+    exitHandler = () => {
+      if (defaultDb) {
+        try { defaultDb.close(); } catch (err) {
+          try { console.error('[oneagent] Failed to close database on exit:', err); } catch { /* truly best effort */ }
+        }
+        defaultDb = null;
+        defaultDbPath = null;
+      }
+    };
+    process.on('exit', exitHandler);
+  }
+
   return defaultDb;
 }
 
@@ -281,5 +314,11 @@ export function closeDatabase(): void {
   if (defaultDb) {
     defaultDb.close();
     defaultDb = null;
+    defaultDbPath = null;
+  }
+  // Remove the exit listener to prevent accumulation across open/close cycles
+  if (exitHandler) {
+    process.removeListener('exit', exitHandler);
+    exitHandler = null;
   }
 }

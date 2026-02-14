@@ -8,8 +8,9 @@
     "oneagent": "dist/index.js"
   },
   "scripts": {
+    "prebuild": "node scripts/sync-version.js",
     "build": "tsc -p tsconfig.json",
-    "build:v01": "tsc -p tsconfig.v01.json",
+    "prepublishOnly": "node scripts/sync-version.js && npm run build",
     "build:native": "cd native && cargo build --release && cp target/release/liboneagent_native.dylib index.node 2>/dev/null; cp target/release/oneagent_native.dll index.node 2>/dev/null; cp target/release/liboneagent_native.so index.node 2>/dev/null; echo 'Native build complete'",
     "dev": "tsc -w -p tsconfig.json",
     "test": "vitest run",
@@ -19,32 +20,67 @@
     "start": "node dist/index.js",
     "serve": "node dist/index.js serve",
     "setup": "node dist/index.js setup",
-    "doctor": "node dist/index.js doctor"
+    "doctor": "node dist/index.js doctor",
+    "rebuild:native": "bash scripts/rebuild-native.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^11.8.1",
     "commander": "^13.1.0",
+    "fastify": "^5.2.1",
     "ipaddr.js": "^2.2.0",
     "keytar": "^7.9.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
-    "playwright": "^1.50.1",
-    "zod": "^3.24.2",
-    "zod-to-json-schema": "^3.24.3",
-    "fastify": "^5.2.1",
-    "@fastify/swagger": "^9.4.2",
-    "@fastify/swagger-ui": "^5.2.1"
+    "patchright": "1.50.1",
+    "playwright": "1.50.1",
+    "playwright-core": "1.50.1",
+    "pngjs": "^7.0.0",
+    "zod": "^3.24.2"
+  },
+  "optionalDependencies": {
+    "camoufox-js": "^0.9.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.4",
+    "@types/pngjs": "^6.0.0",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   },
   "engines": {
     "node": ">=22.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/oneagent"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser-automation",
+    "api-replay",
+    "playwright",
+    "skill-learning",
+    "oneagent"
+  ],
+  "files": [
+    "dist/",
+    ".claude-plugin/",
+    "commands/",
+    "skills/",
+    "agents/",
+    "hooks/",
+    "prompts/",
+    ".mcp.json",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "scripts/sync-version.js"
+  ]
 }

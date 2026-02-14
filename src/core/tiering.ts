@@ -36,11 +36,12 @@ export interface SemanticResult {
 // ─── Tier State Machine ─────────────────────────────────────────
 
 /**
- * States:
+ * Two tier values (tier_1, tier_3) with optional lock discriminator (manual | auto):
  *   TIER_3_DEFAULT           — initial state, browser-proxied replay
  *   TIER_1_PROMOTED          — direct fetch, fast path
- *   TIER_3_TEMPORARY_DEMOTION — transient failure, can re-promote
- *   TIER_3_PERMANENT_LOCK    — structural incompatibility, never promotes
+ * Lock discriminators (applied via TierLock):
+ *   temporary_demotion       — transient failure, can re-promote
+ *   permanent                — structural incompatibility, never promotes
  */
 
 // ─── Promotion Check ────────────────────────────────────────────
@@ -211,13 +212,8 @@ export function handleFailure(
  * Get the effective tier for a skill, considering tier locks.
  */
 export function getEffectiveTier(skill: SkillSpec): TierStateName {
-  // Permanent lock forces Tier 3
-  if (skill.tierLock?.type === 'permanent') {
-    return TierState.TIER_3_DEFAULT as TierStateName;
-  }
-
-  // Temporary demotion forces Tier 3
-  if (skill.tierLock?.type === 'temporary_demotion') {
+  // Permanent lock or temporary demotion forces Tier 3
+  if (skill.tierLock?.type === 'permanent' || skill.tierLock?.type === 'temporary_demotion') {
     return TierState.TIER_3_DEFAULT as TierStateName;
   }
 

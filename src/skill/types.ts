@@ -21,7 +21,7 @@ export const V01_DEFAULT_CAPABILITIES: CapabilityName[] = [
   Capability.SECRETS_USE,
 ];
 
-export const V01_DISABLED_CAPABILITIES: CapabilityName[] = [
+export const DISABLED_BY_DEFAULT_CAPABILITIES: CapabilityName[] = [
   Capability.BROWSER_MODEL_CONTEXT,
   Capability.EXPORT_SKILLS,
 ];
@@ -159,10 +159,20 @@ export interface SealedModelContextResponse {
 }
 
 // ─── Browser Provider Interface ────────────────────────────────────
+// ─── Snapshot Events ──────────────────────────────────────────────
+export type SnapshotEvent =
+  | { type: 'console'; level: 'error' | 'warning' | 'info' | 'debug'; text: string }
+  | { type: 'download'; filename: string; finished: boolean };
+
 export interface PageSnapshot {
   url: string;
   title: string;
   content: string; // accessibility tree or DOM
+  version?: number;
+  interactiveCount?: number;
+  incremental?: boolean;
+  mode?: 'annotated' | 'full' | 'none';
+  recentEvents?: SnapshotEvent[];
 }
 
 export interface NetworkEntry {
@@ -173,6 +183,7 @@ export interface NetworkEntry {
   responseHeaders: Record<string, string>;
   requestBody?: string;
   responseBody?: string;
+  resourceType?: string;
   timing: {
     startTime: number;
     endTime: number;
@@ -212,6 +223,7 @@ export const ALLOWED_BROWSER_TOOLS = [
   'browser_resize',
   'browser_console_messages',
   'browser_network_requests',
+  'browser_batch_actions',
 ] as const;
 
 export const BLOCKED_BROWSER_TOOLS = [
@@ -315,6 +327,8 @@ export interface AuthRecipe {
 }
 
 // ─── Skill Spec ────────────────────────────────────────────────────
+// Flat interface by design — factory construction and Zod validation are applied at creation boundaries, not enforced by the type itself
+
 export interface SkillParameter {
   name: string;
   type: string;
@@ -349,6 +363,7 @@ export interface SkillSpec {
   sideEffectClass: SideEffectClassName;
   sampleCount: number;
   consecutiveValidations: number;
+  // Typed as number without range constraint — TypeScript lacks built-in ranged numeric types. Values constrained to [0,1] at creation/update boundaries.
   confidence: number;
 
   // HTTP details
@@ -371,6 +386,7 @@ export interface SkillSpec {
   openApiFragment?: string;
   lastVerified?: number;
   lastUsed?: number;
+  // Typed as number without range constraint — TypeScript lacks built-in ranged numeric types. Values constrained to [0,1] at creation/update boundaries.
   successRate: number;
   createdAt: number;
   updatedAt: number;
@@ -422,38 +438,8 @@ export interface PayloadLimits {
 }
 
 // ─── Audit Entry ───────────────────────────────────────────────────
-export interface PolicyDecision {
-  proposed: string;
-  policyResult: 'allowed' | 'blocked' | 'confirmed';
-  policyRule: string;
-  userConfirmed: boolean | null;
-  redactionsApplied: string[];
-}
-
-export interface AuditEntry {
-  id: string;
-  timestamp: number;
-  skillId: string;
-  executionTier: ExecutionTierName;
-  success: boolean;
-  latencyMs: number;
-  errorType?: FailureCauseName;
-  capabilityUsed: CapabilityName;
-  policyDecision: PolicyDecision;
-  previousHash: string;
-  entryHash: string;
-  signature?: string;
-  requestSummary?: {
-    method: string;
-    url: string;
-    // redacted — no raw headers/body
-  };
-  responseSummary?: {
-    status: number;
-    schemaMatch: boolean;
-    // redacted — no raw body
-  };
-}
+// PolicyDecision and AuditEntry types are derived from Zod schemas
+// via z.infer (see Zod Schemas section below) to prevent drift.
 
 // ─── Action Frame ──────────────────────────────────────────────────
 export interface ActionFrame {
@@ -521,6 +507,18 @@ export interface EvidenceReport {
   };
 }
 
+// ─── Browser Engine ──────────────────────────────────────────────
+export type BrowserEngine = 'playwright' | 'patchright' | 'camoufox';
+
+// ─── Browser Feature Flags (config shape) ─────────────────────────
+export interface BrowserFeatureFlagsConfig {
+  snapshotMode?: 'annotated' | 'full' | 'none';
+  incrementalDiffs?: boolean;
+  modalTracking?: boolean;
+  screenshotResize?: boolean;
+  batchActions?: boolean;
+}
+
 // ─── Config ────────────────────────────────────────────────────────
 export interface OneAgentConfig {
   dataDir: string;               // ~/.oneagent
@@ -528,6 +526,10 @@ export interface OneAgentConfig {
   features: {
     webmcp: boolean;             // default: false
     httpTransport: boolean;      // default: false (v0.2+)
+  };
+  browser?: {
+    engine?: BrowserEngine;
+    features?: BrowserFeatureFlagsConfig;
   };
   toolBudget: ToolBudgetConfig;
   payloadLimits: PayloadLimits;
@@ -543,6 +545,11 @@ export interface OneAgentConfig {
   server: {
     network: boolean;            // default: false (v0.2+)
     authToken?: string;          // Required when network=true
+    httpPort?: number;           // REST server port (default 3000, MCP HTTP = httpPort + 1)
+  };
+  daemon: {
+    port: number;
+    autoStart: boolean;
   };
   tempTtlMs: number;            // default: 3600000 (1 hour)
   gcIntervalMs: number;         // default: 900000 (15 minutes)
@@ -561,8 +568,8 @@ export type RedactionMode = 'agent-safe' | 'developer-debug';
 export interface LockedModeStatus {
   locked: boolean;
   reason?: string;
-  availableCapabilities: string[];
-  unavailableCapabilities: string[];
+  availableCapabilities: CapabilityName[];
+  unavailableCapabilities: CapabilityName[];
 }
 
 // ─── Zod Schemas for Validation ────────────────────────────────────
@@ -572,17 +579,27 @@ export const PolicyDecisionSchema = z.object({
   policyRule: z.string(),
   userConfirmed: z.boolean().nullable(),
   redactionsApplied: z.array(z.string()),
+  derivedAllowlist: z.array(z.string()).optional(),
 });
+
+/** Derived from PolicyDecisionSchema — use this instead of a manually written interface. */
+export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 
 export const AuditEntrySchema = z.object({
   id: z.string(),
   timestamp: z.number(),
   skillId: z.string(),
-  executionTier: z.string(),
+  executionTier: z.enum(['signed_agent', 'direct', 'cookie_refresh', 'browser_proxied', 'full_browser']),
   success: z.boolean(),
   latencyMs: z.number(),
-  errorType: z.string().optional(),
-  capabilityUsed: z.string(),
+  errorType: z.enum([
+    'rate_limited', 'endpoint_removed', 'js_computed_field', 'protocol_sensitivity',
+    'signed_payload', 'schema_drift', 'auth_expired', 'cookie_refresh', 'unknown',
+  ]).optional(),
+  capabilityUsed: z.enum([
+    'net.fetch.direct', 'net.fetch.browserProxied', 'browser.automation',
+    'browser.modelContext', 'storage.write', 'export.skills', 'secrets.use',
+  ]),
   policyDecision: PolicyDecisionSchema,
   previousHash: z.string(),
   entryHash: z.string(),
@@ -596,6 +613,9 @@ export const AuditEntrySchema = z.object({
     schemaMatch: z.boolean(),
   }).optional(),
 });
+
+/** Derived from AuditEntrySchema — use this instead of a manually written interface. */
+export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 
 // ─── Path Risk Patterns ────────────────────────────────────────────
 export const DESTRUCTIVE_GET_PATTERNS = [

@@ -1,6 +1,7 @@
 import type { LockedModeStatus } from '../skill/types.js';
+import { Capability } from '../skill/types.js';
 
-const SERVICE_NAME = 'oneagent';
+export const SERVICE_NAME = 'oneagent';
 
 interface Keytar {
   setPassword(service: string, account: string, password: string): Promise<void>;
@@ -12,6 +13,20 @@ interface Keytar {
 let keytarModule: Keytar | null = null;
 let keytarLoadFailed = false;
 let keytarLoadError: string | null = null;
+
+const KEYTAR_TIMEOUT_MS = 2000;
+
+function withKeytarTimeout<T>(op: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Keytar operation '${label}' timed out after ${KEYTAR_TIMEOUT_MS}ms`));
+    }, KEYTAR_TIMEOUT_MS);
+    op.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
 
 async function loadKeytar(): Promise<Keytar> {
   if (keytarModule) return keytarModule;
@@ -51,22 +66,22 @@ function siteKey(siteId: string, type: string): string {
 
 export async function store(key: string, value: string): Promise<void> {
   const keytar = await loadKeytar();
-  await keytar.setPassword(SERVICE_NAME, key, value);
+  await withKeytarTimeout(keytar.setPassword(SERVICE_NAME, key, value), 'store');
 }
 
 export async function retrieve(key: string): Promise<string | null> {
   const keytar = await loadKeytar();
-  return keytar.getPassword(SERVICE_NAME, key);
+  return withKeytarTimeout(keytar.getPassword(SERVICE_NAME, key), 'retrieve');
 }
 
 export async function remove(key: string): Promise<boolean> {
   const keytar = await loadKeytar();
-  return keytar.deletePassword(SERVICE_NAME, key);
+  return withKeytarTimeout(keytar.deletePassword(SERVICE_NAME, key), 'remove');
 }
 
 export async function exists(key: string): Promise<boolean> {
   const keytar = await loadKeytar();
-  const val = await keytar.getPassword(SERVICE_NAME, key);
+  const val = await withKeytarTimeout(keytar.getPassword(SERVICE_NAME, key), 'exists');
   return val !== null;
 }
 
@@ -88,20 +103,31 @@ export async function getLockedModeStatus(): Promise<LockedModeStatus> {
 
   try {
     const keytar = await loadKeytar();
-    await keytar.setPassword(SERVICE_NAME, testKey, testValue);
-    await keytar.deletePassword(SERVICE_NAME, testKey);
+    await withKeytarTimeout(keytar.setPassword(SERVICE_NAME, testKey, testValue), 'lock-test-set');
+    await withKeytarTimeout(keytar.deletePassword(SERVICE_NAME, testKey), 'lock-test-del');
 
     return {
       locked: false,
-      availableCapabilities: ['secrets.use', 'storage.write', 'net.fetch.direct', 'net.fetch.browserProxied', 'browser.automation'],
+      availableCapabilities: [
+        Capability.SECRETS_USE,
+        Capability.STORAGE_WRITE,
+        Capability.NET_FETCH_DIRECT,
+        Capability.NET_FETCH_BROWSER_PROXIED,
+        Capability.BROWSER_AUTOMATION,
+      ],
       unavailableCapabilities: [],
     };
   } catch (err) {
     return {
       locked: true,
       reason: `Keychain unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      availableCapabilities: ['storage.write', 'net.fetch.direct', 'net.fetch.browserProxied', 'browser.automation'],
-      unavailableCapabilities: ['secrets.use'],
+      availableCapabilities: [
+        Capability.STORAGE_WRITE,
+        Capability.NET_FETCH_DIRECT,
+        Capability.NET_FETCH_BROWSER_PROXIED,
+        Capability.BROWSER_AUTOMATION,
+      ],
+      unavailableCapabilities: [Capability.SECRETS_USE],
     };
   }
 }

@@ -1,6 +1,14 @@
 import type { AgentDatabase } from './database.js';
 import type { AuthType, AuthRecipe } from '../skill/types.js';
 
+const VALID_AUTH_TYPES = new Set(['bearer', 'cookie', 'api_key', 'oauth2']);
+function validateAuthType(value: string): AuthType {
+  if (!VALID_AUTH_TYPES.has(value)) {
+    throw new Error(`Invalid auth type from database: "${value}". Expected one of: ${[...VALID_AUTH_TYPES].join(', ')}`);
+  }
+  return value as AuthType;
+}
+
 export interface AuthFlow {
   id: string;
   siteId: string;
@@ -25,7 +33,7 @@ function rowToAuthFlow(row: AuthFlowRow): AuthFlow {
   return {
     id: row.id,
     siteId: row.site_id,
-    type: row.type as AuthType,
+    type: validateAuthType(row.type),
     recipe: row.recipe ? JSON.parse(row.recipe) as AuthRecipe : null,
     tokenKeychainRef: row.token_keychain_ref,
     tokenExpiresAt: row.token_expires_at,

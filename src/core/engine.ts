@@ -22,6 +22,10 @@ import { ToolBudgetTracker } from '../replay/tool-budget.js';
 import { RateLimiter } from '../automation/rate-limiter.js';
 import { refreshCookies } from '../automation/cookie-refresh.js';
 import { SideEffectClass, FailureCause } from '../skill/types.js';
+import type { BrowserProvider } from '../skill/types.js';
+import { PlaywrightMcpAdapter } from '../browser/playwright-mcp-adapter.js';
+import { getFlags } from '../browser/feature-flags.js';
+import { BrowserManager } from '../browser/manager.js';
 import { detectAuth } from '../capture/auth-detector.js';
 import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
@@ -63,45 +67,21 @@ export interface SkillExecutionResult {
   latencyMs: number;
 }
 
-// ─── Persisted Session State ──────────────────────────────────────
-
-interface PersistedSessionState {
-  sessionId: string;
-  siteId: string;
-  url: string;
-  mode: EngineMode;
-  currentRecording: RecordingInfo | null;
-}
-
-function getSessionStatePath(config: OneAgentConfig): string {
-  return path.join(config.dataDir, 'session.json');
-}
-
-function loadSessionState(config: OneAgentConfig): PersistedSessionState | null {
-  const statePath = getSessionStatePath(config);
+/**
+ * Remove stale session.json left over from pre-daemon versions.
+ * Logs a warning if one is found.
+ */
+export function removeStaleSessionJson(config: OneAgentConfig): void {
+  const statePath = path.join(config.dataDir, 'session.json');
   try {
     if (fs.existsSync(statePath)) {
-      const raw = fs.readFileSync(statePath, 'utf-8');
-      return JSON.parse(raw) as PersistedSessionState;
+      const log = getLogger();
+      log.warn({ path: statePath }, 'Found stale session.json from pre-daemon version — removing');
+      fs.unlinkSync(statePath);
     }
-  } catch {
-    // Corrupted or unreadable state file
-  }
-  return null;
-}
-
-function saveSessionState(config: OneAgentConfig, state: PersistedSessionState | null): void {
-  const statePath = getSessionStatePath(config);
-  try {
-    if (state === null) {
-      if (fs.existsSync(statePath)) {
-        fs.unlinkSync(statePath);
-      }
-    } else {
-      fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf-8');
-    }
-  } catch {
-    // Best effort
+  } catch (err) {
+    const rmLog = getLogger();
+    rmLog.debug({ err }, 'Failed to remove stale session.json — best effort');
   }
 }
 
@@ -118,33 +98,15 @@ export class Engine {
   private skillRepo: SkillRepository;
   private metricsRepo: MetricsRepository;
   private auditLog: AuditLog;
-  private hmacKeyReady: Promise<void>;
+  private hmacKeyReady: Promise<void> | null = null;
   private budgetTracker: ToolBudgetTracker;
   private rateLimiter: RateLimiter;
+  private isClosing = false;
 
   constructor(config: OneAgentConfig) {
     this.config = config;
-    this.sessionManager = new SessionManager();
+    this.sessionManager = new SessionManager(new BrowserManager(config));
     this.startedAt = Date.now();
-
-    // Restore persisted session state for cross-process CLI continuity
-    const persisted = loadSessionState(config);
-    if (persisted) {
-      this.activeSessionId = persisted.sessionId;
-      this.mode = persisted.mode;
-      this.currentRecording = persisted.currentRecording;
-
-      // Rehydrate session manager from persisted state
-      if (persisted.sessionId) {
-        this.sessionManager.rehydrate({
-          id: persisted.sessionId,
-          siteId: persisted.siteId,
-          url: persisted.url,
-          startedAt: Date.now(), // approximate
-          browserContextId: '', // will be re-established on browser ops
-        });
-      }
-    }
 
     const db = getDatabase(config);
     this.skillRepo = new SkillRepository(db);
@@ -153,32 +115,12 @@ export class Engine {
     this.budgetTracker = new ToolBudgetTracker(config);
     this.rateLimiter = new RateLimiter();
 
-    // Initialize audit HMAC key from keychain — awaited before skill execution
-    this.hmacKeyReady = this.auditLog.initHmacKey().catch((err) => {
-      this.log.warn({ err }, 'Failed to initialize audit HMAC key — using fallback');
-    });
+    // HMAC key init is deferred to first skill execution (lazy) to avoid
+    // blocking constructor and leaking promises when no skills are executed.
   }
 
   getSessionManager(): SessionManager {
     return this.sessionManager;
-  }
-
-  private persistState(): void {
-    if (this.mode === 'idle') {
-      saveSessionState(this.config, null);
-      return;
-    }
-
-    const sessions = this.sessionManager.listActive();
-    const session = sessions.find(s => s.id === this.activeSessionId);
-
-    saveSessionState(this.config, {
-      sessionId: this.activeSessionId ?? '',
-      siteId: session?.siteId ?? '',
-      url: session?.url ?? '',
-      mode: this.mode,
-      currentRecording: this.currentRecording,
-    });
   }
 
   async explore(url: string): Promise<ExploreResult> {
@@ -186,13 +128,13 @@ export class Engine {
     const parsedUrl = new URL(url);
     const siteId = parsedUrl.hostname;
 
-    const capCheck = checkCapability(siteId, Capability.BROWSER_AUTOMATION);
+    const capCheck = checkCapability(siteId, Capability.BROWSER_AUTOMATION, this.config);
     if (!capCheck.allowed) {
       throw new Error(`Policy blocked: ${capCheck.reason}`);
     }
 
     // Validate domain
-    const domainCheck = enforceDomainAllowlist(siteId, parsedUrl.hostname);
+    const domainCheck = enforceDomainAllowlist(siteId, parsedUrl.hostname, this.config);
     if (!domainCheck.allowed) {
       this.log.debug(
         { siteId, domain: parsedUrl.hostname },
@@ -208,7 +150,6 @@ export class Engine {
       this.activeSessionId = session.id;
       this.mode = 'exploring';
 
-      this.persistState();
       this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
       return {
@@ -252,7 +193,6 @@ export class Engine {
       };
 
       this.mode = 'recording';
-      this.persistState();
       this.log.info(
         { recordingId: this.currentRecording.id, name, siteId: session.siteId },
         'Recording started',
@@ -274,25 +214,52 @@ export class Engine {
     const recording = { ...this.currentRecording };
     this.currentRecording = null;
     this.mode = 'exploring';
-    this.persistState();
 
     this.log.info(
       { recordingId: recording.id, name: recording.name, requests: recording.requestCount },
       'Recording stopped',
     );
 
-    // Run capture pipeline on the recorded HAR data
-    await this.runCapturePipeline(recording);
+    const browserManager = this.sessionManager.getBrowserManager();
+    const siteId = recording.siteId;
+
+    // 1. Capture HAR path BEFORE closing context
+    const harPath = browserManager.getHarPath(siteId);
+
+    // 2. Close context -> flushes HAR to disk
+    await browserManager.closeContext(siteId);
+
+    // 3. Run capture pipeline with explicit HAR path
+    let pipelineError: Error | undefined;
+    try {
+      await this.runCapturePipeline(recording, harPath);
+    } catch (err) {
+      pipelineError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    // 4. Re-open context so explore mode remains usable (skip during shutdown)
+    if (!this.isClosing) {
+      try {
+        await browserManager.getOrCreateContext(siteId);
+        this.log.info({ siteId }, 'Browser context re-opened after recording stop');
+      } catch (err) {
+        this.log.warn({ siteId, err }, 'Failed to re-open browser context after recording');
+      }
+    }
+
+    if (pipelineError) {
+      throw new Error(`Recording stopped but capture pipeline failed: ${pipelineError.message}`);
+    }
 
     return recording;
   }
 
-  private async runCapturePipeline(recording: RecordingInfo): Promise<void> {
+  private async runCapturePipeline(recording: RecordingInfo, explicitHarPath?: string): Promise<void> {
     try {
       this.log.info({ recordingId: recording.id, siteId: recording.siteId }, 'Running capture pipeline');
 
-      // Load HAR file from the browser manager via session manager
-      const harPath = this.sessionManager.getHarPath(recording.siteId);
+      // Use explicit harPath if provided, otherwise look up from session manager
+      const harPath = explicitHarPath ?? this.sessionManager.getHarPath(recording.siteId);
       if (!harPath || !fs.existsSync(harPath)) {
         this.log.warn({ recordingId: recording.id }, 'No HAR file available for capture pipeline');
         return;
@@ -368,6 +335,7 @@ export class Engine {
       );
     } catch (err) {
       this.log.error({ recordingId: recording.id, err }, 'Capture pipeline failed');
+      throw err;
     }
   }
 
@@ -377,7 +345,15 @@ export class Engine {
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
-    // Ensure audit HMAC key is initialized before executing any skill
+    // Lazily initialize audit HMAC key on first skill execution
+    if (!this.hmacKeyReady) {
+      this.hmacKeyReady = this.auditLog.initHmacKey().catch((err) => {
+        this.log.warn({ err }, 'Failed to initialize audit HMAC key');
+        if (this.config.audit?.strictMode) {
+          throw new Error(`Audit HMAC key initialization failed in strict mode: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      });
+    }
     await this.hmacKeyReady;
 
     this.log.info({ skillId, params }, 'Executing skill');
@@ -393,7 +369,7 @@ export class Engine {
     }
 
     // 2. Apply policy checks
-    const methodAllowed = checkMethodAllowed(skill.siteId, skill.method, skill.sideEffectClass);
+    const methodAllowed = checkMethodAllowed(skill.siteId, skill.method, skill.sideEffectClass, this.config);
     if (!methodAllowed) {
       return {
         success: false,
@@ -434,10 +410,28 @@ export class Engine {
       redactionsApplied: [],
     };
 
-    // Load domain allowlist from policy into budget tracker
-    const policy = getSitePolicy(skill.siteId);
+    // Load domain allowlist into budget tracker (reset every execution to avoid cross-site leaks)
+    const policy = getSitePolicy(skill.siteId, this.config);
     if (policy.domainAllowlist.length > 0) {
       this.budgetTracker.setDomainAllowlist(policy.domainAllowlist);
+    } else {
+      // Use implicit allowlist from skill's declared domains + site host
+      const implicitDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
+      this.budgetTracker.setDomainAllowlist(implicitDomains);
+    }
+
+    // Wire live browser context into executor if available
+    let browserProvider: BrowserProvider | undefined;
+    const browserManager = this.sessionManager.getBrowserManager();
+    if (browserManager.hasContext(skill.siteId)) {
+      const context = await browserManager.getOrCreateContext(skill.siteId);
+      const pages = context.pages();
+      const page = pages[0] ?? await context.newPage();
+      const sitePolicy = getSitePolicy(skill.siteId, this.config);
+      const domains = sitePolicy.domainAllowlist.length > 0
+        ? sitePolicy.domainAllowlist
+        : [...new Set([...skill.allowedDomains, skill.siteId])];
+      browserProvider = new PlaywrightMcpAdapter(page, domains, { flags: getFlags(this.config), capabilities: browserManager.getCapabilities() ?? undefined });
     }
 
     const executorOptions = {
@@ -445,6 +439,8 @@ export class Engine {
       budgetTracker: this.budgetTracker,
       metricsRepo: this.metricsRepo,
       policyDecision,
+      browserProvider,
+      config: this.config,
     };
 
     // 5. Execute — use retryWithEscalation for read-only skills
@@ -472,7 +468,7 @@ export class Engine {
         this.log.info({ skillId, siteId: skill.siteId }, 'Triggering cookie refresh');
         // Intentionally fire-and-forget: cookie refresh is a background recovery action
         // that should not block the current response. Failures are logged.
-        refreshCookies(skill.siteId).catch((err) => {
+        refreshCookies(skill.siteId, undefined, browserManager).catch((err) => {
           this.log.warn({ skillId, err }, 'Cookie refresh failed');
         });
       }
@@ -510,15 +506,43 @@ export class Engine {
   }
 
   async close(): Promise<void> {
-    if (this.currentRecording) {
-      await this.stopRecording();
-    }
-    if (this.activeSessionId) {
-      await this.sessionManager.close(this.activeSessionId);
+    this.isClosing = true;
+    const CLOSE_TIMEOUT_MS = 8000;
+
+    // Wrap close operations with a timeout to prevent hangs from unresponsive browser.
+    // Each step is wrapped individually so a failing stopRecording() doesn't skip sessionManager.close().
+    const closeOps = async () => {
+      if (this.currentRecording) {
+        try {
+          await this.stopRecording();
+        } catch (err) {
+          this.log.warn({ err }, 'stopRecording() failed during close — continuing cleanup');
+          this.currentRecording = null;
+        }
+      }
+      if (this.activeSessionId) {
+        await this.sessionManager.close(this.activeSessionId);
+        this.activeSessionId = null;
+      }
+    };
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        closeOps(),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Engine close timed out')), CLOSE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (err) {
+      this.log.warn({ err }, 'Engine close timed out or failed — forcing cleanup');
       this.activeSessionId = null;
+      this.currentRecording = null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
+
     this.mode = 'idle';
-    this.persistState();
     this.log.info('Engine closed');
   }
 }

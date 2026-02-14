@@ -1,4 +1,6 @@
 import * as crypto from 'node:crypto';
+import { getLogger } from '../core/logger.js';
+import { withTimeout } from '../core/utils.js';
 import type { RedactionMode } from '../skill/types.js';
 import { retrieve, store } from './secrets.js';
 
@@ -8,14 +10,33 @@ let cachedSalt: string | null = null;
 async function getSalt(): Promise<string> {
   if (cachedSalt) return cachedSalt;
 
-  const stored = await retrieve(SALT_KEY);
-  if (stored) {
-    cachedSalt = stored;
-    return stored;
+  try {
+    const stored = await retrieve(SALT_KEY);
+    if (stored) {
+      cachedSalt = stored;
+      return stored;
+    }
+  } catch (err) {
+    const redactorLog = getLogger();
+    redactorLog.warn(
+      { err },
+      'Keychain unavailable for redaction salt — using ephemeral salt. HMAC redaction will not be stable across restarts.',
+    );
+    const ephemeral = crypto.randomBytes(32).toString('hex');
+    cachedSalt = ephemeral;
+    return ephemeral;
   }
 
   const newSalt = crypto.randomBytes(32).toString('hex');
-  await store(SALT_KEY, newSalt);
+  try {
+    await store(SALT_KEY, newSalt);
+  } catch (err) {
+    const redactorLog = getLogger();
+    redactorLog.warn(
+      { err },
+      'Failed to persist redaction salt to keychain — salt is cached in memory only.',
+    );
+  }
   cachedSalt = newSalt;
   return newSalt;
 }
@@ -24,13 +45,13 @@ async function getSalt(): Promise<string> {
 
 const PII_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: 'email', pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g },
-  { name: 'phone', pattern: /(\+?1[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/g },
+  { name: 'phone', pattern: /(?:\+\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}/g },
   { name: 'uuid', pattern: /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi },
   { name: 'mongodb_objectid', pattern: /\b[0-9a-f]{24}\b/gi },
   { name: 'jwt', pattern: /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
   { name: 'bearer_token', pattern: /Bearer\s+[A-Za-z0-9_\-.~+/]+=*/gi },
   { name: 'aws_key', pattern: /(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/g },
-  { name: 'aws_secret', pattern: /[0-9a-zA-Z/+]{40}/g },
+  { name: 'aws_secret', pattern: /(?:(?<=AKIA[A-Z0-9]{12,}\s*[:=]\s*['"]?)|(?<=aws_secret_access_key\s*[:=]\s*['"]?))[0-9a-zA-Z/+=]{40}/gi },
   { name: 'api_key', pattern: /(?:api[_-]?key|apikey|api_secret|access_token|secret_key)\s*[:=]\s*['"]?([A-Za-z0-9_\-.]{16,})['"]?/gi },
   { name: 'credit_card', pattern: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b/g },
   { name: 'ssn', pattern: /\b\d{3}-\d{2}-\d{4}\b/g },
@@ -67,24 +88,15 @@ function maskValue(value: string): string {
 }
 
 // ─── Timeout Helper ──────────────────────────────────────────────────
-
-function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Redaction timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    fn().then(
-      result => { clearTimeout(timer); resolve(result); },
-      err => { clearTimeout(timer); reject(err); },
-    );
-  });
-}
+// withTimeout imported from core/utils.ts
+// Note: The original local version accepted a thunk () => Promise<T>.
+// The canonical version accepts a Promise<T> directly. Callers now
+// pass fn() instead of fn.
 
 // ─── Public API ──────────────────────────────────────────────────────
 
 export async function redactString(input: string, timeoutMs = 10000): Promise<string> {
-  return withTimeout(async () => {
+  return withTimeout((async () => {
     if (isSafeValue(input)) return input;
 
     const piiType = containsPii(input);
@@ -98,14 +110,14 @@ export async function redactString(input: string, timeoutMs = 10000): Promise<st
     }
 
     return input;
-  }, timeoutMs);
+  })(), timeoutMs, 'Redaction');
 }
 
 export async function redactHeaders(
   headers: Record<string, string>,
   timeoutMs = 10000,
 ): Promise<Record<string, string>> {
-  return withTimeout(async () => {
+  return withTimeout((async () => {
     const result: Record<string, string> = {};
     const sensitiveHeaders = new Set([
       'authorization', 'cookie', 'set-cookie',
@@ -122,7 +134,7 @@ export async function redactHeaders(
       }
     }
     return result;
-  }, timeoutMs);
+  })(), timeoutMs, 'Redaction');
 }
 
 export async function redactBody(
@@ -131,7 +143,7 @@ export async function redactBody(
 ): Promise<string | undefined> {
   if (!body) return body;
 
-  return withTimeout(async () => {
+  return withTimeout((async () => {
     try {
       const parsed = JSON.parse(body);
       const redacted = await redactObject(parsed);
@@ -140,7 +152,7 @@ export async function redactBody(
       // Not JSON, redact as string
       return redactString(body, timeoutMs);
     }
-  }, timeoutMs);
+  })(), timeoutMs, 'Redaction');
 }
 
 const SENSITIVE_FIELD_NAMES = new Set([
@@ -201,7 +213,7 @@ export async function redactHarEntry(
   entry: HarEntry,
   timeoutMs = 10000,
 ): Promise<HarEntry> {
-  return withTimeout(async () => {
+  return withTimeout((async () => {
     const result: HarEntry = {};
 
     if (entry.request) {
@@ -242,7 +254,7 @@ export async function redactHarEntry(
     }
 
     return result;
-  }, timeoutMs);
+  })(), timeoutMs, 'Redaction');
 }
 
 async function redactUrlParams(url: string): Promise<string> {
@@ -262,7 +274,7 @@ export async function redactForOutput(
   mode: RedactionMode,
   timeoutMs = 10000,
 ): Promise<unknown> {
-  return withTimeout(async () => {
+  return withTimeout((async () => {
     if (mode === 'agent-safe') {
       // Minimal redaction: only schema-validated output, all PII stripped
       return redactObject(data);
@@ -290,5 +302,5 @@ export async function redactForOutput(
     }
 
     return data;
-  }, timeoutMs);
+  })(), timeoutMs, 'Redaction');
 }

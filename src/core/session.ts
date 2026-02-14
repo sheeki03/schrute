@@ -26,9 +26,9 @@ export class SessionManager {
   async create(siteId: string, url: string): Promise<SessionInfo> {
     const contextId = randomUUID();
 
-    // Create a browser context for this site via BrowserManager.
-    // In headless environments (CI, tests) this may fail gracefully —
-    // the session is still created and usable for non-browser tiers.
+    // Design choice: session continues without browser context because some operations
+    // (e.g., direct fetch skill execution) don't require a browser. Callers that need
+    // a browser context should check getBrowserManager().hasContext() before proceeding.
     try {
       await this.browserManager.getOrCreateContext(siteId);
       this.log.info({ siteId }, 'Browser context created');

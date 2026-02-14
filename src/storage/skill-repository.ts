@@ -1,3 +1,4 @@
+import { getLogger } from '../core/logger.js';
 import type { AgentDatabase } from './database.js';
 import type {
   SkillSpec,
@@ -8,7 +9,104 @@ import type {
   AuthType,
   RequestChain,
   ParameterEvidence,
+  CapabilityName,
+  SkillParameter,
+  SkillValidation,
+  SkillRedactionInfo,
+  ReplayStrategy,
 } from '../skill/types.js';
+import {
+  SkillStatus,
+  TierState,
+  SideEffectClass,
+} from '../skill/types.js';
+
+// ─── Validators for union types from DB rows ──────────────────────
+const VALID_SKILL_STATUSES: readonly string[] = Object.values(SkillStatus);
+function validateSkillStatus(value: string): SkillStatusName {
+  if (!VALID_SKILL_STATUSES.includes(value)) {
+    throw new Error(`Invalid skill status from database: "${value}". Expected one of: ${VALID_SKILL_STATUSES.join(', ')}`);
+  }
+  return value as SkillStatusName;
+}
+
+const VALID_TIER_STATES: readonly string[] = Object.values(TierState);
+function validateTierState(value: string): TierStateName {
+  if (!VALID_TIER_STATES.includes(value)) {
+    throw new Error(`Invalid tier state from database: "${value}". Expected one of: ${VALID_TIER_STATES.join(', ')}`);
+  }
+  return value as TierStateName;
+}
+
+const VALID_SIDE_EFFECT_CLASSES: readonly string[] = Object.values(SideEffectClass);
+function validateSideEffectClass(value: string): SideEffectClassName {
+  if (!VALID_SIDE_EFFECT_CLASSES.includes(value)) {
+    throw new Error(`Invalid side effect class from database: "${value}". Expected one of: ${VALID_SIDE_EFFECT_CLASSES.join(', ')}`);
+  }
+  return value as SideEffectClassName;
+}
+
+const VALID_AUTH_TYPES = new Set(['bearer', 'cookie', 'api_key', 'oauth2']);
+function validateAuthType(value: string): AuthType {
+  if (!VALID_AUTH_TYPES.has(value)) {
+    throw new Error(`Invalid auth type from database: "${value}". Expected one of: ${[...VALID_AUTH_TYPES].join(', ')}`);
+  }
+  return value as AuthType;
+}
+
+const VALID_REPLAY_STRATEGIES = new Set(['prefer_tier_1', 'prefer_tier_3', 'tier_3_only']);
+function validateReplayStrategy(value: string): ReplayStrategy {
+  if (!VALID_REPLAY_STRATEGIES.has(value)) {
+    throw new Error(`Invalid replay strategy from database: "${value}". Expected one of: ${[...VALID_REPLAY_STRATEGIES].join(', ')}`);
+  }
+  return value as ReplayStrategy;
+}
+
+// ─── Shape assertions for JSON-parsed types ────────────────────────
+function assertTierLockShape(value: unknown): TierLock {
+  if (value === null) return null;
+  if (typeof value !== 'object' || value === null) {
+    throw new Error(`Invalid TierLock shape: expected object or null, got ${typeof value}`);
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.type === 'permanent') {
+    if (typeof obj.reason !== 'string' || typeof obj.evidence !== 'string') {
+      throw new Error('Invalid PermanentTierLock: missing required fields "reason" and "evidence"');
+    }
+    return obj as unknown as TierLock;
+  }
+  if (obj.type === 'temporary_demotion') {
+    if (typeof obj.since !== 'string' || typeof obj.demotions !== 'number') {
+      throw new Error('Invalid TemporaryDemotion: missing required fields "since" and "demotions"');
+    }
+    return obj as unknown as TierLock;
+  }
+  throw new Error(`Invalid TierLock: unknown type "${String(obj.type)}"`);
+}
+
+function assertParameterEvidenceArrayShape(value: unknown): ParameterEvidence[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid ParameterEvidence[]: expected array, got ${typeof value}`);
+  }
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (typeof item !== 'object' || item === null || typeof item.fieldPath !== 'string' || typeof item.classification !== 'string') {
+      throw new Error(`Invalid ParameterEvidence at index ${i}: missing required fields "fieldPath" and "classification"`);
+    }
+  }
+  return value as ParameterEvidence[];
+}
+
+function assertRequestChainShape(value: unknown): RequestChain {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error(`Invalid RequestChain shape: expected object, got ${typeof value}`);
+  }
+  const obj = value as Record<string, unknown>;
+  if (!Array.isArray(obj.steps) || typeof obj.canReplayWithCookiesOnly !== 'boolean') {
+    throw new Error('Invalid RequestChain: missing required fields "steps" (array) and "canReplayWithCookiesOnly" (boolean)');
+  }
+  return value as RequestChain;
+}
 
 interface SkillRow {
   id: string;
@@ -40,13 +138,26 @@ interface SkillRow {
   openapi_fragment: string | null;
   created_at: number;
   updated_at: number;
+  allowed_domains: string;
+  required_capabilities: string;
+  parameters: string;
+  validation: string;
+  redaction: string;
+  replay_strategy: string;
 }
 
-function parseJson<T>(value: string | null, fallback: T): T {
+const log = getLogger();
+
+function parseJson<T>(value: string | null, fallback: T, shapeValidator?: (parsed: unknown) => T): T {
   if (!value) return fallback;
   try {
-    return JSON.parse(value) as T;
-  } catch {
+    const parsed = JSON.parse(value);
+    if (shapeValidator) {
+      return shapeValidator(parsed);
+    }
+    return parsed as T;
+  } catch (err) {
+    log.warn({ value: value.slice(0, 100), err }, 'Failed to parse JSON from database column, using fallback');
     return fallback;
   }
 }
@@ -57,24 +168,24 @@ function rowToSkill(row: SkillRow): SkillSpec {
     siteId: row.site_id,
     name: row.name,
     version: row.version,
-    status: row.status as SkillStatusName,
+    status: validateSkillStatus(row.status),
     description: row.description ?? undefined,
     method: row.method,
     pathTemplate: row.path_template,
     inputSchema: parseJson<Record<string, unknown>>(row.input_schema, {}),
     outputSchema: row.output_schema ? parseJson<Record<string, unknown>>(row.output_schema, {}) : undefined,
-    authType: (row.auth_type as AuthType) ?? undefined,
+    authType: row.auth_type ? validateAuthType(row.auth_type) : undefined,
     requiredHeaders: row.required_headers ? parseJson<Record<string, string>>(row.required_headers, {}) : undefined,
     dynamicHeaders: row.dynamic_headers ? parseJson<Record<string, string>>(row.dynamic_headers, {}) : undefined,
-    sideEffectClass: row.side_effect_class as SideEffectClassName,
+    sideEffectClass: validateSideEffectClass(row.side_effect_class),
     isComposite: row.is_composite === 1,
-    chainSpec: row.chain_spec ? parseJson<RequestChain>(row.chain_spec, undefined as unknown as RequestChain) : undefined,
-    currentTier: row.current_tier as TierStateName,
-    tierLock: parseJson<TierLock>(row.tier_lock, null),
+    chainSpec: row.chain_spec ? parseJson<RequestChain>(row.chain_spec, undefined as unknown as RequestChain, assertRequestChainShape) : undefined,
+    currentTier: validateTierState(row.current_tier),
+    tierLock: parseJson<TierLock>(row.tier_lock, null, assertTierLockShape),
     confidence: row.confidence,
     consecutiveValidations: row.consecutive_validations,
     sampleCount: row.sample_count,
-    parameterEvidence: row.parameter_evidence ? parseJson<ParameterEvidence[]>(row.parameter_evidence, []) : undefined,
+    parameterEvidence: row.parameter_evidence ? parseJson<ParameterEvidence[]>(row.parameter_evidence, [], assertParameterEvidenceArrayShape) : undefined,
     lastVerified: row.last_verified ?? undefined,
     lastUsed: row.last_used ?? undefined,
     successRate: row.success_rate,
@@ -82,13 +193,12 @@ function rowToSkill(row: SkillRow): SkillSpec {
     openApiFragment: row.openapi_fragment ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    // Defaults for fields not stored in DB
-    allowedDomains: [],
-    requiredCapabilities: [],
-    parameters: [],
-    validation: { semanticChecks: [], customInvariants: [] },
-    redaction: { piiClassesFound: [], fieldsRedacted: 0 },
-    replayStrategy: 'prefer_tier_3',
+    allowedDomains: parseJson<string[]>(row.allowed_domains, []),
+    requiredCapabilities: parseJson<CapabilityName[]>(row.required_capabilities, []),
+    parameters: parseJson<SkillParameter[]>(row.parameters, []),
+    validation: parseJson<SkillValidation>(row.validation, { semanticChecks: [], customInvariants: [] }),
+    redaction: parseJson<SkillRedactionInfo>(row.redaction, { piiClassesFound: [], fieldsRedacted: 0 }),
+    replayStrategy: validateReplayStrategy(row.replay_strategy ?? 'prefer_tier_3'),
   };
 }
 
@@ -103,8 +213,9 @@ export class SkillRepository {
         side_effect_class, is_composite, chain_spec, current_tier, tier_lock,
         confidence, consecutive_validations, sample_count, parameter_evidence,
         last_verified, last_used, success_rate, skill_md, openapi_fragment,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        created_at, updated_at,
+        allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       skill.id,
       skill.siteId,
       skill.name,
@@ -134,6 +245,12 @@ export class SkillRepository {
       skill.openApiFragment ?? null,
       skill.createdAt,
       skill.updatedAt,
+      JSON.stringify(skill.allowedDomains ?? []),
+      JSON.stringify(skill.requiredCapabilities ?? []),
+      JSON.stringify(skill.parameters ?? []),
+      JSON.stringify(skill.validation ?? { semanticChecks: [], customInvariants: [] }),
+      JSON.stringify(skill.redaction ?? { piiClassesFound: [], fieldsRedacted: 0 }),
+      skill.replayStrategy ?? 'prefer_tier_3',
     );
   }
 
@@ -157,6 +274,12 @@ export class SkillRepository {
 
   getByStatus(status: SkillStatusName): SkillSpec[] {
     const rows = this.db.all<SkillRow>('SELECT * FROM skills WHERE status = ? ORDER BY updated_at DESC', status);
+    return rows.map(rowToSkill);
+  }
+
+  /** Return all skills across all statuses. */
+  getAll(): SkillSpec[] {
+    const rows = this.db.all<SkillRow>('SELECT * FROM skills ORDER BY updated_at DESC');
     return rows.map(rowToSkill);
   }
 
@@ -189,6 +312,12 @@ export class SkillRepository {
     if (updates.successRate !== undefined) { fields.push('success_rate = ?'); values.push(updates.successRate); }
     if (updates.skillMd !== undefined) { fields.push('skill_md = ?'); values.push(updates.skillMd); }
     if (updates.openApiFragment !== undefined) { fields.push('openapi_fragment = ?'); values.push(updates.openApiFragment); }
+    if (updates.allowedDomains !== undefined) { fields.push('allowed_domains = ?'); values.push(JSON.stringify(updates.allowedDomains)); }
+    if (updates.requiredCapabilities !== undefined) { fields.push('required_capabilities = ?'); values.push(JSON.stringify(updates.requiredCapabilities)); }
+    if (updates.parameters !== undefined) { fields.push('parameters = ?'); values.push(JSON.stringify(updates.parameters)); }
+    if (updates.validation !== undefined) { fields.push('validation = ?'); values.push(JSON.stringify(updates.validation)); }
+    if (updates.redaction !== undefined) { fields.push('redaction = ?'); values.push(JSON.stringify(updates.redaction)); }
+    if (updates.replayStrategy !== undefined) { fields.push('replay_strategy = ?'); values.push(updates.replayStrategy); }
 
     if (fields.length === 0) return;
 

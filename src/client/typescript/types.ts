@@ -1,5 +1,14 @@
 // ─── TypeScript SDK Response Types ──────────────────────────────────
 
+// Literal union types for SDK consumers (mirrors server-side enums without import dependency)
+type SkillStatus = 'draft' | 'active' | 'stale' | 'broken';
+type ExecutionTier = 'signed_agent' | 'direct' | 'cookie_refresh' | 'browser_proxied' | 'full_browser';
+type TierState = 'tier_1' | 'tier_3';
+type MasteryLevel = 'explore' | 'partial' | 'full';
+type SideEffectClass = 'read-only' | 'idempotent' | 'non-idempotent';
+type HealthStatus = 'ok' | 'degraded' | 'error';
+type EngineMode = 'idle' | 'exploring' | 'recording' | 'replaying';
+
 export interface OneAgentClientOptions {
   baseUrl: string;
   apiKey?: string;
@@ -10,8 +19,8 @@ export interface SiteManifestResponse {
   displayName?: string;
   firstSeen: number;
   lastVisited: number;
-  masteryLevel: string;
-  recommendedTier: string;
+  masteryLevel: MasteryLevel;
+  recommendedTier: ExecutionTier;
   totalRequests: number;
   successfulRequests: number;
 }
@@ -19,12 +28,12 @@ export interface SiteManifestResponse {
 export interface SkillSummary {
   id: string;
   name: string;
-  status: string;
+  status: SkillStatus;
   siteId: string;
   method: string;
   pathTemplate: string;
   successRate: number;
-  currentTier: string;
+  currentTier: TierState;
 }
 
 export interface ExecuteSkillResponse {
@@ -39,7 +48,7 @@ export interface ConfirmationRequired {
   skillId: string;
   confirmationToken: string;
   expiresAt: number;
-  sideEffectClass: string;
+  sideEffectClass: SideEffectClass;
   method: string;
   pathTemplate: string;
 }
@@ -49,8 +58,8 @@ export interface DryRunResponse {
   url: string;
   headers: Record<string, string>;
   body?: unknown;
-  sideEffectClass: string;
-  currentTier: string;
+  sideEffectClass: SideEffectClass;
+  currentTier: TierState;
   note: string;
 }
 
@@ -94,9 +103,9 @@ export interface StopResponse {
 }
 
 export interface HealthResponse {
-  status: string;
+  status: HealthStatus;
   uptime: number;
-  mode: string;
+  mode: EngineMode;
 }
 
 export type OpenApiSpec = Record<string, unknown>;

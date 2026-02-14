@@ -69,7 +69,7 @@ export function canPromote(
   if (skill.sideEffectClass !== SideEffectClass.READ_ONLY) {
     return {
       eligible: false,
-      reason: `Side effect class is '${skill.sideEffectClass}', only 'read-only' skills can be promoted in v0.1`,
+      reason: `Side effect class is '${skill.sideEffectClass}', only 'read-only' skills can be auto-promoted`,
     };
   }
 

@@ -1,5 +1,22 @@
 import type { AgentDatabase } from './database.js';
 import type { SiteManifest, MasteryLevelName, ExecutionTierName } from '../skill/types.js';
+import { MasteryLevel, ExecutionTier } from '../skill/types.js';
+
+const VALID_MASTERY_LEVELS: readonly string[] = Object.values(MasteryLevel);
+function validateMasteryLevel(value: string): MasteryLevelName {
+  if (!VALID_MASTERY_LEVELS.includes(value)) {
+    throw new Error(`Invalid mastery level from database: "${value}". Expected one of: ${VALID_MASTERY_LEVELS.join(', ')}`);
+  }
+  return value as MasteryLevelName;
+}
+
+const VALID_EXECUTION_TIERS: readonly string[] = Object.values(ExecutionTier);
+function validateExecutionTier(value: string): ExecutionTierName {
+  if (!VALID_EXECUTION_TIERS.includes(value)) {
+    throw new Error(`Invalid execution tier from database: "${value}". Expected one of: ${VALID_EXECUTION_TIERS.join(', ')}`);
+  }
+  return value as ExecutionTierName;
+}
 
 interface SiteRow {
   id: string;
@@ -18,8 +35,8 @@ function rowToSite(row: SiteRow): SiteManifest {
     displayName: row.display_name ?? undefined,
     firstSeen: row.first_seen,
     lastVisited: row.last_visited,
-    masteryLevel: row.mastery_level as MasteryLevelName,
-    recommendedTier: row.recommended_tier as ExecutionTierName,
+    masteryLevel: validateMasteryLevel(row.mastery_level),
+    recommendedTier: validateExecutionTier(row.recommended_tier),
     totalRequests: row.total_requests,
     successfulRequests: row.successful_requests,
   };
