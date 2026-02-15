@@ -265,6 +265,14 @@ export function getDatabase(config?: OneAgentConfig): AgentDatabase {
   if (!defaultDb) {
     defaultDb = new AgentDatabase(config);
     defaultDb.open();
+
+    // Register atexit handler for WAL checkpoint
+    process.on('exit', () => {
+      if (defaultDb) {
+        try { defaultDb.close(); } catch { /* best effort */ }
+        defaultDb = null;
+      }
+    });
   }
   return defaultDb;
 }

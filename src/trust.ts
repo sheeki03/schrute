@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getConfig, getDataDir, getDbPath } from './core/config.js';
 import { getDatabase } from './storage/database.js';
+import { isPublicIp } from './core/policy.js';
+import * as secrets from './storage/secrets.js';
 import type { OneAgentConfig, SkillStatusName } from './skill/types.js';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -56,15 +58,31 @@ function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
     }
   }
 
+  // Verify IP enforcement actually blocks private ranges
+  const publicIpsEnforced = !isPublicIp('127.0.0.1') && !isPublicIp('10.0.0.1');
+
   return {
     transport: config.server.network ? 'network (HTTP)' : 'local-only (MCP stdio)',
     allowedHosts,
-    publicIpsOnly: true, // resolveAndValidate always enforces isPublicIp
+    publicIpsOnly: publicIpsEnforced,
   };
 }
 
-function getSecretsInfo(config: OneAgentConfig): TrustPosture['secrets'] {
+async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['secrets']> {
   let storedSessions = 0;
+  let keychainOk = false;
+
+  // Test keychain access
+  try {
+    const testKey = '__oneagent_trust_probe__';
+    const testVal = `probe-${Date.now()}`;
+    await secrets.store(testKey, testVal);
+    const retrieved = await secrets.retrieve(testKey);
+    await secrets.remove(testKey);
+    keychainOk = retrieved === testVal;
+  } catch {
+    keychainOk = false;
+  }
 
   // Count stored sessions from DB if available
   const dbPath = getDbPath(config);
@@ -83,7 +101,7 @@ function getSecretsInfo(config: OneAgentConfig): TrustPosture['secrets'] {
   }
 
   return {
-    keychainOk: true, // doctor validates this separately
+    keychainOk,
     storedSessions,
     exportExcludesCreds: true, // always enforced in v0.1
   };
@@ -218,12 +236,12 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
 
 // ─── Main Trust Report ────────────────────────────────────────────
 
-export function getTrustPosture(config?: OneAgentConfig): TrustPosture {
+export async function getTrustPosture(config?: OneAgentConfig): Promise<TrustPosture> {
   const cfg = config ?? getConfig();
 
   return {
     network: getNetworkInfo(cfg),
-    secrets: getSecretsInfo(cfg),
+    secrets: await getSecretsInfo(cfg),
     redaction: getRedactionInfo(cfg),
     skills: getSkillsInfo(cfg),
     retention: getRetentionInfo(cfg),

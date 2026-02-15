@@ -43,6 +43,14 @@ export function rankToolsByIntent(
 
 // ─── Skill → MCP Tool Conversion ────────────────────────────────
 
+let _metaToolNames: Set<string> | null = null;
+function getMetaToolNames(): Set<string> {
+  if (!_metaToolNames) {
+    _metaToolNames = new Set(META_TOOLS.map(t => t.name));
+  }
+  return _metaToolNames;
+}
+
 export function skillToToolName(skill: SkillSpec): string {
   const action = skill.name
     .replace(/[^a-zA-Z0-9_]/g, '_')
@@ -52,7 +60,13 @@ export function skillToToolName(skill: SkillSpec): string {
     .replace(/[^a-zA-Z0-9_]/g, '_')
     .replace(/_+/g, '_')
     .toLowerCase();
-  return `${site}.${action}.v${skill.version}`;
+  const name = `${site}.${action}.v${skill.version}`;
+
+  // Prevent collision with meta tools
+  if (getMetaToolNames().has(name)) {
+    return `skill_${name}`;
+  }
+  return name;
 }
 
 export function skillToToolDefinition(skill: SkillSpec) {
