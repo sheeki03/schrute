@@ -1,9 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
 import { getConfig, getDataDir, getTmpDir, getDbPath } from './core/config.js';
 import { getLogger } from './core/logger.js';
 import * as secrets from './storage/secrets.js';
+import { AuditLog } from './replay/audit-log.js';
 import type { OneAgentConfig } from './skill/types.js';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ function checkFilePermissions(config: OneAgentConfig): CheckResult {
   }
 }
 
-function checkWalCheckpoint(config: OneAgentConfig): CheckResult {
+async function checkWalCheckpoint(config: OneAgentConfig): Promise<CheckResult> {
   const dbPath = getDbPath(config);
   if (!fs.existsSync(dbPath)) {
     return {
@@ -258,7 +258,8 @@ function checkWalCheckpoint(config: OneAgentConfig): CheckResult {
   }
 
   try {
-    const Database = require('better-sqlite3');
+    const DatabaseModule = await import('better-sqlite3');
+    const Database = DatabaseModule.default;
     const db = new Database(dbPath, { readonly: false });
     const result = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
       busy: number;
@@ -301,75 +302,39 @@ function checkBuildProfile(): CheckResult {
 }
 
 function checkAuditHashChain(config: OneAgentConfig): CheckResult {
-  const dbPath = getDbPath(config);
-  if (!fs.existsSync(dbPath)) {
-    return {
-      name: 'audit_hash_chain',
-      status: 'pass',
-      message: 'No database yet, no audit entries to verify',
-    };
-  }
-
+  // Audit is JSONL file-based, not a DB table. Use AuditLog.verifyChain().
   try {
-    const Database = require('better-sqlite3');
-    const db = new Database(dbPath, { readonly: true });
+    const auditLog = new AuditLog(config);
+    const verification = auditLog.verifyChain();
 
-    const rows = db
-      .prepare(
-        'SELECT id, entry_hash, previous_hash FROM audit_log ORDER BY rowid ASC',
-      )
-      .all() as Array<{
-      id: string;
-      entry_hash: string;
-      previous_hash: string;
-    }>;
-
-    db.close();
-
-    if (rows.length === 0) {
+    if (verification.totalEntries === 0) {
       return {
         name: 'audit_hash_chain',
         status: 'pass',
-        message: 'No audit entries to verify',
+        message: verification.message ?? 'No audit entries to verify',
       };
     }
 
-    let brokenLinks = 0;
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i].previous_hash !== rows[i - 1].entry_hash) {
-        brokenLinks++;
-      }
-    }
-
-    if (brokenLinks > 0) {
+    if (!verification.valid) {
       return {
         name: 'audit_hash_chain',
         status: 'fail',
-        message: `Audit hash chain has ${brokenLinks} broken link(s) across ${rows.length} entries`,
+        message: `Audit hash chain broken at entry ${verification.brokenAt} (${verification.totalEntries} entries)`,
+        details: verification.message,
       };
     }
 
     return {
       name: 'audit_hash_chain',
       status: 'pass',
-      message: `Audit hash chain intact (${rows.length} entries)`,
+      message: `Audit hash chain intact (${verification.totalEntries} entries)`,
     };
   } catch (err) {
-    // Table may not exist yet
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('no such table')) {
-      return {
-        name: 'audit_hash_chain',
-        status: 'pass',
-        message: 'Audit table not created yet',
-      };
-    }
-
     return {
       name: 'audit_hash_chain',
       status: 'fail',
       message: 'Audit hash chain verification failed',
-      details: msg,
+      details: err instanceof Error ? err.message : String(err),
     };
   }
 }
@@ -399,7 +364,7 @@ export async function runDoctor(
   checks.push(checkDurableStorageClean(cfg));
   checks.push(checkTempDirCleanup(cfg));
   checks.push(checkFilePermissions(cfg));
-  checks.push(checkWalCheckpoint(cfg));
+  checks.push(await checkWalCheckpoint(cfg));
   checks.push(checkBuildProfile());
   checks.push(checkAuditHashChain(cfg));
 

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getConfig, getDataDir, getDbPath } from './core/config.js';
-import { getLogger } from './core/logger.js';
+import { getDatabase } from './storage/database.js';
 import type { OneAgentConfig, SkillStatusName } from './skill/types.js';
 
 // ─── Types ────────────────────────────────────────────────────────
@@ -37,25 +37,20 @@ export interface TrustPosture {
 // ─── Data Collection ──────────────────────────────────────────────
 
 function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
-  // v0.1: always stdio, local-only
   let allowedHosts = 0;
 
   const dbPath = getDbPath(config);
   if (fs.existsSync(dbPath)) {
     try {
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
+      const db = getDatabase(config);
       try {
-        const row = db
-          .prepare(
-            "SELECT COUNT(DISTINCT json_each.value) as cnt FROM site_policies, json_each(site_policies.domain_allowlist)",
-          )
-          .get() as { cnt: number } | undefined;
+        const row = db.get<{ cnt: number }>(
+          "SELECT COUNT(DISTINCT json_each.value) as cnt FROM policies, json_each(policies.domain_allowlist)",
+        );
         allowedHosts = row?.cnt ?? 0;
       } catch {
-        // Table may not exist
+        // Table may not exist yet
       }
-      db.close();
     } catch {
       // DB not available
     }
@@ -64,7 +59,7 @@ function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
   return {
     transport: config.server.network ? 'network (HTTP)' : 'local-only (MCP stdio)',
     allowedHosts,
-    publicIpsOnly: true, // always enforced
+    publicIpsOnly: !config.server.network,
   };
 }
 
@@ -75,17 +70,13 @@ function getSecretsInfo(config: OneAgentConfig): TrustPosture['secrets'] {
   const dbPath = getDbPath(config);
   if (fs.existsSync(dbPath)) {
     try {
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
+      const db = getDatabase(config);
       try {
-        const row = db
-          .prepare('SELECT COUNT(*) as cnt FROM site_manifests')
-          .get() as { cnt: number } | undefined;
+        const row = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM sites');
         storedSessions = row?.cnt ?? 0;
       } catch {
-        // Table may not exist
+        // Table may not exist yet
       }
-      db.close();
     } catch {
       // DB not available
     }
@@ -101,24 +92,26 @@ function getSecretsInfo(config: OneAgentConfig): TrustPosture['secrets'] {
 function getRedactionInfo(config: OneAgentConfig): TrustPosture['redaction'] {
   let violations = 0;
 
-  const dbPath = getDbPath(config);
-  if (fs.existsSync(dbPath)) {
+  // Audit is JSONL file-based, not a DB table. Read the audit file and count redaction violations.
+  const auditFilePath = path.join(config.dataDir, 'audit', 'audit.jsonl');
+  if (fs.existsSync(auditFilePath)) {
     try {
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
-      try {
-        const row = db
-          .prepare(
-            "SELECT COUNT(*) as cnt FROM audit_log WHERE json_extract(policy_decision, '$.redactionsApplied') != '[]'",
-          )
-          .get() as { cnt: number } | undefined;
-        violations = row?.cnt ?? 0;
-      } catch {
-        // Table may not exist
+      const content = fs.readFileSync(auditFilePath, 'utf-8').trim();
+      if (content) {
+        for (const line of content.split('\n')) {
+          try {
+            const entry = JSON.parse(line);
+            const redactions = entry.policyDecision?.redactionsApplied;
+            if (Array.isArray(redactions) && redactions.length > 0) {
+              violations++;
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
       }
-      db.close();
     } catch {
-      // DB not available
+      // audit file unreadable
     }
   }
 
@@ -134,12 +127,11 @@ function getSkillsInfo(config: OneAgentConfig): TrustPosture['skills'] {
   const dbPath = getDbPath(config);
   if (fs.existsSync(dbPath)) {
     try {
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
+      const db = getDatabase(config);
       try {
-        const rows = db
-          .prepare('SELECT status, tier_lock FROM skills')
-          .all() as Array<{ status: string; tier_lock: string | null }>;
+        const rows = db.all<{ status: string; tier_lock: string | null }>(
+          'SELECT status, tier_lock FROM skills',
+        );
 
         for (const row of rows) {
           const status = row.status as SkillStatusName;
@@ -158,9 +150,8 @@ function getSkillsInfo(config: OneAgentConfig): TrustPosture['skills'] {
           }
         }
       } catch {
-        // Table may not exist
+        // Table may not exist yet
       }
-      db.close();
     } catch {
       // DB not available
     }
@@ -200,21 +191,19 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
   const dbPath = getDbPath(config);
   if (fs.existsSync(dbPath)) {
     try {
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
+      const db = getDatabase(config);
       try {
-        const row = db
-          .prepare('SELECT MIN(started_at) as oldest FROM action_frames')
-          .get() as { oldest: number | null } | undefined;
+        const row = db.get<{ oldest: number | null }>(
+          'SELECT MIN(started_at) as oldest FROM action_frames',
+        );
         if (row?.oldest) {
           oldestFrameDays = Math.floor(
             (Date.now() - row.oldest) / (1000 * 60 * 60 * 24),
           );
         }
       } catch {
-        // Table may not exist
+        // Table may not exist yet
       }
-      db.close();
     } catch {
       // DB not available
     }

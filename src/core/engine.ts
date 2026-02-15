@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { getLogger } from './logger.js';
 import type { OneAgentConfig, SkillSpec, PolicyDecision } from '../skill/types.js';
 import { SessionManager, type SessionInfo } from './session.js';
@@ -13,11 +15,19 @@ import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { MetricsRepository } from '../storage/metrics-repository.js';
 import { executeSkill as replayExecuteSkill } from '../replay/executor.js';
+import { retryWithEscalation } from '../replay/retry.js';
 import { AuditLog } from '../replay/audit-log.js';
 import { ToolBudgetTracker } from '../replay/tool-budget.js';
+import { RateLimiter } from '../automation/rate-limiter.js';
+import { refreshCookies } from '../automation/cookie-refresh.js';
+import { SideEffectClass, FailureCause } from '../skill/types.js';
 import { detectAuth } from '../capture/auth-detector.js';
 import { discoverParams } from '../capture/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
+import { parseHar, extractRequestResponse, type StructuredRecord } from '../capture/har-extractor.js';
+import { filterRequests } from '../capture/noise-filter.js';
+import { clusterEndpoints } from '../capture/api-extractor.js';
+import { generateSkill } from '../skill/generator.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -52,6 +62,48 @@ export interface SkillExecutionResult {
   latencyMs: number;
 }
 
+// ─── Persisted Session State ──────────────────────────────────────
+
+interface PersistedSessionState {
+  sessionId: string;
+  siteId: string;
+  url: string;
+  mode: EngineMode;
+  currentRecording: RecordingInfo | null;
+}
+
+function getSessionStatePath(config: OneAgentConfig): string {
+  return path.join(config.dataDir, 'session.json');
+}
+
+function loadSessionState(config: OneAgentConfig): PersistedSessionState | null {
+  const statePath = getSessionStatePath(config);
+  try {
+    if (fs.existsSync(statePath)) {
+      const raw = fs.readFileSync(statePath, 'utf-8');
+      return JSON.parse(raw) as PersistedSessionState;
+    }
+  } catch {
+    // Corrupted or unreadable state file
+  }
+  return null;
+}
+
+function saveSessionState(config: OneAgentConfig, state: PersistedSessionState | null): void {
+  const statePath = getSessionStatePath(config);
+  try {
+    if (state === null) {
+      if (fs.existsSync(statePath)) {
+        fs.unlinkSync(statePath);
+      }
+    } else {
+      fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf-8');
+    }
+  } catch {
+    // Best effort
+  }
+}
+
 // ─── Engine ───────────────────────────────────────────────────────
 
 export class Engine {
@@ -66,17 +118,54 @@ export class Engine {
   private metricsRepo: MetricsRepository;
   private auditLog: AuditLog;
   private budgetTracker: ToolBudgetTracker;
+  private rateLimiter: RateLimiter;
 
   constructor(config: OneAgentConfig) {
     this.config = config;
     this.sessionManager = new SessionManager();
     this.startedAt = Date.now();
 
+    // Restore persisted session state for cross-process CLI continuity
+    const persisted = loadSessionState(config);
+    if (persisted) {
+      this.activeSessionId = persisted.sessionId;
+      this.mode = persisted.mode;
+      this.currentRecording = persisted.currentRecording;
+    }
+
     const db = getDatabase(config);
     this.skillRepo = new SkillRepository(db);
     this.metricsRepo = new MetricsRepository(db);
     this.auditLog = new AuditLog(config);
     this.budgetTracker = new ToolBudgetTracker(config);
+    this.rateLimiter = new RateLimiter();
+
+    // Initialize audit HMAC key from keychain
+    this.auditLog.initHmacKey().catch((err) => {
+      this.log.warn({ err }, 'Failed to initialize audit HMAC key');
+    });
+  }
+
+  getSessionManager(): SessionManager {
+    return this.sessionManager;
+  }
+
+  private persistState(): void {
+    if (this.mode === 'idle') {
+      saveSessionState(this.config, null);
+      return;
+    }
+
+    const sessions = this.sessionManager.listActive();
+    const session = sessions.find(s => s.id === this.activeSessionId);
+
+    saveSessionState(this.config, {
+      sessionId: this.activeSessionId ?? '',
+      siteId: session?.siteId ?? '',
+      url: session?.url ?? '',
+      mode: this.mode,
+      currentRecording: this.currentRecording,
+    });
   }
 
   async explore(url: string): Promise<ExploreResult> {
@@ -103,6 +192,7 @@ export class Engine {
     this.activeSessionId = session.id;
     this.mode = 'exploring';
 
+    this.persistState();
     this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
     return {
@@ -138,6 +228,7 @@ export class Engine {
     };
 
     this.mode = 'recording';
+    this.persistState();
     this.log.info(
       { recordingId: this.currentRecording.id, name, siteId: session.siteId },
       'Recording started',
@@ -154,6 +245,7 @@ export class Engine {
     const recording = { ...this.currentRecording };
     this.currentRecording = null;
     this.mode = 'exploring';
+    this.persistState();
 
     this.log.info(
       { recordingId: recording.id, name: recording.name, requests: recording.requestCount },
@@ -168,28 +260,70 @@ export class Engine {
 
   private async runCapturePipeline(recording: RecordingInfo): Promise<void> {
     try {
-      // The session's HAR data is available via the browser manager.
-      // For now, the pipeline works on StructuredRecords built from
-      // HAR entries that were captured during the recording window.
-      // In a full integration the BrowserManager would provide the HAR path;
-      // here we process whatever the session manager collected.
+      this.log.info({ recordingId: recording.id, siteId: recording.siteId }, 'Running capture pipeline');
 
-      const session = this.sessionManager.listActive().find(s => s.siteId === recording.siteId);
-      if (!session) {
-        this.log.warn({ recordingId: recording.id }, 'No active session for capture pipeline');
+      // Load HAR file from the browser manager via session manager
+      const harPath = this.sessionManager.getHarPath(recording.siteId);
+      if (!harPath || !fs.existsSync(harPath)) {
+        this.log.warn({ recordingId: recording.id }, 'No HAR file available for capture pipeline');
         return;
       }
 
-      this.log.info({ recordingId: recording.id, siteId: recording.siteId }, 'Running capture pipeline');
+      // Parse HAR and convert to structured records
+      const harData = parseHar(harPath);
+      const allRecords: StructuredRecord[] = harData.log.entries.map(extractRequestResponse);
 
-      // Detect auth patterns from the session (empty entries for now — populated when HAR is loaded)
-      const authRecipe = detectAuth([]);
+      // Filter noise (analytics, beacons, polling, static assets)
+      const { signal } = filterRequests(harData.log.entries);
+      const signalRecords: StructuredRecord[] = signal.map(extractRequestResponse);
 
-      // Discover parameters using ground truth inputs
-      const paramEvidence = discoverParams([]);
+      if (signalRecords.length === 0) {
+        this.log.warn({ recordingId: recording.id }, 'No signal requests after filtering');
+        return;
+      }
+
+      // Detect auth patterns
+      const authRecipe = detectAuth(signalRecords);
+
+      // Discover parameters (needs RequestSample[] with declaredInputs)
+      const paramSamples = signalRecords.map(record => ({
+        record,
+        declaredInputs: recording.inputs,
+      }));
+      const paramEvidence = discoverParams(paramSamples);
 
       // Detect request chains
-      const chains = detectChains([]);
+      const chains = detectChains(signalRecords);
+
+      // Cluster endpoints and generate draft skills
+      const clusters = clusterEndpoints(signalRecords);
+      let generatedCount = 0;
+      for (const cluster of clusters) {
+        const chainForCluster = chains.find(c =>
+          c.steps.some(s => s.skillRef.includes(cluster.pathTemplate)),
+        );
+
+        const skill = generateSkill(
+          recording.siteId,
+          {
+            method: cluster.method,
+            pathTemplate: cluster.pathTemplate,
+            actionName: cluster.pathTemplate.replace(/[^a-zA-Z0-9]/g, '_'),
+            inputSchema: cluster.bodyShape ? { type: 'object', properties: cluster.bodyShape } : {},
+            requiredHeaders: cluster.commonHeaders,
+            sampleCount: cluster.requests.length,
+          },
+          authRecipe ?? undefined,
+          paramEvidence.length > 0 ? paramEvidence : undefined,
+          chainForCluster,
+        );
+
+        // Persist draft skill if it doesn't already exist
+        if (!this.skillRepo.getById(skill.id)) {
+          this.skillRepo.create(skill);
+          generatedCount++;
+        }
+      }
 
       this.log.info(
         {
@@ -197,6 +331,9 @@ export class Engine {
           authDetected: authRecipe != null,
           paramCount: paramEvidence.length,
           chainCount: chains.length,
+          signalRequests: signalRecords.length,
+          clusters: clusters.length,
+          generatedSkills: generatedCount,
         },
         'Capture pipeline complete',
       );
@@ -242,7 +379,21 @@ export class Engine {
       };
     }
 
-    // 3. Build policy decision for audit
+    // 3. Rate limit check
+    const rateCheck = this.rateLimiter.checkRate(skill.siteId);
+    if (!rateCheck.allowed) {
+      this.log.warn(
+        { skillId, siteId: skill.siteId, retryAfterMs: rateCheck.retryAfterMs },
+        'Rate limited — skipping execution',
+      );
+      return {
+        success: false,
+        error: `Rate limited for site ${skill.siteId}. Retry after ${rateCheck.retryAfterMs}ms`,
+        latencyMs: Date.now() - startTime,
+      };
+    }
+
+    // 4. Build policy decision for audit
     const policyDecision: PolicyDecision = {
       proposed: `${skill.method} ${skill.pathTemplate}`,
       policyResult: 'allowed',
@@ -251,16 +402,23 @@ export class Engine {
       redactionsApplied: [],
     };
 
-    // 4. Execute via replay engine
-    try {
-      const result = await replayExecuteSkill(skill, params, {
-        auditLog: this.auditLog,
-        budgetTracker: this.budgetTracker,
-        metricsRepo: this.metricsRepo,
-        policyDecision,
-      });
+    const executorOptions = {
+      auditLog: this.auditLog,
+      budgetTracker: this.budgetTracker,
+      metricsRepo: this.metricsRepo,
+      policyDecision,
+    };
 
-      // 5. Record metrics
+    // 5. Execute — use retryWithEscalation for read-only skills
+    try {
+      const result = skill.sideEffectClass === SideEffectClass.READ_ONLY
+        ? await retryWithEscalation(skill, params, executorOptions)
+        : await replayExecuteSkill(skill, params, executorOptions);
+
+      // 6. Update rate limiter with response info
+      this.rateLimiter.recordResponse(skill.siteId, result.status, result.headers);
+
+      // 7. Record metrics
       this.metricsRepo.record({
         skillId: skill.id,
         executedAt: Date.now(),
@@ -270,6 +428,14 @@ export class Engine {
         errorType: result.failureCause,
         policyRule: policyDecision.policyRule,
       });
+
+      // 8. On cookie_refresh failure, trigger browser cookie refresh
+      if (!result.success && result.failureCause === FailureCause.COOKIE_REFRESH) {
+        this.log.info({ skillId, siteId: skill.siteId }, 'Triggering cookie refresh');
+        refreshCookies(skill.siteId).catch((err) => {
+          this.log.warn({ skillId, err }, 'Cookie refresh failed');
+        });
+      }
 
       return {
         success: result.success,
@@ -312,6 +478,7 @@ export class Engine {
       this.activeSessionId = null;
     }
     this.mode = 'idle';
+    this.persistState();
     this.log.info('Engine closed');
   }
 }
