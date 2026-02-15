@@ -59,7 +59,7 @@ function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
   return {
     transport: config.server.network ? 'network (HTTP)' : 'local-only (MCP stdio)',
     allowedHosts,
-    publicIpsOnly: !config.server.network,
+    publicIpsOnly: true, // resolveAndValidate always enforces isPublicIp
   };
 }
 
