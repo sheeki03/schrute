@@ -1,7 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { retryWithEscalation, type RetryOptions } from '../../src/replay/retry.js';
 import type { SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
-import { FailureCause, ExecutionTier, SideEffectClass } from '../../src/skill/types.js';
+import { FailureCause, ExecutionTier, SideEffectClass, Capability } from '../../src/skill/types.js';
+import { setSitePolicy } from '../../src/core/policy.js';
+
+// Mock resolveAndValidate to avoid real DNS lookups in tests
+vi.mock('../../src/core/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/policy.js')>();
+  return {
+    ...actual,
+    resolveAndValidate: vi.fn().mockResolvedValue({ ip: '93.184.216.34', allowed: true, category: 'unicast' }),
+  };
+});
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
   return {
@@ -34,6 +44,26 @@ function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
 }
 
 describe('retry', () => {
+  beforeEach(() => {
+    setSitePolicy({
+      siteId: 'example.com',
+      allowedMethods: ['GET', 'HEAD', 'POST'],
+      maxQps: 10,
+      maxConcurrent: 3,
+      readOnlyDefault: true,
+      requireConfirmation: [],
+      domainAllowlist: ['example.com'],
+      redactionRules: [],
+      capabilities: [
+        Capability.NET_FETCH_DIRECT,
+        Capability.NET_FETCH_BROWSER_PROXIED,
+        Capability.BROWSER_AUTOMATION,
+        Capability.STORAGE_WRITE,
+        Capability.SECRETS_USE,
+      ],
+    });
+  });
+
   it('does not retry write operations (non-read-only)', async () => {
     let callCount = 0;
     const skill = makeSkill({ sideEffectClass: 'non-idempotent' });

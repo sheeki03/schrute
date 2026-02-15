@@ -1,11 +1,21 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { buildRequest } from '../../src/replay/request-builder.js';
 import { executeSkill } from '../../src/replay/executor.js';
 import { parseResponse } from '../../src/replay/response-parser.js';
 import { checkSemantic } from '../../src/replay/semantic-check.js';
 import { createRestMockServer } from '../fixtures/mock-sites/rest-mock-server.js';
 import type { SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
-import { ExecutionTier } from '../../src/skill/types.js';
+import { ExecutionTier, Capability } from '../../src/skill/types.js';
+import { setSitePolicy } from '../../src/core/policy.js';
+
+// Mock resolveAndValidate to avoid real DNS lookups in tests
+vi.mock('../../src/core/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/policy.js')>();
+  return {
+    ...actual,
+    resolveAndValidate: vi.fn().mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' }),
+  };
+});
 
 let mockServer: { url: string; close: () => Promise<void> };
 
@@ -60,6 +70,27 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await mockServer.close();
+});
+
+beforeEach(() => {
+  // Set up site policy so executor's policy gates pass
+  setSitePolicy({
+    siteId: 'example.com',
+    allowedMethods: ['GET', 'HEAD', 'POST'],
+    maxQps: 10,
+    maxConcurrent: 3,
+    readOnlyDefault: true,
+    requireConfirmation: [],
+    domainAllowlist: ['example.com', 'localhost', '127.0.0.1'],
+    redactionRules: [],
+    capabilities: [
+      Capability.NET_FETCH_DIRECT,
+      Capability.NET_FETCH_BROWSER_PROXIED,
+      Capability.BROWSER_AUTOMATION,
+      Capability.STORAGE_WRITE,
+      Capability.SECRETS_USE,
+    ],
+  });
 });
 
 // Creates a fetchFn that rewrites the skill's https URL to the local mock server's http URL

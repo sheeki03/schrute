@@ -307,29 +307,30 @@ describe('Security Parity — Blocked Browser Tools', () => {
 // ─── Redaction parity ─────────────────────────────────────────────
 
 describe('Security Parity — Redaction', () => {
-  it('dryRun always redacts sensitive headers', () => {
+  it('dryRun always redacts sensitive headers', async () => {
     const skill = makeSkill({
       requiredHeaders: { 'Authorization': 'Bearer secret-token' },
     });
-    const result = dryRun(skill, { page: 1 }, 'agent-safe');
+    const result = await dryRun(skill, { page: 1 }, 'agent-safe');
     if (result.headers.Authorization || result.headers.authorization) {
       const val = result.headers.Authorization || result.headers.authorization;
-      expect(val).toBe('[REDACTED]');
+      // Canonical redactor uses HMAC-based redaction: [REDACTED:<hash>]
+      expect(val).toMatch(/\[REDACTED/);
     }
     expect(result.policyDecision).toBeDefined();
     expect(result.policyDecision.policyResult).toBeDefined();
   });
 
-  it('developer-debug mode includes volatility and tier info', () => {
+  it('developer-debug mode includes volatility and tier info', async () => {
     const skill = makeSkill();
-    const result = dryRun(skill, { page: 1 }, 'developer-debug');
+    const result = await dryRun(skill, { page: 1 }, 'developer-debug');
     expect(result.tierDecision).toBeDefined();
     expect(result.tierDecision).toContain('currentTier=');
   });
 
-  it('agent-safe mode does not include tier decision info', () => {
+  it('agent-safe mode does not include tier decision info', async () => {
     const skill = makeSkill();
-    const result = dryRun(skill, { page: 1 }, 'agent-safe');
+    const result = await dryRun(skill, { page: 1 }, 'agent-safe');
     expect(result.tierDecision).toBeUndefined();
   });
 });

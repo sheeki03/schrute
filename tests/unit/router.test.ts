@@ -83,6 +83,51 @@ function makeSite(overrides: Partial<SiteManifest> = {}): SiteManifest {
   };
 }
 
+// ─── Mock Confirmation Manager ───────────────────────────────────
+
+function makeConfirmationManager() {
+  const pendingTokens = new Map<string, { skillId: string; tier: string; consumed: boolean }>();
+  let tokenCounter = 0;
+
+  return {
+    isSkillConfirmed: vi.fn().mockReturnValue(false),
+    generateToken: vi.fn().mockImplementation((skillId: string, _params: Record<string, unknown>, tier: string) => {
+      const nonce = `test-token-${++tokenCounter}`;
+      pendingTokens.set(nonce, { skillId, tier, consumed: false });
+      return {
+        nonce,
+        skillId,
+        paramsHash: 'test-hash',
+        tier,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        consumed: false,
+      };
+    }),
+    verifyToken: vi.fn().mockImplementation((tokenId: string) => {
+      const token = pendingTokens.get(tokenId);
+      if (!token) return { valid: false, error: 'Token not found' };
+      if (token.consumed) return { valid: false, error: 'Token already consumed' };
+      return {
+        valid: true,
+        token: {
+          nonce: tokenId,
+          skillId: token.skillId,
+          paramsHash: 'test-hash',
+          tier: token.tier,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60000,
+          consumed: false,
+        },
+      };
+    }),
+    consumeToken: vi.fn().mockImplementation((tokenId: string, _approve: boolean) => {
+      const token = pendingTokens.get(tokenId);
+      if (token) token.consumed = true;
+    }),
+  };
+}
+
 // ─── Mock Dependencies ───────────────────────────────────────────
 
 function makeDeps(): RouterDeps {
@@ -116,6 +161,7 @@ function makeDeps(): RouterDeps {
     skillRepo: mockSkillRepo,
     siteRepo: mockSiteRepo,
     config: mockConfig,
+    confirmation: makeConfirmationManager() as any,
   };
 }
 
@@ -210,18 +256,18 @@ describe('router', () => {
   });
 
   describe('dryRunSkill', () => {
-    it('returns 404 if skill not found', () => {
+    it('returns 404 if skill not found', async () => {
       const router = createRouter(deps);
-      const result = router.dryRunSkill('example.com', 'nonexistent', {});
+      const result = await router.dryRunSkill('example.com', 'nonexistent', {});
       expect(result.success).toBe(false);
       expect(result.statusCode).toBe(404);
     });
 
-    it('returns preview for found skill', () => {
+    it('returns preview for found skill', async () => {
       const skill = makeSkill();
       (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
       const router = createRouter(deps);
-      const result = router.dryRunSkill('example.com', 'get_users', {});
+      const result = await router.dryRunSkill('example.com', 'get_users', {});
       expect(result.success).toBe(true);
       expect((result.data as Record<string, string>).note).toContain('preview');
     });

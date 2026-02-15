@@ -9,6 +9,50 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { makeSkill, makeSitePolicy, makeTestConfig } from '../helpers.js';
 
+// Helper to create a mock confirmation manager for router tests
+function makeConfirmationManager() {
+  const pendingTokens = new Map<string, { skillId: string; tier: string; consumed: boolean }>();
+  let tokenCounter = 0;
+
+  return {
+    isSkillConfirmed: vi.fn().mockReturnValue(false),
+    generateToken: vi.fn().mockImplementation((skillId: string, _params: Record<string, unknown>, tier: string) => {
+      const nonce = `test-token-${++tokenCounter}`;
+      pendingTokens.set(nonce, { skillId, tier, consumed: false });
+      return {
+        nonce,
+        skillId,
+        paramsHash: 'test-hash',
+        tier,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        consumed: false,
+      };
+    }),
+    verifyToken: vi.fn().mockImplementation((tokenId: string) => {
+      const token = pendingTokens.get(tokenId);
+      if (!token) return { valid: false, error: 'Token not found' };
+      if (token.consumed) return { valid: false, error: 'Token already consumed' };
+      return {
+        valid: true,
+        token: {
+          nonce: tokenId,
+          skillId: token.skillId,
+          paramsHash: 'test-hash',
+          tier: token.tier,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60000,
+          consumed: false,
+        },
+      };
+    }),
+    consumeToken: vi.fn().mockImplementation((tokenId: string, _approve: boolean) => {
+      const token = pendingTokens.get(tokenId);
+      if (token) token.consumed = true;
+    }),
+  };
+}
+
 // ─── Scenario 1: Cooperative Site (Clean REST, Tier 1) ────────────
 
 describe('v0.2 Scenarios — Cooperative Site', () => {
@@ -66,6 +110,7 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
       skillRepo: mockSkillRepo,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
+      confirmation: makeConfirmationManager() as any,
     });
 
     const result = await router.executeSkill('shop.example.com', 'list_products', {});
@@ -88,9 +133,10 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
       } as any,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
+      confirmation: makeConfirmationManager() as any,
     });
 
-    const result = router.dryRunSkill('shop.example.com', 'list_products', {});
+    const result = await router.dryRunSkill('shop.example.com', 'list_products', {});
     expect(result.success).toBe(true);
     expect((result.data as any).note).toContain('preview');
   });
@@ -160,6 +206,7 @@ describe('v0.2 Scenarios — GraphQL Site', () => {
       skillRepo: { getBySiteId: () => [], getByStatus: () => [] } as any,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
+      confirmation: makeConfirmationManager() as any,
     });
 
     const result = await router.executeSkill('graphql.example.com', 'NonExistent', {});
@@ -214,6 +261,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       } as any,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
+      confirmation: makeConfirmationManager() as any,
     });
 
     // POST method not allowed by default (non-idempotent side effect)
@@ -264,6 +312,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
     });
 
     const config = makeTestConfig();
+    const confirmation = makeConfirmationManager();
 
     const router = createRouter({
       engine: { getStatus: () => ({}) } as any,
@@ -273,6 +322,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       } as any,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: config as any,
+      confirmation: confirmation as any,
     });
 
     // Step 1: Execute → get confirmation token
@@ -302,6 +352,8 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       consecutiveValidations: 0,
     });
 
+    const confirmation = makeConfirmationManager();
+
     const router = createRouter({
       engine: { getStatus: () => ({}) } as any,
       skillRepo: {
@@ -310,6 +362,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       } as any,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
+      confirmation: confirmation as any,
     });
 
     const result = await router.executeSkill('hostile.example.com', 'denied_action', {});

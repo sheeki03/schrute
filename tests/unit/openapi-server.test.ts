@@ -96,8 +96,9 @@ describe('openapi-server', () => {
       const repo = makeSkillRepo([skill]);
       const spec = buildOpenApiSpec(repo);
 
-      // Should include the proxy path
-      const proxyPath = `/api/sites/${skill.siteId}/skills/${skill.name}`;
+      // Skill names are now slugified in paths
+      const slugifiedName = skill.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      const proxyPath = `/api/sites/${skill.siteId}/skills/${slugifiedName}`;
       expect(spec.paths[proxyPath]).toBeDefined();
 
       // Should include the original path

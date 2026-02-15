@@ -1,11 +1,48 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Engine } from '../../src/core/engine.js';
 import { executeSkill } from '../../src/replay/executor.js';
 import type { OneAgentConfig, SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
+import { Capability } from '../../src/skill/types.js';
 import { createRestMockServer } from '../fixtures/mock-sites/rest-mock-server.js';
+import { setSitePolicy } from '../../src/core/policy.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+
+// Mock resolveAndValidate to avoid real DNS lookups in tests
+vi.mock('../../src/core/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/policy.js')>();
+  return {
+    ...actual,
+    resolveAndValidate: vi.fn().mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' }),
+  };
+});
+
+// Mock the database module to avoid better-sqlite3 native module issues
+vi.mock('../../src/storage/database.js', () => {
+  const mockDb = {
+    prepare: () => ({
+      run: () => ({ changes: 1 }),
+      get: () => undefined,
+      all: () => [],
+    }),
+    exec: () => {},
+    close: () => {},
+  };
+  class MockAgentDatabase {
+    open() {}
+    close() {}
+    run() { return { changes: 1 }; }
+    get() { return undefined; }
+    all() { return []; }
+    exec() {}
+  }
+  return {
+    AgentDatabase: MockAgentDatabase,
+    getDatabase: () => new MockAgentDatabase(),
+    closeDatabase: () => {},
+  };
+});
 
 function makeTestConfig(): OneAgentConfig {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneagent-e2e-full-'));
@@ -55,10 +92,30 @@ describe('Full Loop E2E', () => {
     fs.mkdirSync(path.join(config.dataDir, 'audit'), { recursive: true });
     fs.mkdirSync(path.join(config.dataDir, 'data'), { recursive: true });
     engine = new Engine(config);
+
+    // Set up site policies so executor policy gates pass
+    const defaultCaps = [
+      Capability.NET_FETCH_DIRECT,
+      Capability.NET_FETCH_BROWSER_PROXIED,
+      Capability.BROWSER_AUTOMATION,
+      Capability.STORAGE_WRITE,
+      Capability.SECRETS_USE,
+    ];
+    setSitePolicy({
+      siteId: 'example.com',
+      allowedMethods: ['GET', 'HEAD', 'POST'],
+      maxQps: 10,
+      maxConcurrent: 3,
+      readOnlyDefault: true,
+      requireConfirmation: [],
+      domainAllowlist: ['example.com', 'localhost', '127.0.0.1'],
+      redactionRules: [],
+      capabilities: defaultCaps,
+    });
   });
 
   afterEach(async () => {
-    await engine.close();
+    if (engine) await engine.close();
     fs.rmSync(config.dataDir, { recursive: true, force: true });
   });
 
@@ -120,9 +177,29 @@ describe('Full Loop E2E', () => {
 
     try {
       const skill = loadSkillFixture('get-users-skill.json');
+      const serverHostname = new URL(server.url).hostname;
       // Point the skill at our mock server
-      skill.allowedDomains = [new URL(server.url).hostname];
+      skill.allowedDomains = [serverHostname];
       skill.pathTemplate = `${server.url}/api/users`;
+
+      // Set up site policy for the fixture's siteId
+      setSitePolicy({
+        siteId: skill.siteId,
+        allowedMethods: ['GET', 'HEAD', 'POST'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: [serverHostname, 'localhost', '127.0.0.1'],
+        redactionRules: [],
+        capabilities: [
+          Capability.NET_FETCH_DIRECT,
+          Capability.NET_FETCH_BROWSER_PROXIED,
+          Capability.BROWSER_AUTOMATION,
+          Capability.STORAGE_WRITE,
+          Capability.SECRETS_USE,
+        ],
+      });
       // Replace the template token with a real one for the mock server
       skill.requiredHeaders = {
         Accept: 'application/json',
@@ -166,9 +243,29 @@ describe('Full Loop E2E', () => {
 
     try {
       const skill = loadSkillFixture('get-users-skill.json');
-      skill.allowedDomains = [new URL(server.url).hostname];
+      const serverHostname = new URL(server.url).hostname;
+      skill.allowedDomains = [serverHostname];
       skill.pathTemplate = `${server.url}/api/users`;
       skill.currentTier = 'tier_3';
+
+      // Set up site policy for the fixture's siteId
+      setSitePolicy({
+        siteId: skill.siteId,
+        allowedMethods: ['GET', 'HEAD', 'POST'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: [serverHostname, 'localhost', '127.0.0.1'],
+        redactionRules: [],
+        capabilities: [
+          Capability.NET_FETCH_DIRECT,
+          Capability.NET_FETCH_BROWSER_PROXIED,
+          Capability.BROWSER_AUTOMATION,
+          Capability.STORAGE_WRITE,
+          Capability.SECRETS_USE,
+        ],
+      });
       // Replace the template token with a real one
       skill.requiredHeaders = {
         Accept: 'application/json',

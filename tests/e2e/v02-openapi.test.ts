@@ -113,8 +113,9 @@ describe('v0.2 OpenAPI — Active Skills Only', () => {
 
     const spec = buildOpenApiSpec(mockRepo);
 
-    // Should include the active skill's proxy path
-    const proxyPath = `/api/sites/${activeSkill.siteId}/skills/${activeSkill.name}`;
+    // Should include the active skill's proxy path (skill names are slugified)
+    const slugifiedName = activeSkill.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const proxyPath = `/api/sites/${activeSkill.siteId}/skills/${slugifiedName}`;
     expect(spec.paths).toHaveProperty(proxyPath);
   });
 
