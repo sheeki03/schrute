@@ -76,7 +76,7 @@ export async function startMcpServer(): Promise<void> {
     const shortlisted = rankToolsByIntent(
       activeSkills,
       undefined,
-      config.maxToolsPerSite,
+      config.toolShortlistK,
     );
 
     for (const skill of shortlisted) {
@@ -234,12 +234,14 @@ export async function startMcpServer(): Promise<void> {
           }
 
           const verification = confirmation.verifyToken(confirmationToken);
-          if (!verification.valid) {
+          if (!verification.valid || !verification.token) {
             return {
-              content: [{ type: 'text', text: `Confirmation failed: ${verification.error}` }],
+              content: [{ type: 'text', text: `Confirmation failed: ${verification.error ?? 'invalid token'}` }],
               isError: true,
             };
           }
+
+          const { skillId, tier } = verification.token;
 
           confirmation.consumeToken(confirmationToken, approve);
 
@@ -249,8 +251,8 @@ export async function startMcpServer(): Promise<void> {
                 type: 'text',
                 text: JSON.stringify({
                   status: 'approved',
-                  skillId: verification.token!.skillId,
-                  tier: verification.token!.tier,
+                  skillId,
+                  tier,
                 }),
               }],
             };
@@ -260,7 +262,7 @@ export async function startMcpServer(): Promise<void> {
                 type: 'text',
                 text: JSON.stringify({
                   status: 'denied',
-                  skillId: verification.token!.skillId,
+                  skillId,
                 }),
               }],
             };
@@ -337,9 +339,13 @@ export async function startMcpServer(): Promise<void> {
       if (matchedSkill) {
         const params = (args ?? {}) as Record<string, unknown>;
 
-        // Skip confirmation if skill is globally confirmed or already validated
-        if (matchedSkill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(matchedSkill.id)) {
-          const token = confirmation.generateToken(
+        // Require first-run confirmation for non-idempotent skills unless globally confirmed
+        const needsConfirmation =
+          matchedSkill.sideEffectClass !== 'read-only' &&
+          !confirmation.isSkillConfirmed(matchedSkill.id);
+
+        if (needsConfirmation) {
+          const token = await confirmation.generateToken(
             matchedSkill.id,
             params,
             matchedSkill.currentTier,

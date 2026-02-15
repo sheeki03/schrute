@@ -1,12 +1,38 @@
 import { createHash, randomBytes, createHmac } from 'node:crypto';
 import { getLogger } from '../core/logger.js';
+import { retrieve, store } from '../storage/secrets.js';
 import type { AgentDatabase } from '../storage/database.js';
 import type { ConfirmationToken, OneAgentConfig } from '../skill/types.js';
 
 const log = getLogger();
 
-// ─── HMAC Secret (per-process, used to sign nonces) ──────────────
-const HMAC_SECRET = randomBytes(32);
+// ─── Keychain-Backed HMAC Key ────────────────────────────────────
+const CONFIRMATION_KEY_NAME = '__oneagent_confirmation_hmac__';
+let confirmationHmacKey: Buffer | null = null;
+
+async function getConfirmationKey(): Promise<Buffer> {
+  if (confirmationHmacKey) return confirmationHmacKey;
+
+  try {
+    const stored = await retrieve(CONFIRMATION_KEY_NAME);
+    if (stored) {
+      confirmationHmacKey = Buffer.from(stored, 'hex');
+      return confirmationHmacKey;
+    }
+  } catch {
+    // Keychain unavailable
+  }
+
+  // Generate and persist
+  const key = randomBytes(32);
+  try {
+    await store(CONFIRMATION_KEY_NAME, key.toString('hex'));
+  } catch {
+    // Best effort — fall back to ephemeral
+  }
+  confirmationHmacKey = key;
+  return key;
+}
 
 // ─── DB-Backed Confirmation Manager ──────────────────────────────
 
@@ -35,11 +61,12 @@ export class ConfirmationManager {
   /**
    * Generate a confirmation token and persist the nonce in the DB.
    */
-  generateToken(
+  async generateToken(
     skillId: string,
     params: Record<string, unknown>,
     tier: string,
-  ): ConfirmationToken {
+  ): Promise<ConfirmationToken> {
+    const hmacKey = await getConfirmationKey();
     const nonce = randomBytes(16).toString('hex');
     const paramsHash = createHash('sha256')
       .update(JSON.stringify(params))
@@ -49,7 +76,7 @@ export class ConfirmationManager {
 
     // Sign with HMAC to produce the tokenId
     const hmacPayload = `${skillId}|${paramsHash}|${tier}|${expiresAt}|${nonce}`;
-    const tokenId = createHmac('sha256', HMAC_SECRET)
+    const tokenId = createHmac('sha256', hmacKey)
       .update(hmacPayload)
       .digest('hex');
 
@@ -122,6 +149,13 @@ export class ConfirmationManager {
       consumed: false,
     };
 
+    // Clean up expired nonces for the same skill while we're at it
+    this.db.run(
+      'DELETE FROM confirmation_nonces WHERE skill_id = ? AND expires_at < ? AND consumed = 0',
+      row.skill_id,
+      Date.now(),
+    );
+
     return { valid: true, token };
   }
 
@@ -173,7 +207,14 @@ export class ConfirmationManager {
         now,
       );
 
-      log.info({ skillId: row.skill_id }, 'Skill confirmation denied');
+      // Invalidate all outstanding nonces for this skill
+      this.db.run(
+        'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE skill_id = ? AND consumed = 0',
+        now,
+        row.skill_id,
+      );
+
+      log.info({ skillId: row.skill_id }, 'Skill confirmation denied, all nonces invalidated');
     }
   }
 }

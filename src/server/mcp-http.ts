@@ -89,7 +89,7 @@ export async function startMcpHttpServer(options?: {
     const shortlisted = rankToolsByIntent(
       activeSkills,
       undefined,
-      config.maxToolsPerSite,
+      config.toolShortlistK,
     );
 
     for (const skill of shortlisted) {
@@ -272,9 +272,13 @@ export async function startMcpHttpServer(options?: {
       if (matchedSkill) {
         const params = (args ?? {}) as Record<string, unknown>;
 
-        // Skip confirmation if skill is globally confirmed or already validated
-        if (matchedSkill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(matchedSkill.id)) {
-          const token = confirmation.generateToken(
+        // Require first-run confirmation for non-idempotent skills unless globally confirmed
+        const needsConfirmation =
+          matchedSkill.sideEffectClass !== 'read-only' &&
+          !confirmation.isSkillConfirmed(matchedSkill.id);
+
+        if (needsConfirmation) {
+          const token = await confirmation.generateToken(
             matchedSkill.id,
             params,
             matchedSkill.currentTier,
@@ -368,9 +372,14 @@ export async function startMcpHttpServer(options?: {
       }
 
       log.info({ sessionId: transport.sessionId }, 'New MCP HTTP session');
+    } else if (sessionId && !transports.has(sessionId)) {
+      // Client provided an unknown session ID — reject
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session not found. Start a new session with a POST without session ID.' }));
+      return;
     } else {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid session' }));
+      res.end(JSON.stringify({ error: 'Invalid request' }));
       return;
     }
 

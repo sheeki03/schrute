@@ -98,9 +98,13 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      // First-run confirmation flow — skip if globally confirmed
-      if (skill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(skill.id)) {
-        const token = confirmation.generateToken(
+      // Require first-run confirmation for non-idempotent skills unless globally confirmed
+      const needsConfirmation =
+        skill.sideEffectClass !== 'read-only' &&
+        !confirmation.isSkillConfirmed(skill.id);
+
+      if (needsConfirmation) {
+        const token = await confirmation.generateToken(
           skill.id,
           params,
           skill.currentTier,
@@ -228,13 +232,15 @@ export function createRouter(deps: RouterDeps) {
       approve: boolean,
     ): RouterResult {
       const verification = confirmation.verifyToken(confirmationToken);
-      if (!verification.valid) {
+      if (!verification.valid || !verification.token) {
         return {
           success: false,
-          error: `Confirmation failed: ${verification.error}`,
+          error: `Confirmation failed: ${verification.error ?? 'invalid token'}`,
           statusCode: 400,
         };
       }
+
+      const { skillId, tier } = verification.token;
 
       confirmation.consumeToken(confirmationToken, approve);
 
@@ -243,8 +249,8 @@ export function createRouter(deps: RouterDeps) {
           success: true,
           data: {
             status: 'approved',
-            skillId: verification.token!.skillId,
-            tier: verification.token!.tier,
+            skillId,
+            tier,
           },
         };
       } else {
@@ -252,7 +258,7 @@ export function createRouter(deps: RouterDeps) {
           success: true,
           data: {
             status: 'denied',
-            skillId: verification.token!.skillId,
+            skillId,
           },
         };
       }
