@@ -18,6 +18,7 @@ import {
   TierState,
 } from '../skill/types.js';
 import { buildRequest, extractDomain } from './request-builder.js';
+import { redactString } from '../storage/redactor.js';
 import { parseResponse } from './response-parser.js';
 import { checkSemanticNative as checkSemantic } from '../native/semantic-diff.js';
 import { AuditLog } from './audit-log.js';
@@ -118,6 +119,7 @@ export async function executeSkill(
 
   // Fix 2: Record audit intent BEFORE execution in strict mode
   if (options?.auditLog) {
+    const redactedUrl = await redactString(skill.pathTemplate);
     const intentAudit = options.auditLog.appendEntry({
       id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: Date.now(),
@@ -129,7 +131,7 @@ export async function executeSkill(
       policyDecision,
       requestSummary: {
         method: skill.method,
-        url: skill.pathTemplate,
+        url: redactedUrl,
       },
     });
 
@@ -162,6 +164,7 @@ export async function executeSkill(
 
   // Record audit outcome AFTER execution
   if (options?.auditLog) {
+    const redactedOutcomeUrl = await redactString(skill.pathTemplate);
     const outcomeAudit = options.auditLog.appendEntry({
       id: `exec-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: Date.now(),
@@ -174,7 +177,7 @@ export async function executeSkill(
       policyDecision,
       requestSummary: {
         method: skill.method,
-        url: skill.pathTemplate,
+        url: redactedOutcomeUrl,
       },
       responseSummary: {
         status: result.status,
@@ -281,48 +284,75 @@ async function executeTier(
     };
   }
 
-  // 1d. Redirect validation: if response is 3xx with Location header, check domain
-  if (response.status >= 300 && response.status < 400 && response.headers['location']) {
-    const redirectCheck = checkRedirectAllowed(skill.siteId, response.headers['location']);
+  // 1d. Manual redirect loop: follow safe redirects, block disallowed domains/IPs
+  let finalResponse = response;
+  let redirectCount = 0;
+  const MAX_REDIRECTS = 5;
+
+  while (
+    finalResponse.status >= 300 && finalResponse.status < 400 &&
+    finalResponse.headers['location'] &&
+    redirectCount < MAX_REDIRECTS
+  ) {
+    const redirectCheck = checkRedirectAllowed(skill.siteId, finalResponse.headers['location']);
     if (!redirectCheck.allowed) {
       log.warn(
-        { skillId: skill.id, location: response.headers['location'], rule: redirectCheck.rule },
+        { skillId: skill.id, location: finalResponse.headers['location'], rule: redirectCheck.rule },
         'Redirect to disallowed domain blocked',
       );
       return failureResult(startTime, tier, FailureCause.UNKNOWN);
     }
+
+    // Validate redirect target IP
+    const redirectDomain = extractDomain(finalResponse.headers['location']);
+    if (redirectDomain) {
+      const ipCheck = await resolveAndValidate(redirectDomain);
+      if (!ipCheck.allowed) {
+        log.warn({ skillId: skill.id, domain: redirectDomain, ip: ipCheck.ip }, 'Redirect to private IP blocked');
+        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      }
+    }
+
+    // Follow the redirect
+    const redirectResp = await directFetch(
+      { ...request, url: finalResponse.headers['location'] },
+      maxResponseBytes,
+      options?.fetchFn,
+    );
+    finalResponse = redirectResp;
+    redirectCount++;
   }
 
   const latencyMs = Date.now() - startTime;
 
   // Parse response
   const parsed = parseResponse(
-    { status: response.status, headers: response.headers, body: response.body },
+    { status: finalResponse.status, headers: finalResponse.headers, body: finalResponse.body },
     skill,
   );
 
   // Semantic check
   const semantic = checkSemantic(
-    { status: response.status, headers: response.headers, body: response.body },
+    { status: finalResponse.status, headers: finalResponse.headers, body: finalResponse.body },
     skill,
   );
 
   // Classify failure if not successful
-  const httpSuccess = response.status >= 200 && response.status < 300;
+  const httpSuccess = finalResponse.status >= 200 && finalResponse.status < 300;
   const overallSuccess = httpSuccess && parsed.schemaMatch && semantic.pass && parsed.errors.length === 0;
 
   let failureCause: FailureCauseName | undefined;
   if (!overallSuccess) {
-    failureCause = await classifyFailure(response, parsed, semantic, skill, tier, params, options);
+    failureCause = await classifyFailure(finalResponse, parsed, semantic, skill, tier, params, options);
   }
 
   return {
     success: overallSuccess,
     tier,
-    status: response.status,
+    status: finalResponse.status,
     data: parsed.data,
-    rawBody: response.body,
-    headers: response.headers,
+    rawBody: finalResponse.body,
+    headers: finalResponse.headers,
     latencyMs,
     schemaMatch: parsed.schemaMatch,
     semanticPass: semantic.pass,
@@ -435,6 +465,7 @@ async function directFetch(
     method: request.method,
     headers: request.headers,
     body: request.body,
+    redirect: 'manual',  // never auto-follow redirects
   });
 
   const headers: Record<string, string> = {};
