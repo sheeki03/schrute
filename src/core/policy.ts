@@ -2,6 +2,7 @@ import * as dns from 'node:dns/promises';
 import * as ipaddr from 'ipaddr.js';
 import { getLogger } from './logger.js';
 import { getConfig } from './config.js';
+import { getDatabase } from '../storage/database.js';
 import type {
   CapabilityName,
   SideEffectClassName,
@@ -54,9 +55,50 @@ const sitePolicies = new Map<string, SitePolicy>();
 
 // ─── Policy Store ─────────────────────────────────────────────────
 
+function loadPolicyFromDb(siteId: string): SitePolicy | null {
+  try {
+    const db = getDatabase();
+    const row = db.get<{
+      site_id: string;
+      allowed_methods: string;
+      max_qps: number;
+      max_concurrent: number;
+      read_only_default: number;
+      require_confirmation: string;
+      domain_allowlist: string | null;
+      redaction_rules: string;
+      capabilities: string;
+    }>('SELECT * FROM policies WHERE site_id = ?', siteId);
+
+    if (!row) return null;
+
+    return {
+      siteId: row.site_id,
+      allowedMethods: JSON.parse(row.allowed_methods),
+      maxQps: row.max_qps,
+      maxConcurrent: row.max_concurrent,
+      readOnlyDefault: row.read_only_default === 1,
+      requireConfirmation: JSON.parse(row.require_confirmation),
+      domainAllowlist: row.domain_allowlist ? JSON.parse(row.domain_allowlist) : [],
+      redactionRules: JSON.parse(row.redaction_rules),
+      capabilities: JSON.parse(row.capabilities),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function getSitePolicy(siteId: string): SitePolicy {
   const existing = sitePolicies.get(siteId);
   if (existing) return existing;
+
+  // Try loading from DB
+  const dbPolicy = loadPolicyFromDb(siteId);
+  if (dbPolicy) {
+    sitePolicies.set(siteId, dbPolicy); // cache it
+    return dbPolicy;
+  }
+
   return { siteId, ...DEFAULT_SITE_POLICY };
 }
 
@@ -103,7 +145,8 @@ function normalizeDomain(domain: string): string {
     const url = new URL(`http://${d}`);
     d = url.hostname;
   } catch {
-    // keep as-is if URL parsing fails
+    const log = getLogger();
+    log.debug({ domain: d }, 'Domain normalization URL parse failed, using lowercase form');
   }
   return d;
 }
@@ -239,16 +282,26 @@ export function isPublicIp(ip: string): boolean {
   return range === 'unicast';
 }
 
+const DNS_CACHE = new Map<string, { result: IpValidationResult; expiresAt: number }>();
+const DNS_TTL_MS = 60_000; // 1 minute
+
 export async function resolveAndValidate(
   hostname: string,
 ): Promise<IpValidationResult> {
+  const cached = DNS_CACHE.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
+
   const log = getLogger();
 
   try {
     const { address } = await dns.lookup(hostname, { family: 0 });
 
     if (!ipaddr.isValid(address)) {
-      return { ip: address, allowed: false, category: 'invalid' };
+      const result: IpValidationResult = { ip: address, allowed: false, category: 'invalid' };
+      DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+      return result;
     }
 
     const parsed = ipaddr.process(address);
@@ -259,10 +312,14 @@ export async function resolveAndValidate(
       log.warn({ hostname, ip: address, range }, 'Blocked private network egress');
     }
 
-    return { ip: address, allowed, category: range };
+    const result: IpValidationResult = { ip: address, allowed, category: range };
+    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+    return result;
   } catch (err) {
     log.error({ hostname, err }, 'DNS resolution failed');
-    return { ip: '', allowed: false, category: 'dns_error' };
+    const result: IpValidationResult = { ip: '', allowed: false, category: 'dns_error' };
+    DNS_CACHE.set(hostname, { result, expiresAt: Date.now() + DNS_TTL_MS });
+    return result;
   }
 }
 
