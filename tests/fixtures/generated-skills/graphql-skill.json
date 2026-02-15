@@ -1,0 +1,126 @@
+{
+  "id": "example-com.graphql-get-users.v1",
+  "version": 1,
+  "status": "active",
+  "currentTier": "tier_1",
+  "tierLock": null,
+  "allowedDomains": ["api.example.com"],
+  "requiredCapabilities": ["net.fetch.direct"],
+  "parameters": [
+    {
+      "name": "limit",
+      "type": "number",
+      "source": "user_input",
+      "evidence": ["GraphQL variable in 4/4 samples", "values: 10, 10, 20, 10"]
+    },
+    {
+      "name": "offset",
+      "type": "number",
+      "source": "user_input",
+      "evidence": ["GraphQL variable in 4/4 samples", "values: 0, 10, 0, 20"]
+    }
+  ],
+  "validation": {
+    "semanticChecks": [
+      "response has data.users array",
+      "each user has id, name, email, role fields",
+      "status code is 200",
+      "no errors array in response"
+    ],
+    "customInvariants": [
+      "data.users.length <= limit variable"
+    ]
+  },
+  "redaction": {
+    "piiClassesFound": ["email"],
+    "fieldsRedacted": 1
+  },
+  "replayStrategy": "prefer_tier_1",
+  "sideEffectClass": "read-only",
+  "sampleCount": 4,
+  "consecutiveValidations": 4,
+  "confidence": 0.82,
+  "method": "POST",
+  "pathTemplate": "/graphql",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string" },
+      "operationName": { "type": "string", "const": "GetUsers" },
+      "variables": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "number", "default": 10 },
+          "offset": { "type": "number", "default": 0 }
+        }
+      }
+    },
+    "required": ["query", "operationName", "variables"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "data": {
+        "type": "object",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "role": { "type": "string", "enum": ["ADMIN", "USER"] },
+                "createdAt": { "type": "string", "format": "date-time" }
+              },
+              "required": ["id", "name", "email", "role"]
+            }
+          }
+        },
+        "required": ["users"]
+      }
+    },
+    "required": ["data"]
+  },
+  "authType": "bearer",
+  "requiredHeaders": {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": "Bearer {{token}}"
+  },
+  "dynamicHeaders": {},
+  "isComposite": false,
+  "parameterEvidence": [
+    {
+      "fieldPath": "variables.limit",
+      "classification": "parameter",
+      "observedValues": ["10", "10", "20", "10"],
+      "correlatesWithInput": true,
+      "volatility": 0.25
+    },
+    {
+      "fieldPath": "variables.offset",
+      "classification": "parameter",
+      "observedValues": ["0", "10", "0", "20"],
+      "correlatesWithInput": true,
+      "volatility": 0.75
+    },
+    {
+      "fieldPath": "operationName",
+      "classification": "constant",
+      "observedValues": ["GetUsers"],
+      "correlatesWithInput": false,
+      "volatility": 0.0
+    }
+  ],
+  "siteId": "example-com",
+  "name": "GraphQL Get Users",
+  "description": "Fetches users via GraphQL GetUsers query with pagination variables",
+  "skillMd": "## GraphQL GetUsers\n\nQuery: `query GetUsers($limit: Int, $offset: Int)`\nOperation: GetUsers\n",
+  "lastVerified": 1737000000000,
+  "lastUsed": 1737000000000,
+  "successRate": 0.92,
+  "createdAt": 1735700000000,
+  "updatedAt": 1737000000000
+}

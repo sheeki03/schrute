@@ -1,0 +1,72 @@
+{
+  "id": "example-com.get-legacy-reports.v1",
+  "version": 1,
+  "status": "stale",
+  "currentTier": "tier_3",
+  "tierLock": {
+    "type": "temporary_demotion",
+    "since": "2025-11-01T00:00:00Z",
+    "demotions": 3
+  },
+  "allowedDomains": ["api.example.com"],
+  "requiredCapabilities": ["net.fetch.browser_proxied"],
+  "parameters": [
+    {
+      "name": "reportId",
+      "type": "string",
+      "source": "user_input",
+      "evidence": ["path param in 2/2 samples"]
+    }
+  ],
+  "validation": {
+    "semanticChecks": [
+      "response is JSON object",
+      "response has reportId field",
+      "status code is 200"
+    ],
+    "customInvariants": []
+  },
+  "redaction": {
+    "piiClassesFound": [],
+    "fieldsRedacted": 0
+  },
+  "replayStrategy": "tier_3_only",
+  "sideEffectClass": "read-only",
+  "sampleCount": 2,
+  "consecutiveValidations": 0,
+  "confidence": 0.15,
+  "method": "GET",
+  "pathTemplate": "/api/reports/{reportId}",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "reportId": { "type": "string" }
+    },
+    "required": ["reportId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "reportId": { "type": "string" },
+      "title": { "type": "string" },
+      "data": { "type": "object" },
+      "generatedAt": { "type": "string", "format": "date-time" }
+    }
+  },
+  "authType": "cookie",
+  "requiredHeaders": {
+    "Accept": "application/json"
+  },
+  "dynamicHeaders": {
+    "X-CSRF-Token": "{{csrf_token}}"
+  },
+  "isComposite": false,
+  "siteId": "example-com",
+  "name": "Get Legacy Reports",
+  "description": "Fetches legacy report by ID. Endpoint may have been removed or changed.",
+  "lastVerified": 1732924800000,
+  "lastUsed": 1733529600000,
+  "successRate": 0.3,
+  "createdAt": 1730419200000,
+  "updatedAt": 1732924800000
+}

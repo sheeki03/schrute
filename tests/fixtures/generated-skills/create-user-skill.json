@@ -1,0 +1,88 @@
+{
+  "id": "example-com.create-user.v1",
+  "version": 1,
+  "status": "draft",
+  "currentTier": "tier_3",
+  "tierLock": null,
+  "allowedDomains": ["api.example.com"],
+  "requiredCapabilities": ["net.fetch.direct"],
+  "parameters": [
+    {
+      "name": "name",
+      "type": "string",
+      "source": "user_input",
+      "evidence": ["body field in 1/1 samples"]
+    },
+    {
+      "name": "email",
+      "type": "string",
+      "source": "user_input",
+      "evidence": ["body field in 1/1 samples"]
+    },
+    {
+      "name": "role",
+      "type": "string",
+      "source": "user_input",
+      "evidence": ["body field in 1/1 samples", "values: user"]
+    }
+  ],
+  "validation": {
+    "semanticChecks": [
+      "response is JSON object",
+      "response has id field",
+      "status code is 201"
+    ],
+    "customInvariants": [
+      "response.name matches input.name",
+      "response.email matches input.email"
+    ]
+  },
+  "redaction": {
+    "piiClassesFound": ["email", "name"],
+    "fieldsRedacted": 2
+  },
+  "replayStrategy": "prefer_tier_3",
+  "sideEffectClass": "non-idempotent",
+  "sampleCount": 1,
+  "consecutiveValidations": 0,
+  "confidence": 0.5,
+  "method": "POST",
+  "pathTemplate": "/api/users",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" },
+      "email": { "type": "string", "format": "email" },
+      "role": { "type": "string", "enum": ["admin", "user"] }
+    },
+    "required": ["name", "email"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "number" },
+      "name": { "type": "string" },
+      "email": { "type": "string" },
+      "role": { "type": "string" },
+      "createdAt": { "type": "string", "format": "date-time" },
+      "updatedAt": { "type": "string", "format": "date-time" }
+    },
+    "required": ["id", "name", "email"]
+  },
+  "authType": "bearer",
+  "requiredHeaders": {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": "Bearer {{token}}"
+  },
+  "dynamicHeaders": {},
+  "isComposite": false,
+  "siteId": "example-com",
+  "name": "Create User",
+  "description": "Creates a new user via the REST API. Non-idempotent side effect.",
+  "lastVerified": 1737000000000,
+  "lastUsed": 1737000000000,
+  "successRate": 1.0,
+  "createdAt": 1737000000000,
+  "updatedAt": 1737000000000
+}
