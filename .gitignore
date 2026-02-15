@@ -1,0 +1,7 @@
+node_modules/
+dist/
+native/target/
+*.tsbuildinfo
+bun.lock
+yarn.lock
+.DS_Store
