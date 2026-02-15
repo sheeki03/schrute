@@ -118,6 +118,7 @@ export class Engine {
   private skillRepo: SkillRepository;
   private metricsRepo: MetricsRepository;
   private auditLog: AuditLog;
+  private hmacKeyReady: Promise<void>;
   private budgetTracker: ToolBudgetTracker;
   private rateLimiter: RateLimiter;
 
@@ -152,9 +153,9 @@ export class Engine {
     this.budgetTracker = new ToolBudgetTracker(config);
     this.rateLimiter = new RateLimiter();
 
-    // Initialize audit HMAC key from keychain
-    this.auditLog.initHmacKey().catch((err) => {
-      this.log.warn({ err }, 'Failed to initialize audit HMAC key');
+    // Initialize audit HMAC key from keychain — awaited before skill execution
+    this.hmacKeyReady = this.auditLog.initHmacKey().catch((err) => {
+      this.log.warn({ err }, 'Failed to initialize audit HMAC key — using fallback');
     });
   }
 
@@ -376,6 +377,9 @@ export class Engine {
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
+    // Ensure audit HMAC key is initialized before executing any skill
+    await this.hmacKeyReady;
+
     this.log.info({ skillId, params }, 'Executing skill');
 
     // 1. Look up skill spec from storage
@@ -466,6 +470,8 @@ export class Engine {
       // 8. On cookie_refresh failure, trigger browser cookie refresh
       if (!result.success && result.failureCause === FailureCause.COOKIE_REFRESH) {
         this.log.info({ skillId, siteId: skill.siteId }, 'Triggering cookie refresh');
+        // Intentionally fire-and-forget: cookie refresh is a background recovery action
+        // that should not block the current response. Failures are logged.
         refreshCookies(skill.siteId).catch((err) => {
           this.log.warn({ skillId, err }, 'Cookie refresh failed');
         });

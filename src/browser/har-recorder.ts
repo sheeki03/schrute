@@ -54,7 +54,9 @@ export class HarRecorder {
         'Recording already active, stopping previous session',
       );
       // Don't await — fire-and-forget the stop of the previous session
-      void this.stopRecording().catch(() => {});
+      void this.stopRecording().catch((err) => {
+        log.warn({ err }, 'Failed to stop HAR recording on disconnect');
+      });
     }
 
     const config = getConfig();

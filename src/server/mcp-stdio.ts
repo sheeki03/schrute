@@ -409,8 +409,8 @@ export async function startMcpServer(): Promise<void> {
         });
         log.info('Tool list changed, notified client');
       }
-    } catch {
-      // Ignore polling errors
+    } catch (err) {
+      log.debug({ err }, 'Tool list change poll error (non-critical)');
     }
   }, 5000);
 
