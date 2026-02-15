@@ -2,6 +2,13 @@ import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
 
+// ─── Constants ────────────────────────────────────────────────────
+
+const MAX_BACKOFF_MULTIPLIER = 60;
+const LOW_REMAINING_THRESHOLD = 2;
+const INITIAL_BACKOFF_MULTIPLIER = 1;
+const BURST_CAPACITY_MULTIPLIER = 2;
+
 // ─── Types ────────────────────────────────────────────────────────
 
 export interface RateCheckResult {
@@ -73,7 +80,7 @@ export class RateLimiter {
       const backoffMs = retryAfter ?? bucket.backoffMultiplier * 1000;
 
       bucket.backoffUntil = now + backoffMs;
-      bucket.backoffMultiplier = Math.min(bucket.backoffMultiplier * 2, 60);
+      bucket.backoffMultiplier = Math.min(bucket.backoffMultiplier * 2, MAX_BACKOFF_MULTIPLIER);
       bucket.tokens = 0;
 
       log.info(
@@ -85,7 +92,7 @@ export class RateLimiter {
 
     // Successful response — reset backoff multiplier
     if (status >= 200 && status < 300) {
-      bucket.backoffMultiplier = 1;
+      bucket.backoffMultiplier = INITIAL_BACKOFF_MULTIPLIER;
     }
 
     // Parse rate limit headers for adaptive calibration
@@ -104,7 +111,7 @@ export class RateLimiter {
       }
 
       // If remaining is low, slow down proactively
-      if (remaining <= 2) {
+      if (remaining <= LOW_REMAINING_THRESHOLD) {
         bucket.tokens = Math.min(bucket.tokens, remaining);
         log.debug(
           { siteId, remaining, limit },
@@ -117,7 +124,7 @@ export class RateLimiter {
   setQps(siteId: string, qps: number): void {
     const bucket = this.getOrCreateBucket(siteId);
     bucket.refillRate = qps;
-    bucket.maxTokens = Math.max(Math.ceil(qps * 2), 1);
+    bucket.maxTokens = Math.max(Math.ceil(qps * BURST_CAPACITY_MULTIPLIER), 1);
   }
 
   // ─── Internal ───────────────────────────────────────────────────
@@ -126,12 +133,12 @@ export class RateLimiter {
     let bucket = this.buckets.get(siteId);
     if (!bucket) {
       bucket = {
-        tokens: Math.max(Math.ceil(this.defaultQps * 2), 1),
-        maxTokens: Math.max(Math.ceil(this.defaultQps * 2), 1),
+        tokens: Math.max(Math.ceil(this.defaultQps * BURST_CAPACITY_MULTIPLIER), 1),
+        maxTokens: Math.max(Math.ceil(this.defaultQps * BURST_CAPACITY_MULTIPLIER), 1),
         refillRate: this.defaultQps,
         lastRefill: Date.now(),
         backoffUntil: 0,
-        backoffMultiplier: 1,
+        backoffMultiplier: INITIAL_BACKOFF_MULTIPLIER,
       };
       this.buckets.set(siteId, bucket);
     }

@@ -5,6 +5,13 @@ import { executeSkill, type ExecutionResult, type ExecutorOptions } from './exec
 
 const log = getLogger();
 
+// ─── Constants ──────────────────────────────────────────────────
+
+const DEFAULT_MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 1000;
+const MAX_BACKOFF_MS = 30000;
+const SCHEMA_DRIFT_BACKOFF_MS = 1000;
+
 // ─── Types ──────────────────────────────────────────────────────
 
 export interface RetryOptions extends ExecutorOptions {
@@ -26,7 +33,7 @@ export async function retryWithEscalation(
   params: Record<string, unknown>,
   options?: RetryOptions,
 ): Promise<ExecutionResult & { retryDecisions: RetryDecision[] }> {
-  const maxRetries = options?.maxRetries ?? 3;
+  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   const retryDecisions: RetryDecision[] = [];
 
   // Side-effect-free only — NEVER retry writes
@@ -134,7 +141,7 @@ function decideRetry(
 
   // Rate limited: exponential backoff, same tier
   if (cause === FailureCause.RATE_LIMITED) {
-    const backoffMs = Math.min(1000 * Math.pow(2, attempt), 30000);
+    const backoffMs = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS);
     return {
       attempt,
       tier: tierCascade[currentTierIndex],
@@ -187,7 +194,7 @@ function decideRetry(
       tier: tierCascade[currentTierIndex],
       action: 'retry',
       reason: 'Schema drift — retrying same tier',
-      backoffMs: 1000,
+      backoffMs: SCHEMA_DRIFT_BACKOFF_MS,
     };
   }
 
@@ -231,7 +238,7 @@ function decideRetry(
     tier: tierCascade[currentTierIndex],
     action: 'retry',
     reason: 'Unknown failure — retrying',
-    backoffMs: 1000 * Math.pow(2, attempt),
+    backoffMs: BASE_BACKOFF_MS * Math.pow(2, attempt),
   };
 }
 

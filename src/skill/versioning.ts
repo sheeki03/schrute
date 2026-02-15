@@ -2,9 +2,9 @@ import type { SkillSpec } from './types.js';
 
 // ─── Confidence Decay ───────────────────────────────────────────
 
-const DECAY_CONSTANT_DAYS = 30;
-const STALE_THRESHOLD = 0.3;
-const BROKEN_THRESHOLD = 0.1;
+export const DECAY_CONSTANT_DAYS = 30;
+export const STALE_THRESHOLD = 0.3;
+export const BROKEN_THRESHOLD = 0.1;
 
 /**
  * Exponential decay: exp(-days_since_last_verified / 30)

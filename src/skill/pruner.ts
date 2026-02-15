@@ -1,7 +1,7 @@
 import type { SkillSpec, OneAgentConfig } from './types.js';
 import { SkillStatus } from './types.js';
 import { getConfig } from '../core/config.js';
-import { calculateConfidence } from './versioning.js';
+import { calculateConfidence, STALE_THRESHOLD } from './versioning.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -36,7 +36,7 @@ export function pruneSkills(
     if (skill.status === SkillStatus.ACTIVE) {
       // Recheck confidence — may have decayed
       const currentConfidence = calculateConfidence(skill);
-      if (currentConfidence >= 0.3) {
+      if (currentConfidence >= STALE_THRESHOLD) {
         visible.push(skill);
       } else {
         hidden.push(skill);
@@ -99,7 +99,7 @@ export function getShortlist(
 
   // Check if top matches are confident
   const topScore = scored[0]?.score ?? 0;
-  const confidenceThreshold = 0.3;
+  const confidenceThreshold = STALE_THRESHOLD;
 
   if (topScore < confidenceThreshold) {
     // Low confidence — expose full catalog with hint
