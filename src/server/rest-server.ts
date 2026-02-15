@@ -5,6 +5,7 @@ import { Engine } from '../core/engine.js';
 import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
+import { ConfirmationManager } from './confirmation.js';
 import { createRouter, type RouterResult } from './router.js';
 import { buildOpenApiSpec } from './openapi-server.js';
 
@@ -88,7 +89,8 @@ export async function createRestServer(options?: {
   const skillRepo = new SkillRepository(db);
   const siteRepo = new SiteRepository(db);
 
-  const router = createRouter({ engine, skillRepo, siteRepo, config });
+  const confirmation = new ConfirmationManager(db, config);
+  const router = createRouter({ engine, skillRepo, siteRepo, config, confirmation });
 
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3000;
@@ -162,7 +164,7 @@ export async function createRestServer(options?: {
       const { id: siteId, name: skillName } = request.params;
       const { params, mode } = request.body ?? {};
 
-      const result = router.dryRunSkill(siteId, skillName, params ?? {}, mode);
+      const result = await router.dryRunSkill(siteId, skillName, params ?? {}, mode);
       routerResultToReply(result, reply);
     },
   );

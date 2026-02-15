@@ -1,83 +1,21 @@
-import { createHash, randomBytes, createHmac } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { getLogger } from '../core/logger.js';
 import { Engine } from '../core/engine.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
 import { dryRun } from '../replay/dry-run.js';
 import { validateSkill } from '../skill/validator.js';
+import { ConfirmationManager } from './confirmation.js';
 import type {
   SkillSpec,
-  ConfirmationToken,
   OneAgentConfig,
   SkillStatusName,
+  AuditEntry,
 } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
 
 const log = getLogger();
-
-// ─── Confirmation Token Store ────────────────────────────────────
-
-const HMAC_SECRET = randomBytes(32);
-const pendingConfirmations = new Map<string, ConfirmationToken>();
-
-function generateConfirmationToken(
-  skillId: string,
-  params: Record<string, unknown>,
-  tier: string,
-  config: OneAgentConfig,
-): ConfirmationToken {
-  const nonce = randomBytes(16).toString('hex');
-  const paramsHash = createHash('sha256')
-    .update(JSON.stringify(params))
-    .digest('hex');
-  const now = Date.now();
-
-  const token: ConfirmationToken = {
-    nonce,
-    skillId,
-    paramsHash,
-    tier,
-    createdAt: now,
-    expiresAt: now + config.confirmationExpiryMs,
-    consumed: false,
-  };
-
-  const hmacPayload = `${skillId}|${paramsHash}|${tier}|${token.expiresAt}|${nonce}`;
-  const hmac = createHmac('sha256', HMAC_SECRET).update(hmacPayload).digest('hex');
-  const tokenId = hmac;
-
-  pendingConfirmations.set(tokenId, token);
-  return { ...token, nonce: tokenId };
-}
-
-function verifyConfirmationToken(
-  tokenId: string,
-  _config: OneAgentConfig,
-): { valid: boolean; token?: ConfirmationToken; error?: string } {
-  const token = pendingConfirmations.get(tokenId);
-  if (!token) {
-    return { valid: false, error: 'Token not found' };
-  }
-
-  if (token.consumed) {
-    return { valid: false, error: 'Token already consumed' };
-  }
-
-  if (Date.now() > token.expiresAt) {
-    pendingConfirmations.delete(tokenId);
-    return { valid: false, error: 'Token expired' };
-  }
-
-  return { valid: true, token };
-}
-
-function consumeToken(tokenId: string): void {
-  const token = pendingConfirmations.get(tokenId);
-  if (token) {
-    token.consumed = true;
-    token.consumedAt = Date.now();
-  }
-}
 
 // ─── Router Result Types ─────────────────────────────────────────
 
@@ -95,12 +33,13 @@ export interface RouterDeps {
   skillRepo: SkillRepository;
   siteRepo: SiteRepository;
   config: OneAgentConfig;
+  confirmation: ConfirmationManager;
 }
 
 // ─── Unified Router ──────────────────────────────────────────────
 
 export function createRouter(deps: RouterDeps) {
-  const { engine, skillRepo, siteRepo, config } = deps;
+  const { engine, skillRepo, siteRepo, config, confirmation } = deps;
 
   return {
     // ─── Sites ─────────────────────────────────────────────
@@ -159,13 +98,12 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      // First-run confirmation flow
-      if (skill.consecutiveValidations < 1) {
-        const token = generateConfirmationToken(
+      // First-run confirmation flow — skip if globally confirmed
+      if (skill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(skill.id)) {
+        const token = confirmation.generateToken(
           skill.id,
           params,
           skill.currentTier,
-          config,
         );
 
         return {
@@ -193,12 +131,12 @@ export function createRouter(deps: RouterDeps) {
     },
 
     // ─── Dry Run ───────────────────────────────────────────
-    dryRunSkill(
+    async dryRunSkill(
       siteId: string,
       skillName: string,
       params: Record<string, unknown>,
       mode?: 'agent-safe' | 'developer-debug',
-    ): RouterResult {
+    ): Promise<RouterResult> {
       const skills = skillRepo.getBySiteId(siteId);
       const skill = skills.find((s) => s.name === skillName);
 
@@ -210,7 +148,7 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      const preview = dryRun(skill, params, mode ?? 'agent-safe');
+      const preview = await dryRun(skill, params, mode ?? 'agent-safe');
       return {
         success: true,
         data: {
@@ -289,7 +227,7 @@ export function createRouter(deps: RouterDeps) {
       confirmationToken: string,
       approve: boolean,
     ): RouterResult {
-      const verification = verifyConfirmationToken(confirmationToken, config);
+      const verification = confirmation.verifyToken(confirmationToken);
       if (!verification.valid) {
         return {
           success: false,
@@ -298,7 +236,7 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      consumeToken(confirmationToken);
+      confirmation.consumeToken(confirmationToken, approve);
 
       if (approve) {
         return {
@@ -321,8 +259,36 @@ export function createRouter(deps: RouterDeps) {
     },
 
     // ─── Audit ─────────────────────────────────────────────
-    getAuditLog(): RouterResult {
-      return { success: true, data: { entries: [], message: 'Audit log viewer' } };
+    getAuditLog(options?: { offset?: number; limit?: number }): RouterResult {
+      const limit = options?.limit ?? 100;
+      const offset = options?.offset ?? 0;
+      const auditFilePath = join(config.dataDir, 'audit', 'audit.jsonl');
+
+      if (!existsSync(auditFilePath)) {
+        return { success: true, data: { entries: [], total: 0 } };
+      }
+
+      const content = readFileSync(auditFilePath, 'utf-8').trim();
+      if (!content) {
+        return { success: true, data: { entries: [], total: 0 } };
+      }
+
+      const lines = content.split('\n');
+      const total = lines.length;
+
+      // Return entries in reverse chronological order (newest first)
+      const reversed = lines.slice().reverse();
+      const page = reversed.slice(offset, offset + limit);
+      const entries: AuditEntry[] = [];
+      for (const line of page) {
+        try {
+          entries.push(JSON.parse(line) as AuditEntry);
+        } catch {
+          // Skip malformed entries
+        }
+      }
+
+      return { success: true, data: { entries, total, offset, limit } };
     },
 
     // ─── Health ────────────────────────────────────────────

@@ -101,7 +101,8 @@ function mergeFragment(
 
   for (const [pathKey, methods] of Object.entries(paths)) {
     // Prefix with /api/sites/:siteId/skills/:name proxy path
-    const proxyPath = `/api/sites/${skill.siteId}/skills/${skill.name}`;
+    const slugifiedName = slugify(skill.name);
+    const proxyPath = `/api/sites/${skill.siteId}/skills/${slugifiedName}`;
 
     if (!spec.paths[proxyPath]) {
       spec.paths[proxyPath] = {};
@@ -256,6 +257,15 @@ function addMetaRoutes(spec: OpenApiSpec): void {
       },
     },
   };
+}
+
+// ─── Path Helpers ────────────────────────────────────────────────
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 // ─── Security Schemes ────────────────────────────────────────────

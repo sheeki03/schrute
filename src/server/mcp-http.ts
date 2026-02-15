@@ -1,4 +1,3 @@
-import { createHash, randomBytes, createHmac } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -13,6 +12,8 @@ import { Engine } from '../core/engine.js';
 import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
+import { PlaywrightMcpAdapter } from '../browser/playwright-mcp-adapter.js';
+import { ConfirmationManager } from './confirmation.js';
 import {
   rankToolsByIntent,
   skillToToolName,
@@ -23,8 +24,6 @@ import {
 import { createRouter, type Router } from './router.js';
 import type {
   SkillSpec,
-  ConfirmationToken,
-  OneAgentConfig,
 } from '../skill/types.js';
 import {
   SkillStatus,
@@ -54,7 +53,8 @@ export async function startMcpHttpServer(options?: {
   const db = getDatabase(config);
   const skillRepo = new SkillRepository(db);
   const siteRepo = new SiteRepository(db);
-  const router = createRouter({ engine, skillRepo, siteRepo, config });
+  const confirmation = new ConfirmationManager(db, config);
+  const router = createRouter({ engine, skillRepo, siteRepo, config, confirmation });
 
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3001;
@@ -176,7 +176,7 @@ export async function startMcpHttpServer(options?: {
           }
           const params = (args?.params ?? {}) as Record<string, unknown>;
           const mode = (args?.mode as string) === 'developer-debug' ? 'developer-debug' as const : 'agent-safe' as const;
-          const preview = dryRun(skill, params, mode);
+          const preview = await dryRun(skill, params, mode);
           return {
             content: [{
               type: 'text',
@@ -221,16 +221,33 @@ export async function startMcpHttpServer(options?: {
           };
         }
 
+        // Get the browser manager and execute the tool
+        const browserManager = engine.getSessionManager().getBrowserManager();
+        const siteId = status.activeSession.siteId;
+
+        if (!browserManager.hasContext(siteId)) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                error: 'Browser context not available for this session.',
+                tool: name,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        const context = await browserManager.getOrCreateContext(siteId);
+        const pages = context.pages();
+        const page = pages[0] ?? await context.newPage();
+        const adapter = new PlaywrightMcpAdapter(page, [siteId]);
+        const toolResult = await adapter.proxyTool(name, (args ?? {}) as Record<string, unknown>);
+
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({
-              tool: name,
-              sessionId: status.activeSession.id,
-              siteId: status.activeSession.siteId,
-              args,
-              dispatched: true,
-            }),
+            text: JSON.stringify(toolResult, null, 2),
           }],
         };
       }
@@ -255,7 +272,14 @@ export async function startMcpHttpServer(options?: {
       if (matchedSkill) {
         const params = (args ?? {}) as Record<string, unknown>;
 
-        if (matchedSkill.consecutiveValidations < 1) {
+        // Skip confirmation if skill is globally confirmed or already validated
+        if (matchedSkill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(matchedSkill.id)) {
+          const token = confirmation.generateToken(
+            matchedSkill.id,
+            params,
+            matchedSkill.currentTier,
+          );
+
           return {
             content: [{
               type: 'text',
@@ -263,6 +287,8 @@ export async function startMcpHttpServer(options?: {
                 status: 'confirmation_required',
                 message: 'This skill has not been validated yet. Please confirm execution.',
                 skillId: matchedSkill.id,
+                confirmationToken: token.nonce,
+                expiresAt: token.expiresAt,
                 sideEffectClass: matchedSkill.sideEffectClass,
                 method: matchedSkill.method,
                 pathTemplate: matchedSkill.pathTemplate,

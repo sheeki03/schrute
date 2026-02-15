@@ -1,4 +1,3 @@
-import { createHash, randomBytes, createHmac } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -11,10 +10,10 @@ import { Engine } from '../core/engine.js';
 import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
+import { PlaywrightMcpAdapter } from '../browser/playwright-mcp-adapter.js';
+import { ConfirmationManager } from './confirmation.js';
 import type {
   SkillSpec,
-  ConfirmationToken,
-  OneAgentConfig,
 } from '../skill/types.js';
 import {
   SkillStatus,
@@ -32,74 +31,6 @@ import {
 
 const log = getLogger();
 
-// ─── Confirmation Token Store ────────────────────────────────────
-
-const HMAC_SECRET = randomBytes(32);
-const pendingConfirmations = new Map<string, ConfirmationToken>();
-
-function generateConfirmationToken(
-  skillId: string,
-  params: Record<string, unknown>,
-  tier: string,
-  config: OneAgentConfig,
-): ConfirmationToken {
-  const nonce = randomBytes(16).toString('hex');
-  const paramsHash = createHash('sha256')
-    .update(JSON.stringify(params))
-    .digest('hex');
-  const now = Date.now();
-
-  const token: ConfirmationToken = {
-    nonce,
-    skillId,
-    paramsHash,
-    tier,
-    createdAt: now,
-    expiresAt: now + config.confirmationExpiryMs,
-    consumed: false,
-  };
-
-  // Sign with HMAC
-  const hmacPayload = `${skillId}|${paramsHash}|${tier}|${token.expiresAt}|${nonce}`;
-  const hmac = createHmac('sha256', HMAC_SECRET).update(hmacPayload).digest('hex');
-  const tokenId = hmac;
-
-  pendingConfirmations.set(tokenId, token);
-  return { ...token, nonce: tokenId };
-}
-
-function verifyConfirmationToken(
-  tokenId: string,
-  config: OneAgentConfig,
-): { valid: boolean; token?: ConfirmationToken; error?: string } {
-  const token = pendingConfirmations.get(tokenId);
-  if (!token) {
-    return { valid: false, error: 'Token not found' };
-  }
-
-  if (token.consumed) {
-    return { valid: false, error: 'Token already consumed' };
-  }
-
-  if (Date.now() > token.expiresAt) {
-    pendingConfirmations.delete(tokenId);
-    return { valid: false, error: 'Token expired' };
-  }
-
-  return { valid: true, token };
-}
-
-function consumeToken(tokenId: string): void {
-  const token = pendingConfirmations.get(tokenId);
-  if (token) {
-    token.consumed = true;
-    token.consumedAt = Date.now();
-  }
-}
-
-// Tool definitions (rankToolsByIntent, skillToToolName, skillToToolDefinition,
-// getBrowserToolDefinitions, META_TOOLS) are imported from ./tool-registry.js
-
 // ─── MCP Server ──────────────────────────────────────────────────
 
 export async function startMcpServer(): Promise<void> {
@@ -108,6 +39,7 @@ export async function startMcpServer(): Promise<void> {
   const db = getDatabase(config);
   const skillRepo = new SkillRepository(db);
   const siteRepo = new SiteRepository(db);
+  const confirmation = new ConfirmationManager(db, config);
 
   // Track which skills are currently exposed
   let lastActiveSkillIds: string[] = [];
@@ -278,7 +210,7 @@ export async function startMcpServer(): Promise<void> {
           const params = (args?.params ?? {}) as Record<string, unknown>;
           const mode = (args?.mode as string) === 'developer-debug' ? 'developer-debug' as const : 'agent-safe' as const;
 
-          const preview = dryRun(skill, params, mode);
+          const preview = await dryRun(skill, params, mode);
 
           return {
             content: [{
@@ -301,7 +233,7 @@ export async function startMcpServer(): Promise<void> {
             return { content: [{ type: 'text', text: 'Error: approve must be a boolean' }], isError: true };
           }
 
-          const verification = verifyConfirmationToken(confirmationToken, config);
+          const verification = confirmation.verifyToken(confirmationToken);
           if (!verification.valid) {
             return {
               content: [{ type: 'text', text: `Confirmation failed: ${verification.error}` }],
@@ -309,7 +241,7 @@ export async function startMcpServer(): Promise<void> {
             };
           }
 
-          consumeToken(confirmationToken);
+          confirmation.consumeToken(confirmationToken, approve);
 
           if (approve) {
             return {
@@ -353,18 +285,33 @@ export async function startMcpServer(): Promise<void> {
           };
         }
 
-        // Dispatch to the browser provider via the engine
-        // The PlaywrightMcpAdapter validates the tool against the allowlist
+        // Get the browser manager from the session manager and execute the tool
+        const browserManager = engine.getSessionManager().getBrowserManager();
+        const siteId = status.activeSession.siteId;
+
+        if (!browserManager.hasContext(siteId)) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                error: 'Browser context not available for this session.',
+                tool: name,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        const context = await browserManager.getOrCreateContext(siteId);
+        const pages = context.pages();
+        const page = pages[0] ?? await context.newPage();
+        const adapter = new PlaywrightMcpAdapter(page, [siteId]);
+        const toolResult = await adapter.proxyTool(name, (args ?? {}) as Record<string, unknown>);
+
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({
-              tool: name,
-              sessionId: status.activeSession.id,
-              siteId: status.activeSession.siteId,
-              args,
-              dispatched: true,
-            }),
+            text: JSON.stringify(toolResult, null, 2),
           }],
         };
       }
@@ -389,17 +336,13 @@ export async function startMcpServer(): Promise<void> {
 
       if (matchedSkill) {
         const params = (args ?? {}) as Record<string, unknown>;
-        const paramsHash = createHash('sha256')
-          .update(JSON.stringify(params))
-          .digest('hex');
 
-        // First-run confirmation flow for new skills
-        if (matchedSkill.consecutiveValidations < 1) {
-          const token = generateConfirmationToken(
+        // Skip confirmation if skill is globally confirmed or already validated
+        if (matchedSkill.consecutiveValidations < 1 && !confirmation.isSkillConfirmed(matchedSkill.id)) {
+          const token = confirmation.generateToken(
             matchedSkill.id,
             params,
             matchedSkill.currentTier,
-            config,
           );
 
           return {

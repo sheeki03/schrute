@@ -13,7 +13,7 @@ import { getTrustPosture, formatTrustReport } from './trust.js';
 import { startMcpServer } from './server/mcp-stdio.js';
 import { validateSkill } from './skill/validator.js';
 import { SkillStatus } from './skill/types.js';
-import type { SkillSpec, SiteManifest, SitePolicy } from './skill/types.js';
+import type { SkillSpec, SiteManifest, SitePolicy, CapabilityName } from './skill/types.js';
 
 const program = new Command();
 
@@ -415,6 +415,15 @@ program
     ensureDirectories(config);
 
     if (options.http || config.server.network) {
+      // v0.2 HTTP transport requires the feature flag
+      if (!config.features.httpTransport) {
+        console.error(
+          'Error: HTTP transport is a v0.2 feature and is disabled by default.\n' +
+          'Enable it with: oneagent config set features.httpTransport true',
+        );
+        process.exit(1);
+      }
+
       const port = parseInt(options.port ?? '3000', 10);
       const host = '127.0.0.1';
 
@@ -501,23 +510,49 @@ program
       };
     });
 
+    // Read the actual policy from the policies table
+    const policyRow = db.get<{
+      site_id: string;
+      allowed_methods: string;
+      max_qps: number;
+      max_concurrent: number;
+      read_only_default: number;
+      require_confirmation: string;
+      domain_allowlist: string | null;
+      redaction_rules: string;
+      capabilities: string;
+    }>('SELECT * FROM policies WHERE site_id = ?', siteId);
+
+    const policy: SitePolicy = policyRow
+      ? {
+          siteId: policyRow.site_id,
+          allowedMethods: JSON.parse(policyRow.allowed_methods) as string[],
+          maxQps: policyRow.max_qps,
+          maxConcurrent: policyRow.max_concurrent,
+          readOnlyDefault: policyRow.read_only_default === 1,
+          requireConfirmation: JSON.parse(policyRow.require_confirmation) as string[],
+          domainAllowlist: policyRow.domain_allowlist ? JSON.parse(policyRow.domain_allowlist) as string[] : [],
+          redactionRules: JSON.parse(policyRow.redaction_rules) as string[],
+          capabilities: JSON.parse(policyRow.capabilities) as CapabilityName[],
+        }
+      : {
+          siteId,
+          allowedMethods: ['GET', 'HEAD', 'POST:read-only'],
+          maxQps: 1,
+          maxConcurrent: 1,
+          readOnlyDefault: true,
+          requireConfirmation: [],
+          domainAllowlist: [],
+          redactionRules: [],
+          capabilities: [] as CapabilityName[],
+        };
+
     const bundle = {
       version: '0.2.0',
       exportedAt: new Date().toISOString(),
       site,
       skills: sanitizedSkills,
-      // Policy placeholder — export site-level policy if available
-      policy: {
-        siteId,
-        allowedMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-        maxQps: 10,
-        maxConcurrent: 3,
-        readOnlyDefault: true,
-        requireConfirmation: [],
-        domainAllowlist: [],
-        redactionRules: [],
-        capabilities: [],
-      },
+      policy,
     };
 
     const json = JSON.stringify(bundle, null, 2);
