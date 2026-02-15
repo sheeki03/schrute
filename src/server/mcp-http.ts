@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -34,6 +34,13 @@ import { dryRun } from '../replay/dry-run.js';
 
 const log = getLogger();
 
+// ─── Timing-safe token comparison ────────────────────────────────
+
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
 // ─── MCP HTTP Server ─────────────────────────────────────────────
 
 export async function startMcpHttpServer(options?: {
@@ -46,6 +53,14 @@ export async function startMcpHttpServer(options?: {
   if (!config.server.network) {
     throw new Error(
       'MCP HTTP transport is disabled. Set config.server.network = true to enable.',
+    );
+  }
+
+  // Require auth token for HTTP transport
+  if (!config.server.authToken) {
+    throw new Error(
+      'MCP HTTP transport requires config.server.authToken. ' +
+      'Set it with: oneagent config set server.authToken <your-secret-token>',
     );
   }
 
@@ -334,6 +349,24 @@ export async function startMcpHttpServer(options?: {
       res.end(JSON.stringify({ error: 'Not found. MCP endpoint is at /mcp' }));
       return;
     }
+
+    // ─── Authentication ─────────────────────────────────────
+    const authToken = config.server.authToken;
+    if (authToken) {
+      const authHeader = req.headers['authorization'];
+      if (!authHeader || !safeCompare(authHeader, `Bearer ${authToken}`)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized. Provide Authorization: Bearer <token>' }));
+        return;
+      }
+    } else if (config.server.network) {
+      // Network mode without auth token = reject
+      log.error('MCP HTTP server requires config.server.authToken when network=true');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Server misconfigured: auth token required for network mode' }));
+      return;
+    }
+    // ────────────────────────────────────────────────────────
 
     // Read the body for POST requests
     let body: string | undefined;

@@ -412,6 +412,7 @@ program
   .action(async (options: { http?: boolean; port?: string }) => {
     const config = getConfig();
     createLogger(config.logLevel);
+    const log = getLogger();
     ensureDirectories(config);
 
     if (options.http || config.server.network) {
@@ -430,6 +431,15 @@ program
         console.error(
           'Error: HTTP transport is a v0.2 feature and is disabled by default.\n' +
           'Enable it with: oneagent config set features.httpTransport true',
+        );
+        process.exit(1);
+      }
+
+      // HTTP transport requires an auth token
+      if (!config.server.authToken) {
+        console.error(
+          'Error: HTTP transport requires an auth token.\n' +
+          'Set one with: oneagent config set server.authToken <your-secret>',
         );
         process.exit(1);
       }
@@ -464,10 +474,7 @@ program
         process.on('SIGINT', shutdown);
         process.on('SIGTERM', shutdown);
       } catch (err) {
-        console.warn(
-          'MCP HTTP transport not started:',
-          err instanceof Error ? err.message : String(err),
-        );
+        log.warn({ err }, 'MCP HTTP transport not started');
         // REST still running, set up shutdown for REST only
         const shutdown = async () => {
           console.log('\nShutting down...');

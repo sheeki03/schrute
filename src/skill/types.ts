@@ -542,6 +542,7 @@ export interface OneAgentConfig {
   };
   server: {
     network: boolean;            // default: false (v0.2+)
+    authToken?: string;          // Required when network=true
   };
   tempTtlMs: number;            // default: 3600000 (1 hour)
   gcIntervalMs: number;         // default: 900000 (15 minutes)
