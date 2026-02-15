@@ -238,7 +238,7 @@ describe('router', () => {
     });
 
     it('requires confirmation for unvalidated skills', async () => {
-      const skill = makeSkill({ consecutiveValidations: 0 });
+      const skill = makeSkill({ consecutiveValidations: 0, sideEffectClass: 'non-idempotent' });
       (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
       const router = createRouter(deps);
       const result = await router.executeSkill('example.com', 'get_users', {});

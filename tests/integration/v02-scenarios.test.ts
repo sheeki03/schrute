@@ -309,6 +309,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       name: 'risky_action',
       status: 'active',
       consecutiveValidations: 0,
+      sideEffectClass: 'non-idempotent',
     });
 
     const config = makeTestConfig();
@@ -350,6 +351,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       name: 'denied_action',
       status: 'active',
       consecutiveValidations: 0,
+      sideEffectClass: 'non-idempotent',
     });
 
     const confirmation = makeConfirmationManager();
