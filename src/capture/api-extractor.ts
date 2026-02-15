@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { typeOf } from '../core/utils.js';
 import type { StructuredRecord, StructuredRequest } from './har-extractor.js';
 
 const log = getLogger();
@@ -156,8 +157,4 @@ function inferBodyShape(requests: StructuredRequest[]): Record<string, string> |
   return shape;
 }
 
-function typeOf(value: unknown): string {
-  if (value === null) return 'null';
-  if (Array.isArray(value)) return 'array';
-  return typeof value;
-}
+// typeOf imported from core/utils.ts

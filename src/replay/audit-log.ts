@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { hostname } from 'node:os';
@@ -207,11 +207,14 @@ export class AuditLog {
       }
 
       // Verify HMAC signature (covers previousHash + entryHash to prevent reordering)
+      // Uses timing-safe comparison to prevent timing side-channel attacks (CR-08).
       if (entry.signature) {
         const expectedSig = createHmac('sha256', this.hmacKey)
           .update(`${entry.previousHash}:${entry.entryHash}`)
           .digest('hex');
-        if (entry.signature !== expectedSig) {
+        const expectedBuf = Buffer.from(expectedSig, 'hex');
+        const actualBuf = Buffer.from(entry.signature, 'hex');
+        if (expectedBuf.length !== actualBuf.length || !timingSafeEqual(expectedBuf, actualBuf)) {
           return {
             valid: false,
             brokenAt: index,
@@ -228,7 +231,7 @@ export class AuditLog {
     return { valid: true, brokenAt: undefined, totalEntries: lines.length };
   }
 
-  exportRootHash(): string {
+  exportRootHash(): string | null {
     const today = new Date().toISOString().split('T')[0];
     const rootHashPath = join(this.rootHashDir, `${today}.hash`);
 
@@ -247,7 +250,8 @@ export class AuditLog {
       writeFileSync(rootHashPath, content, 'utf-8');
       log.info({ rootHashPath, rootHash }, 'Exported daily root hash');
     } catch (err) {
-      log.error({ err, rootHashPath }, 'Failed to export root hash');
+      log.error({ err, rootHashPath }, 'Failed to export audit root hash — compliance integrity at risk');
+      return null;
     }
 
     return rootHashPath;
@@ -298,8 +302,11 @@ export class AuditLog {
     try {
       const entry = JSON.parse(lastLine) as AuditEntry;
       this.lastHash = entry.entryHash;
-    } catch {
-      log.warn('Failed to parse last audit entry, starting fresh chain');
+    } catch (err) {
+      log.info(
+        { err, line: lastLine, entryCount: this.entryCount },
+        'Audit log last entry corrupted — starting fresh hash chain. Previous entries are intact but chain continuity is broken.',
+      );
       this.lastHash = '';
     }
   }

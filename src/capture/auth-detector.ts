@@ -244,9 +244,21 @@ function extractJwtTtl(token: string): number | null {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
 
-    const payload = JSON.parse(
-      Buffer.from(parts[1], 'base64url').toString('utf-8'),
-    );
+    let decoded: string;
+    try {
+      decoded = Buffer.from(parts[1], 'base64url').toString('utf-8');
+    } catch {
+      // Base64 decode error — not a valid JWT payload
+      return null;
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(decoded);
+    } catch {
+      // JSON parse error — malformed JWT payload
+      return null;
+    }
 
     if (typeof payload.exp === 'number' && typeof payload.iat === 'number') {
       return payload.exp - payload.iat;
@@ -260,7 +272,8 @@ function extractJwtTtl(token: string): number | null {
     }
 
     return null;
-  } catch {
+  } catch (err) {
+    log.debug({ err }, 'Unexpected error in JWT TTL extraction');
     return null;
   }
 }

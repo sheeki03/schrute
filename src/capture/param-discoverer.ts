@@ -210,7 +210,9 @@ function classifyField(
   const volatility = computeVolatility(obs.values);
 
   // High volatility + no input correlation = ephemeral (timestamps, nonces, etc.)
-  if (volatility > 0.9 && !checkInputCorrelation(obs, recordings)) {
+  // Note: checkInputCorrelation was already checked above and returned false,
+  // so no need to re-check here.
+  if (volatility > 0.9) {
     return 'ephemeral';
   }
 

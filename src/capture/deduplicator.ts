@@ -64,7 +64,8 @@ function buildCanonicalKey(record: StructuredRecord): string {
   let path: string;
   try {
     path = parameterizePath(new URL(canonical.canonicalUrl).pathname);
-  } catch {
+  } catch (err) {
+    log.debug({ err }, 'URL parse failed during canonicalization');
     path = canonical.canonicalUrl;
   }
 
@@ -84,8 +85,8 @@ function buildBodyFingerprint(body?: string): string {
       const keys = Object.keys(parsed).sort();
       return keys.join(',');
     }
-  } catch {
-    // not JSON
+  } catch (err) {
+    log.debug({ err }, 'Body fingerprint failed');
   }
 
   return '';

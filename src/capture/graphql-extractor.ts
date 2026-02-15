@@ -106,11 +106,6 @@ export function extractGraphQLInfo(request: StructuredRequest): GraphQLInfo {
     }
   }
 
-  // If no query text but has a hash, this is a persisted query without inline query
-  if (!result.query && result.isPersistedQuery) {
-    result.isPersistedQuery = true;
-  }
-
   // Try to extract operation name from query text if not explicitly provided
   if (!result.operationName && result.query) {
     result.operationName = extractOperationNameFromQuery(result.query);

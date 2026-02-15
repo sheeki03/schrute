@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { withTimeout } from '../core/utils.js';
 import type {
   SkillSpec,
   ExecutionTierName,
@@ -28,6 +29,9 @@ import {
   enforceDomainAllowlist,
   resolveAndValidate,
   checkRedirectAllowed,
+  getSitePolicy,
+  matchesDomainAllowlist,
+  sanitizeImplicitAllowlist,
 } from '../core/policy.js';
 import { getConfig } from '../core/config.js';
 import type { MetricsRepository } from '../storage/metrics-repository.js';
@@ -62,6 +66,8 @@ export interface ExecutorOptions {
   /** Force a specific tier */
   forceTier?: ExecutionTierName;
   timeoutMs?: number;
+  /** Config for policy scoping — avoids falling back to global singleton */
+  config?: import('../skill/types.js').OneAgentConfig;
 }
 
 // ─── Execute Skill ──────────────────────────────────────────────
@@ -103,7 +109,7 @@ export async function executeSkill(
     });
     if (!budgetCheck.allowed) {
       log.warn({ skillId: skill.id, reason: budgetCheck.reason }, 'Budget check failed');
-      return failureResult(startTime, startingTier, 'unknown' as FailureCauseName);
+      return failureResult(startTime, startingTier, FailureCause.UNKNOWN);
     }
     options.budgetTracker.recordCall(skill.id, skill.siteId);
   }
@@ -217,7 +223,7 @@ async function executeTier(
   // ── Fix 1: Policy / security gates before any network call ──
 
   // 1a. Capability check
-  const capCheck = checkCapability(skill.siteId, tierToCapability(tier));
+  const capCheck = checkCapability(skill.siteId, tierToCapability(tier), options?.config);
   if (!capCheck.allowed) {
     log.warn({ skillId: skill.id, tier, rule: capCheck.rule }, 'Capability not allowed');
     return failureResult(startTime, tier, FailureCause.UNKNOWN);
@@ -226,35 +232,62 @@ async function executeTier(
   // 1b. Domain allowlist check
   const requestDomain = extractDomain(request.url);
   if (requestDomain) {
-    const domainCheck = enforceDomainAllowlist(skill.siteId, requestDomain);
-    if (!domainCheck.allowed) {
-      log.warn({ skillId: skill.id, domain: requestDomain, rule: domainCheck.rule }, 'Domain not allowlisted');
-      return failureResult(startTime, tier, FailureCause.UNKNOWN);
+    const policy = getSitePolicy(skill.siteId, options?.config);
+    if (policy.domainAllowlist.length === 0) {
+      // No explicit policy — use skill's declared domains + site host
+      const rawDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
+      const implicitAllowlist = sanitizeImplicitAllowlist(rawDomains);
+      if (implicitAllowlist.length === 0) {
+        log.warn({ skillId: skill.id, rule: 'domain.implicit_empty_after_sanitize' },
+          'Implicit allowlist empty after sanitization — blocking');
+        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      }
+      // Persist derived allowlist for audit
+      if (options?.policyDecision) {
+        options.policyDecision.derivedAllowlist = implicitAllowlist;
+      }
+      if (!matchesDomainAllowlist(requestDomain, implicitAllowlist)) {
+        log.warn({ skillId: skill.id, domain: requestDomain, rule: 'domain.implicit_skill_allowlist' },
+          'Domain not in skill allowlist (no explicit policy)');
+        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      }
+    } else {
+      const domainCheck = enforceDomainAllowlist(skill.siteId, requestDomain, options?.config);
+      if (!domainCheck.allowed) {
+        log.warn({ skillId: skill.id, domain: requestDomain, rule: domainCheck.rule }, 'Domain not allowlisted');
+        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      }
     }
   }
 
   // 1c. Private IP blocking (resolve hostname, reject if private)
+  // Pin the resolved IP to prevent DNS rebinding TOCTOU attacks (CR-01):
+  // resolveAndValidate returns the IP that passed validation. We substitute
+  // it into the fetch URL so fetch() connects to the validated IP, not a
+  // potentially different one from a second DNS lookup.
+  let resolvedIp: string | undefined;
   if (requestDomain) {
     const ipCheck = await resolveAndValidate(requestDomain);
     if (!ipCheck.allowed) {
       log.warn({ skillId: skill.id, domain: requestDomain, ip: ipCheck.ip, category: ipCheck.category }, 'Private IP blocked');
       return failureResult(startTime, tier, FailureCause.UNKNOWN);
     }
+    resolvedIp = ipCheck.ip;
   }
 
   // Determine max response size for body capping
   const maxResponseBytes = options?.budgetTracker
     ? options.budgetTracker.getMaxResponseBytes()
-    : getConfig().payloadLimits.maxResponseBodyBytes;
+    : (options?.config ?? getConfig()).payloadLimits.maxResponseBodyBytes;
 
   let response: SealedFetchResponse;
   try {
     if (tier === ExecutionTier.DIRECT) {
-      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
+      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp), timeoutMs);
     } else if (tier === ExecutionTier.BROWSER_PROXIED) {
       if (!options?.browserProvider) {
-        // Fall back to direct fetch if no browser provider
-        response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
+        log.warn({ skillId: skill.id, tier }, 'browser_proxied tier requested but no browser provider available');
+        return failureResult(startTime, tier, FailureCause.UNKNOWN);
       } else {
         response = await withTimeout(options.browserProvider.evaluateFetch(request), timeoutMs);
       }
@@ -265,7 +298,7 @@ async function executeTier(
       // Full browser automation: navigate + extract
       response = await withTimeout(fullBrowserExecution(skill, options.browserProvider), timeoutMs);
     } else {
-      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
+      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp), timeoutMs);
     }
   } catch (err) {
     const latencyMs = Date.now() - startTime;
@@ -285,41 +318,73 @@ async function executeTier(
   }
 
   // 1d. Manual redirect loop: follow safe redirects, block disallowed domains/IPs
+  //
+  // Redirect chain handling:
+  // - Max redirect hops: 5 (MAX_REDIRECTS). Exceeding this silently stops following.
+  // - Cross-domain policy: Each hop's target domain is checked against the site's
+  //   domain allowlist (explicit policy) or the skill's declared allowedDomains +
+  //   siteId (implicit allowlist). If the redirect target is not allowlisted, the
+  //   request is blocked and a failure result is returned.
+  // - Private IP blocking: Each hop's target hostname is DNS-resolved and rejected
+  //   if it points to a private/internal IP range (SSRF protection).
+  // - Relative URL resolution: Location headers are resolved relative to the
+  //   CURRENT hop's URL (not the original request URL), tracked via currentUrl.
+  // - Why manual redirect handling: fetch's built-in redirect following would
+  //   bypass domain allowlist checks, private IP validation, and per-hop auditing,
+  //   which are all security-critical. We use `redirect: 'manual'` in directFetch
+  //   and implement the redirect loop here with full policy enforcement per hop.
   let finalResponse = response;
   let redirectCount = 0;
   const MAX_REDIRECTS = 5;
+  let currentUrl = request.url;  // Track current URL through redirect chain
 
   while (
     finalResponse.status >= 300 && finalResponse.status < 400 &&
     finalResponse.headers['location'] &&
     redirectCount < MAX_REDIRECTS
   ) {
-    const redirectCheck = checkRedirectAllowed(skill.siteId, finalResponse.headers['location']);
-    if (!redirectCheck.allowed) {
-      log.warn(
-        { skillId: skill.id, location: finalResponse.headers['location'], rule: redirectCheck.rule },
-        'Redirect to disallowed domain blocked',
-      );
-      return failureResult(startTime, tier, FailureCause.UNKNOWN);
-    }
+    const locationHeader = finalResponse.headers['location'];
+    // Resolve relative against CURRENT hop's URL, not initial request
+    const resolvedUrl = new URL(locationHeader, currentUrl).toString();
 
-    // Validate redirect target IP
-    const redirectDomain = extractDomain(finalResponse.headers['location']);
+    // Domain check: use implicit allowlist if no explicit policy
+    const redirectDomain = extractDomain(resolvedUrl);
     if (redirectDomain) {
+      const redirectPolicy = getSitePolicy(skill.siteId, options?.config);
+      if (redirectPolicy.domainAllowlist.length === 0) {
+        const rawDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
+        const implicitAllowlist = sanitizeImplicitAllowlist(rawDomains);
+        if (!matchesDomainAllowlist(redirectDomain, implicitAllowlist)) {
+          log.warn({ skillId: skill.id, location: resolvedUrl, rule: 'redirect.implicit_skill_allowlist' },
+            'Redirect to domain not in skill allowlist');
+          return failureResult(startTime, tier, FailureCause.UNKNOWN);
+        }
+      } else {
+        const redirectCheck = checkRedirectAllowed(skill.siteId, resolvedUrl, currentUrl, options?.config);
+        if (!redirectCheck.allowed) {
+          log.warn({ skillId: skill.id, location: resolvedUrl, rule: redirectCheck.rule },
+            'Redirect to disallowed domain blocked');
+          return failureResult(startTime, tier, FailureCause.UNKNOWN);
+        }
+      }
+
+      // IP check — also pin the resolved IP for the redirect fetch
       const ipCheck = await resolveAndValidate(redirectDomain);
       if (!ipCheck.allowed) {
         log.warn({ skillId: skill.id, domain: redirectDomain, ip: ipCheck.ip }, 'Redirect to private IP blocked');
         return failureResult(startTime, tier, FailureCause.UNKNOWN);
       }
+      resolvedIp = ipCheck.ip;
     }
 
-    // Follow the redirect
     const redirectResp = await directFetch(
-      { ...request, url: finalResponse.headers['location'] },
+      { ...request, url: resolvedUrl },
       maxResponseBytes,
       options?.fetchFn,
+      resolvedIp,
     );
     finalResponse = redirectResp;
+    currentUrl = resolvedUrl;  // Update for next hop
     redirectCount++;
   }
 
@@ -390,6 +455,12 @@ async function classifyFailure(
     // Without metrics data or insufficient history, fall through to UNKNOWN
   }
 
+  // 2.5: Server errors (5xx) — map to UNKNOWN with better logging
+  if (response.status >= 500 && response.status < 600) {
+    log.info({ skillId: skill.id, status: response.status }, 'Server error (5xx) — classified as UNKNOWN');
+    return FailureCause.UNKNOWN;
+  }
+
   // 3-5. js_computed_field / protocol_sensitivity / signed_payload
   // First check if already known via permanent tier lock
   if (skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'js_computed_field') {
@@ -427,7 +498,7 @@ async function classifyFailure(
         return FailureCause.SIGNED_PAYLOAD;
       }
     } catch (err) {
-      log.debug({ skillId: skill.id, err }, 'Tier comparison probe failed, continuing classification');
+      log.warn({ skillId: skill.id, err }, 'Tier comparison probe failed');
     }
   }
 
@@ -456,14 +527,37 @@ async function directFetch(
   request: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
   maxResponseBytes: number,
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>,
+  pinnedIp?: string,
 ): Promise<SealedFetchResponse> {
   if (fetchFn) {
     return fetchFn(request);
   }
 
-  const response = await fetch(request.url, {
+  // CR-01: Pin to the resolved IP to prevent DNS rebinding TOCTOU attacks.
+  // Replace the hostname in the URL with the resolved IP, and set the Host
+  // header to the original hostname for correct routing and TLS SNI.
+  let fetchUrl = request.url;
+  const fetchHeaders = { ...request.headers };
+  if (pinnedIp) {
+    try {
+      const parsed = new URL(request.url);
+      const originalHost = parsed.host; // includes port if non-default
+      // For IPv6 addresses, wrap in brackets
+      const ipForUrl = pinnedIp.includes(':') ? `[${pinnedIp}]` : pinnedIp;
+      parsed.hostname = ipForUrl;
+      fetchUrl = parsed.toString();
+      // Set Host header so the server routes correctly
+      if (!fetchHeaders['Host'] && !fetchHeaders['host']) {
+        fetchHeaders['Host'] = originalHost;
+      }
+    } catch (err) {
+      log.warn({ url: request.url, pinnedIp, err }, 'Failed to pin IP in URL — falling back to original hostname');
+    }
+  }
+
+  const response = await fetch(fetchUrl, {
     method: request.method,
-    headers: request.headers,
+    headers: fetchHeaders,
     body: request.body,
     redirect: 'manual',  // never auto-follow redirects
   });
@@ -536,8 +630,11 @@ async function fullBrowserExecution(
     };
   }
 
-  // Fallback: return empty response
-  return { status: 0, headers: {}, body: '' };
+  // No matching request found in browser network traffic — fail explicitly
+  // rather than returning a fabricated { status: 0 } response that would
+  // be indistinguishable from a network-level failure.
+  log.error({ skillId: skill.id }, 'Browser execution failed: no matching request found in network traffic');
+  throw new Error(`Full browser execution found no matching request for ${skill.method} ${skill.pathTemplate}`);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -590,20 +687,4 @@ function failureResult(startTime: number, tier: ExecutionTierName, cause: Failur
   };
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Execution timed out after ${ms}ms`));
-    }, ms);
-
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-  });
-}
+// withTimeout imported from core/utils.ts

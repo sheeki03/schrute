@@ -1,4 +1,6 @@
 import { getLogger } from '../core/logger.js';
+import { extractPathParams } from '../core/utils.js';
+import { isDomainMatch } from '../shared/domain-utils.js';
 import type {
   SkillSpec,
   ExecutionTierName,
@@ -46,39 +48,13 @@ export function buildRequest(
   tier: ExecutionTierName,
   authRecipe?: AuthRecipe,
 ): BuildRequestResult {
-  // Resolve parameterized URL: /users/{id} -> /users/123
-  let url = skill.pathTemplate;
-  const pathParamNames = extractPathParams(skill.pathTemplate);
+  // Resolve parameterized URL
+  const resolved = resolveUrl(skill.pathTemplate, params, skill.allowedDomains, skill.siteId);
+  let url = resolved.url;
+  const pathParamNames = resolved.pathParamNames;
 
-  for (const paramName of pathParamNames) {
-    if (paramName in params) {
-      url = url.replace(
-        `{${paramName}}`,
-        encodeURIComponent(String(params[paramName])),
-      );
-    }
-  }
-
-  // Ensure full URL
-  if (!url.startsWith('http')) {
-    const domain = skill.allowedDomains[0] ?? skill.siteId;
-    url = `https://${domain}${url}`;
-  }
-
-  // Build base headers from captured samples (safe static headers)
-  const headers: Record<string, string> = {};
-
-  // Copy safe static browser headers from requiredHeaders
-  if (skill.requiredHeaders) {
-    for (const [key, value] of Object.entries(skill.requiredHeaders)) {
-      headers[key] = value;
-    }
-  }
-
-  // Ensure basic accept header
-  if (!headers['accept']) {
-    headers['accept'] = 'application/json';
-  }
+  // Build base headers
+  const headers = buildDefaultHeaders(skill.requiredHeaders);
 
   // Inject auth if skill has authType and recipe is provided
   if (skill.authType && authRecipe) {
@@ -86,36 +62,12 @@ export function buildRequest(
   }
 
   // Build body for write methods, or query params for GET/HEAD
-  let body: string | undefined;
-  const upperMethod = skill.method.toUpperCase();
-
-  if (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH') {
-    const bodyParams: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        bodyParams[key] = value;
-      }
-    }
-    if (Object.keys(bodyParams).length > 0) {
-      body = JSON.stringify(bodyParams);
-      headers['content-type'] = headers['content-type'] ?? 'application/json';
-    }
-  } else if (upperMethod === 'GET' || upperMethod === 'HEAD') {
-    const queryEntries: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        queryEntries.push(
-          `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
-        );
-      }
-    }
-    if (queryEntries.length > 0) {
-      const separator = url.includes('?') ? '&' : '?';
-      url = `${url}${separator}${queryEntries.join('&')}`;
-    }
-  }
+  const bodyResult = buildBodyOrQuery(skill.method, url, params, pathParamNames, headers);
+  url = bodyResult.url;
+  const body = bodyResult.body;
 
   // Derive Origin/Referer from target domain at runtime (never from captures)
+  const upperMethod = skill.method.toUpperCase();
   const targetDomain = extractDomain(url);
   if (targetDomain && (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH')) {
     headers['origin'] = `https://${targetDomain}`;
@@ -145,7 +97,7 @@ export function buildRequest(
 
 // ─── Auth Injection ─────────────────────────────────────────────
 
-function injectAuth(
+export function injectAuth(
   headers: Record<string, string>,
   recipe: AuthRecipe,
 ): void {
@@ -173,11 +125,7 @@ function filterHeadersForTier(
 ): Record<string, string> {
   const filtered: Record<string, string> = {};
   const isDomainAllowlisted = requestDomain
-    ? allowedDomains.some(
-        (d) =>
-          requestDomain === d.toLowerCase() ||
-          requestDomain.endsWith('.' + d.toLowerCase()),
-      )
+    ? isDomainMatch(requestDomain, allowedDomains)
     : false;
 
   for (const [key, value] of Object.entries(headers)) {
@@ -229,13 +177,98 @@ function filterHeadersForTier(
   return filtered;
 }
 
-// ─── Helpers ────────────────────────────────────────────────────
+// ─── Shared Request Building Helpers ─────────────────────────────
+// Used by compiler.ts and validator.ts to avoid duplicating URL resolution,
+// header defaults, and body/query construction.
 
-function extractPathParams(template: string): string[] {
-  const matches = template.match(/\{(\w+)\}/g);
-  if (!matches) return [];
-  return matches.map((m) => m.slice(1, -1));
+/**
+ * Resolve a parameterized path template to a full URL.
+ * Replaces {param} placeholders with URL-encoded values from params.
+ * Prepends https://{domain} if the path is not already a full URL.
+ */
+export function resolveUrl(
+  pathTemplate: string,
+  params: Record<string, unknown>,
+  allowedDomains: string[],
+  siteId: string,
+): { url: string; pathParamNames: string[] } {
+  let url = pathTemplate;
+  const pathParamNames = extractPathParams(pathTemplate);
+
+  for (const paramName of pathParamNames) {
+    if (paramName in params) {
+      url = url.replace(
+        `{${paramName}}`,
+        encodeURIComponent(String(params[paramName])),
+      );
+    }
+  }
+
+  if (!url.startsWith('http')) {
+    const domain = allowedDomains[0] ?? siteId;
+    url = `https://${domain}${url}`;
+  }
+
+  return { url, pathParamNames };
 }
+
+/**
+ * Build default headers for a request: accept + requiredHeaders from the skill.
+ */
+export function buildDefaultHeaders(
+  requiredHeaders?: Record<string, string>,
+): Record<string, string> {
+  return {
+    accept: 'application/json',
+    ...(requiredHeaders ?? {}),
+  };
+}
+
+/**
+ * Build body (for POST/PUT/PATCH) or append query params (for GET/HEAD).
+ * Excludes path parameters from the body/query.
+ * Returns the potentially modified URL and optional body string.
+ */
+export function buildBodyOrQuery(
+  method: string,
+  url: string,
+  params: Record<string, unknown>,
+  pathParamNames: string[],
+  headers: Record<string, string>,
+): { url: string; body?: string } {
+  const upperMethod = method.toUpperCase();
+
+  if (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH') {
+    const bodyParams: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (!pathParamNames.includes(key)) {
+        bodyParams[key] = value;
+      }
+    }
+    if (Object.keys(bodyParams).length > 0) {
+      const body = JSON.stringify(bodyParams);
+      headers['content-type'] = headers['content-type'] ?? 'application/json';
+      return { url, body };
+    }
+  } else if (upperMethod === 'GET' || upperMethod === 'HEAD') {
+    const queryEntries: string[] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (!pathParamNames.includes(key)) {
+        queryEntries.push(
+          `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
+        );
+      }
+    }
+    if (queryEntries.length > 0) {
+      const separator = url.includes('?') ? '&' : '?';
+      return { url: `${url}${separator}${queryEntries.join('&')}` };
+    }
+  }
+
+  return { url };
+}
+
+// ─── Helpers ────────────────────────────────────────────────────
 
 export function extractDomain(url: string): string | undefined {
   try {

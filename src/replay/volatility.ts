@@ -78,6 +78,7 @@ export function scoreVolatility(samples: RequestSample[]): FieldVolatility[] {
     const entropy = shannonEntropy(values);
     const changeRate = computeChangeRate(values);
     const isStatic = changeRate === 0;
+    // Shannon entropy thresholds: >3.0 indicates high randomness (likely nonce/token), >2.0 moderate variability
     const looksLikeNonce = entropy > 3.0 && changeRate >= 0.9;
     const looksLikeToken = !looksLikeNonce && changeRate > 0 && changeRate < 0.9 && entropy > 2.0;
 

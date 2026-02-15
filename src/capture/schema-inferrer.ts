@@ -16,8 +16,6 @@ export interface JsonSchema {
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-const MAX_ENUM_SIZE = 20;
-
 export function inferSchema(samples: unknown[]): JsonSchema {
   if (samples.length === 0) {
     return {};
@@ -158,58 +156,3 @@ function normalizeType(type: string | string[] | undefined): string[] {
   return [type];
 }
 
-// ─── Enum Detection ──────────────────────────────────────────────────
-
-export function detectEnums(
-  samples: Record<string, unknown>[],
-): Record<string, unknown[]> {
-  if (samples.length < 2) return {};
-
-  const valueSets = new Map<string, Set<string>>();
-
-  for (const sample of samples) {
-    collectLeafValues(sample, '', valueSets);
-  }
-
-  const enums: Record<string, unknown[]> = {};
-
-  for (const [path, values] of valueSets) {
-    if (values.size >= 2 && values.size <= MAX_ENUM_SIZE && values.size < samples.length) {
-      enums[path] = [...values];
-    }
-  }
-
-  return enums;
-}
-
-function collectLeafValues(
-  obj: unknown,
-  prefix: string,
-  valueSets: Map<string, Set<string>>,
-): void {
-  if (obj === null || obj === undefined) return;
-
-  if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') {
-    const key = prefix || '$';
-    let set = valueSets.get(key);
-    if (!set) {
-      set = new Set();
-      valueSets.set(key, set);
-    }
-    set.add(String(obj));
-    return;
-  }
-
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      collectLeafValues(item, `${prefix}[]`, valueSets);
-    }
-    return;
-  }
-
-  if (typeof obj === 'object') {
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      collectLeafValues(value, prefix ? `${prefix}.${key}` : key, valueSets);
-    }
-  }
-}

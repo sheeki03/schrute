@@ -63,7 +63,7 @@ export function buildOpenApiSpec(
       mergeFragment(spec, fragment, skill);
       siteIds.add(skill.siteId);
     } catch (err) {
-      log.warn({ skillId: skill.id, err }, 'Failed to generate OpenAPI fragment for skill');
+      log.warn({ err, skillId: skill.id }, 'Failed to generate OpenAPI fragment for skill — omitting from spec');
     }
   }
 

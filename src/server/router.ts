@@ -98,10 +98,8 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      // Require first-run confirmation for non-idempotent skills unless globally confirmed
-      const needsConfirmation =
-        skill.sideEffectClass !== 'read-only' &&
-        !confirmation.isSkillConfirmed(skill.id);
+      // Gate ALL unconfirmed skills through confirmation, regardless of side-effect class
+      const needsConfirmation = !confirmation.isSkillConfirmed(skill.id);
 
       if (needsConfirmation) {
         const token = await confirmation.generateToken(
@@ -286,15 +284,17 @@ export function createRouter(deps: RouterDeps) {
       const reversed = lines.slice().reverse();
       const page = reversed.slice(offset, offset + limit);
       const entries: AuditEntry[] = [];
+      let skippedCount = 0;
       for (const line of page) {
         try {
           entries.push(JSON.parse(line) as AuditEntry);
         } catch {
-          // Skip malformed entries
+          skippedCount++;
+          log.warn({ entry: line }, 'Skipping malformed audit log entry');
         }
       }
 
-      return { success: true, data: { entries, total, offset, limit } };
+      return { success: true, data: { entries, total, offset, limit, skippedCount } };
     },
 
     // ─── Health ────────────────────────────────────────────

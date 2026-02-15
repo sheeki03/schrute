@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { isDomainMatch } from '../shared/domain-utils.js';
 import type {
   OneAgentConfig,
   ToolBudgetConfig,
@@ -87,9 +88,8 @@ export class ToolBudgetTracker {
       const normalizedTarget = options.targetDomain.toLowerCase();
       const normalizedSite = siteId.toLowerCase();
       const isSameDomain =
-        normalizedTarget === normalizedSite ||
-        normalizedTarget.endsWith('.' + normalizedSite) ||
-        normalizedSite.endsWith('.' + normalizedTarget);
+        isDomainMatch(normalizedTarget, [normalizedSite]) ||
+        isDomainMatch(normalizedSite, [normalizedTarget]);
 
       if (!isSameDomain && !this.config.crossDomainCalls) {
         return {
@@ -103,22 +103,12 @@ export class ToolBudgetTracker {
     // Secrets to non-allowlisted domain: HARD DENY (never overridable)
     if (options?.hasSecrets && options?.targetDomain) {
       const normalizedTarget = options.targetDomain.toLowerCase();
-      if (!this.domainAllowlist.has(normalizedTarget)) {
-        // Also check subdomain matching
-        let isAllowlisted = false;
-        for (const allowed of this.domainAllowlist) {
-          if (normalizedTarget.endsWith('.' + allowed)) {
-            isAllowlisted = true;
-            break;
-          }
-        }
-        if (!isAllowlisted) {
-          return {
-            allowed: false,
-            reason: `HARD DENY: secrets to non-allowlisted domain '${normalizedTarget}'`,
-            rule: 'budget.secrets_non_allowlisted',
-          };
-        }
+      if (!isDomainMatch(normalizedTarget, this.domainAllowlist)) {
+        return {
+          allowed: false,
+          reason: `HARD DENY: secrets to non-allowlisted domain '${normalizedTarget}'`,
+          rule: 'budget.secrets_non_allowlisted',
+        };
       }
     }
 

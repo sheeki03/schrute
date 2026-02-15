@@ -29,7 +29,7 @@ export interface SiteOverride {
   classification: RequestClassificationName;
 }
 
-// ─── Polling Detection State ─────────────────────────────────────────
+// ─── Polling Detection ───────────────────────────────────────────────
 
 interface RequestSignature {
   method: string;
@@ -37,23 +37,13 @@ interface RequestSignature {
   timestamps: number[];
 }
 
-// ─── Public API ──────────────────────────────────────────────────────
-
-export function filterRequests(
-  entries: HarEntry[],
-  overrides: SiteOverride[] = [],
-): FilterResult {
-  const signal: HarEntry[] = [];
-  const noise: HarEntry[] = [];
-  const ambiguous: HarEntry[] = [];
-
-  // Build override map: domain -> classification
-  const overrideMap = new Map<string, RequestClassificationName>();
-  for (const o of overrides) {
-    overrideMap.set(o.domain.toLowerCase(), o.classification);
-  }
-
-  // Build request signature map for polling detection
+/**
+ * Detect polling/heartbeat patterns in a list of HAR entries.
+ * Returns a Set of signature keys (method|url) that exhibit regular-interval
+ * repetition (3+ requests with coefficient of variation < 0.3).
+ */
+function detectPollingPatterns(entries: HarEntry[]): Set<string> {
+  // Build request signature map
   const sigMap = new Map<string, RequestSignature>();
   for (const entry of entries) {
     const key = `${entry.request.method}|${entry.request.url}`;
@@ -85,6 +75,27 @@ export function filterRequests(
       }
     }
   }
+
+  return pollingUrls;
+}
+
+// ─── Public API ──────────────────────────────────────────────────────
+
+export function filterRequests(
+  entries: HarEntry[],
+  overrides: SiteOverride[] = [],
+): FilterResult {
+  const signal: HarEntry[] = [];
+  const noise: HarEntry[] = [];
+  const ambiguous: HarEntry[] = [];
+
+  // Build override map: domain -> classification
+  const overrideMap = new Map<string, RequestClassificationName>();
+  for (const o of overrides) {
+    overrideMap.set(o.domain.toLowerCase(), o.classification);
+  }
+
+  const pollingUrls = detectPollingPatterns(entries);
 
   for (const entry of entries) {
     const { classification, reason } = classifyEntry(entry, overrideMap, pollingUrls);
@@ -119,35 +130,7 @@ export function recordFilteredEntries(
     overrideMap.set(o.domain.toLowerCase(), o.classification);
   }
 
-  const sigMap = new Map<string, RequestSignature>();
-  for (const entry of entries) {
-    const key = `${entry.request.method}|${entry.request.url}`;
-    let sig = sigMap.get(key);
-    if (!sig) {
-      sig = { method: entry.request.method, url: entry.request.url, timestamps: [] };
-      sigMap.set(key, sig);
-    }
-    sig.timestamps.push(new Date(entry.startedDateTime).getTime());
-  }
-
-  const pollingUrls = new Set<string>();
-  for (const [key, sig] of sigMap) {
-    if (sig.timestamps.length >= 3) {
-      const sorted = sig.timestamps.sort((a, b) => a - b);
-      const intervals: number[] = [];
-      for (let i = 1; i < sorted.length; i++) {
-        intervals.push(sorted[i] - sorted[i - 1]);
-      }
-      const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-      if (mean > 0) {
-        const variance = intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / intervals.length;
-        const cv = Math.sqrt(variance) / mean;
-        if (cv < 0.3) {
-          pollingUrls.add(key);
-        }
-      }
-    }
-  }
+  const pollingUrls = detectPollingPatterns(entries);
 
   const signal: HarEntry[] = [];
   const noise: HarEntry[] = [];

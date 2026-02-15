@@ -265,8 +265,9 @@ function extractSetCookies(record: StructuredRecord): Map<string, string> {
 
   if (!setCookieHeader) return cookies;
 
-  // set-cookie may be concatenated with newlines or commas
-  const parts = setCookieHeader.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+  // set-cookie headers are concatenated with newlines (NOT commas —
+  // commas appear inside Expires values like "Thu, 01 Jan 2026")
+  const parts = setCookieHeader.split(/\n/).map(s => s.trim()).filter(Boolean);
   for (const part of parts) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;

@@ -1,12 +1,13 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { getLogger } from '../core/logger.js';
+import { verifyBearerToken } from '../shared/auth-utils.js';
 import { getConfig } from '../core/config.js';
 import { Engine } from '../core/engine.js';
 import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
 import { ConfirmationManager } from './confirmation.js';
-import { createRouter, type RouterResult } from './router.js';
+import { createRouter, type RouterDeps, type RouterResult } from './router.js';
 import { buildOpenApiSpec } from './openapi-server.js';
 
 const log = getLogger();
@@ -82,15 +83,38 @@ function routerResultToReply(
 export async function createRestServer(options?: {
   host?: string;
   port?: number;
+  deps?: RouterDeps;
 }): Promise<FastifyInstance> {
-  const config = getConfig();
-  const engine = new Engine(config);
-  const db = getDatabase(config);
-  const skillRepo = new SkillRepository(db);
-  const siteRepo = new SiteRepository(db);
+  // Use injected deps if provided, otherwise create standalone deps (for backward compat / tests)
+  let engine: Engine;
+  let skillRepo: SkillRepository;
+  let siteRepo: SiteRepository;
+  let config;
+  let ownEngine = false;
 
-  const confirmation = new ConfirmationManager(db, config);
+  if (options?.deps) {
+    ({ engine, skillRepo, siteRepo, config } = options.deps);
+  } else {
+    config = getConfig();
+    engine = new Engine(config);
+    const db = getDatabase(config);
+    skillRepo = new SkillRepository(db);
+    siteRepo = new SiteRepository(db);
+    ownEngine = true;
+  }
+
+  const confirmation = options?.deps?.confirmation ?? new ConfirmationManager(getDatabase(config), config);
   const router = createRouter({ engine, skillRepo, siteRepo, config, confirmation });
+
+  // Security invariant: network mode requires auth token — fail-closed.
+  // This prevents alternate entry paths (e.g., direct createRestServer() calls)
+  // from starting unauthenticated. Both mcp-http.ts and rest-server.ts enforce this independently.
+  if (config.server.network && !config.server.authToken) {
+    throw new Error(
+      'REST server requires config.server.authToken when network mode is enabled. ' +
+      'Set it with: oneagent config set server.authToken <your-secret>',
+    );
+  }
 
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3000;
@@ -98,6 +122,19 @@ export async function createRestServer(options?: {
   const app = Fastify({
     logger: false,
   });
+
+  // ─── Bearer Token Auth ────────────────────────────────────
+  if (config.server.network && config.server.authToken) {
+    app.addHook('onRequest', async (request, reply) => {
+      // Health endpoint is public (used for probes)
+      if (request.url === '/api/health') return;
+
+      if (!verifyBearerToken(request.raw, config.server.authToken!)) {
+        reply.code(401).send({ error: 'Unauthorized. Provide Authorization: Bearer <token>' });
+        return;
+      }
+    });
+  }
 
   // ─── Health ──────────────────────────────────────────────
   app.get('/api/health', async (_request, reply) => {
@@ -249,8 +286,11 @@ export async function createRestServer(options?: {
 
   // ─── Shutdown Hook ───────────────────────────────────────
   app.addHook('onClose', async () => {
-    await engine.close();
-    log.info('REST server closed, engine shut down');
+    // Only close engine if we created it (standalone mode)
+    if (ownEngine) {
+      await engine.close();
+    }
+    log.info('REST server closed');
   });
 
   log.info({ host, port }, 'REST server created');
@@ -263,6 +303,7 @@ export async function createRestServer(options?: {
 export async function startRestServer(options?: {
   host?: string;
   port?: number;
+  deps?: RouterDeps;
 }): Promise<FastifyInstance> {
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3000;

@@ -19,16 +19,16 @@ async function getConfirmationKey(): Promise<Buffer> {
       confirmationHmacKey = Buffer.from(stored, 'hex');
       return confirmationHmacKey;
     }
-  } catch {
-    // Keychain unavailable
+  } catch (err) {
+    log.warn({ err }, 'Keychain unavailable for confirmation key — using ephemeral key');
   }
 
-  // Generate and persist
+  // Generate and persist (best-effort)
   const key = randomBytes(32);
   try {
     await store(CONFIRMATION_KEY_NAME, key.toString('hex'));
-  } catch {
-    // Best effort — fall back to ephemeral
+  } catch (err) {
+    log.warn({ err }, 'Failed to persist confirmation HMAC key — using ephemeral key (will not survive daemon restart)');
   }
   confirmationHmacKey = key;
   return key;
@@ -74,13 +74,18 @@ export class ConfirmationManager {
     const now = Date.now();
     const expiresAt = now + this.config.confirmationExpiryMs;
 
-    // Sign with HMAC to produce the tokenId
+    // Architecture note: The random nonce is intentionally included in the HMAC but not stored separately.
+    // The HMAC output serves as a cryptographically unique, unpredictable token ID.
+    // Verification is done via DB presence check (only this daemon instance can create/verify tokens).
+    // Re-computing the HMAC is unnecessary since the token is effectively a signed random value —
+    // if it exists in the DB, it was created by this daemon with the correct HMAC key.
     const hmacPayload = `${skillId}|${paramsHash}|${tier}|${expiresAt}|${nonce}`;
     const tokenId = createHmac('sha256', hmacKey)
       .update(hmacPayload)
       .digest('hex');
 
-    // Persist nonce in DB
+    // Note: The DB column 'nonce' stores an HMAC-derived token ID, not the random nonce
+    // used during HMAC computation. The random nonce is discarded after generating the token ID.
     this.db.run(
       `INSERT INTO confirmation_nonces (nonce, skill_id, params_hash, tier, created_at, expires_at, consumed, consumed_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, NULL)`,

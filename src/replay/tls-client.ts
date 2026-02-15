@@ -42,9 +42,9 @@ async function getCycleTls(): Promise<CycleTlsInstance | null> {
     cycleTlsAvailable = true;
     log.info('CycleTLS loaded successfully');
     return cycleTlsInstance;
-  } catch {
+  } catch (err) {
     cycleTlsAvailable = false;
-    log.debug('CycleTLS not available, using native fetch fallback');
+    log.debug({ err }, 'CycleTLS availability check failed');
     return null;
   }
 }
@@ -81,24 +81,31 @@ async function cycleTlsFetch(
   }
 
   const timeout = options?.timeout ?? 30000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const result = await Promise.race([
-    tls(req.url, {
-      method: req.method,
-      headers,
-      body: req.body ?? '',
-      ja3: options?.ja3,
-      userAgent: options?.userAgent,
-      timeout,
-    }),
-    rejectAfter(timeout),
-  ]);
+  try {
+    const result = await Promise.race([
+      tls(req.url, {
+        method: req.method,
+        headers,
+        body: req.body ?? '',
+        ja3: options?.ja3,
+        userAgent: options?.userAgent,
+        timeout,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`TLS fetch timed out after ${timeout}ms`)), timeout);
+      }),
+    ]);
 
-  return {
-    status: result.status,
-    headers: normalizeHeaders(result.headers),
-    body: typeof result.body === 'string' ? result.body : JSON.stringify(result.body),
-  };
+    return {
+      status: result.status,
+      headers: normalizeHeaders(result.headers),
+      body: typeof result.body === 'string' ? result.body : JSON.stringify(result.body),
+    };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function nativeFetch(
@@ -144,12 +151,6 @@ function normalizeHeaders(headers: Record<string, string>): Record<string, strin
   return normalized;
 }
 
-function rejectAfter(ms: number): Promise<never> {
-  return new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`TLS fetch timed out after ${ms}ms`)), ms);
-  });
-}
-
 /**
  * Check if CycleTLS is available without triggering a load.
  */
@@ -164,8 +165,8 @@ export async function closeTlsClient(): Promise<void> {
   if (cycleTlsInstance) {
     try {
       await cycleTlsInstance.exit();
-    } catch {
-      // Instance may already be closed
+    } catch (err) {
+      log.warn({ err }, 'Failed to close CycleTLS instance');
     }
     cycleTlsInstance = null;
   }

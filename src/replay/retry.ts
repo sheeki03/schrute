@@ -11,6 +11,7 @@ const DEFAULT_MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
 const SCHEMA_DRIFT_BACKOFF_MS = 1000;
+const MAX_RETRIES_PER_TIER = 1;
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -51,6 +52,7 @@ export async function retryWithEscalation(
   const tierCascade = buildTierCascade(skill);
   let currentTierIndex = 0;
   let attempt = 0;
+  let consecutiveFailuresAtTier = 0;
 
   let lastResult: ExecutionResult | null = null;
 
@@ -84,8 +86,12 @@ export async function retryWithEscalation(
       lastResult.failureCause,
       currentTierIndex,
       tierCascade,
+      consecutiveFailuresAtTier,
     );
     retryDecisions.push(decision);
+
+    // Increment AFTER the decision
+    consecutiveFailuresAtTier++;
 
     log.debug(
       {
@@ -105,6 +111,7 @@ export async function retryWithEscalation(
     if (decision.action === 'escalate') {
       currentTierIndex = tierCascade.indexOf(decision.tier);
       if (currentTierIndex < 0) currentTierIndex = tierCascade.length - 1;
+      consecutiveFailuresAtTier = 0;  // Reset on tier change
     }
 
     attempt++;
@@ -126,6 +133,7 @@ function decideRetry(
   failureCause: FailureCauseName | undefined,
   currentTierIndex: number,
   tierCascade: ExecutionTierName[],
+  consecutiveFailuresAtTier: number,
 ): RetryDecision {
   if (attempt >= maxRetries) {
     return {
@@ -221,24 +229,32 @@ function decideRetry(
     };
   }
 
-  // Unknown: try escalating tier
-  const nextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
-  if (nextTierIndex > currentTierIndex) {
+  // UNKNOWN: backoff-then-escalate with per-tier cap
+  if (consecutiveFailuresAtTier < MAX_RETRIES_PER_TIER) {
     return {
       attempt,
-      tier: tierCascade[nextTierIndex],
+      tier: tierCascade[currentTierIndex],
+      action: 'retry',
+      reason: 'Unknown failure — retrying same tier with backoff',
+      backoffMs: BASE_BACKOFF_MS * Math.pow(2, attempt),
+    };
+  }
+  const unknownNextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
+  if (unknownNextTierIndex > currentTierIndex) {
+    return {
+      attempt,
+      tier: tierCascade[unknownNextTierIndex],
       action: 'escalate',
-      reason: 'Unknown failure — escalating tier',
+      reason: 'Unknown failure — escalating after same-tier retry',
       backoffMs: 0,
     };
   }
-
   return {
     attempt,
     tier: tierCascade[currentTierIndex],
-    action: 'retry',
-    reason: 'Unknown failure — retrying',
-    backoffMs: BASE_BACKOFF_MS * Math.pow(2, attempt),
+    action: 'abort',
+    reason: 'Unknown failure — all tiers exhausted',
+    backoffMs: 0,
   };
 }
 

@@ -135,8 +135,6 @@ export function canonicalizeRequest(req: StructuredRequest): CanonicalizedReques
         canonicalBody = canonicalizeJsonBody(req.body);
       }
     }
-  } else if (ct.includes('application/json')) {
-    canonicalBody = canonicalizeJsonBody(req.body);
   }
 
   return {

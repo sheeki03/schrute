@@ -190,14 +190,65 @@ export const META_TOOLS = [
 
 // ─── Browser Tool Proxy Definition ───────────────────────────────
 
+// Tools that are NOT allowed inside a batch (inlined to avoid import coupling)
+const BATCH_UNSAFE_TOOLS = new Set([
+  'browser_close',
+  'browser_navigate',
+  'browser_batch_actions',
+]);
+
+const BATCH_MAX_ACTIONS = 20;
+
 export function getBrowserToolDefinitions() {
-  return ALLOWED_BROWSER_TOOLS.map((name) => ({
-    name,
-    description: `Playwright browser tool: ${name.replace('browser_', '').replace(/_/g, ' ')}`,
-    inputSchema: {
-      type: 'object' as const,
-      properties: {},
-      additionalProperties: true,
-    },
-  }));
+  return ALLOWED_BROWSER_TOOLS.map((name) => {
+    // Special-case: explicit schema for browser_batch_actions
+    if (name === 'browser_batch_actions') {
+      const batchableTtools = (ALLOWED_BROWSER_TOOLS as readonly string[])
+        .filter(t => !BATCH_UNSAFE_TOOLS.has(t));
+
+      return {
+        name,
+        description:
+          'Execute multiple browser actions in a single call. Returns results array + final snapshot.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            actions: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                properties: {
+                  tool: {
+                    type: 'string' as const,
+                    enum: batchableTtools,
+                    description:
+                      'Browser tool name. Only safe, non-nesting tools are allowed in batches.',
+                  },
+                  args: {
+                    type: 'object' as const,
+                    description: 'Tool arguments',
+                  },
+                },
+                required: ['tool', 'args'] as const,
+              },
+              maxItems: BATCH_MAX_ACTIONS,
+              description: 'Array of actions to execute sequentially',
+            },
+          },
+          required: ['actions'] as const,
+        },
+      };
+    }
+
+    // Default: generic schema for all other browser tools
+    return {
+      name,
+      description: `Playwright browser tool: ${name.replace('browser_', '').replace(/_/g, ' ')}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+        additionalProperties: true,
+      },
+    };
+  });
 }
