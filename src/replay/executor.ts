@@ -19,7 +19,7 @@ import {
 } from '../skill/types.js';
 import { buildRequest, extractDomain } from './request-builder.js';
 import { parseResponse } from './response-parser.js';
-import { checkSemantic } from './semantic-check.js';
+import { checkSemanticNative as checkSemantic } from '../native/semantic-diff.js';
 import { AuditLog } from './audit-log.js';
 import { ToolBudgetTracker } from './tool-budget.js';
 import {

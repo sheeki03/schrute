@@ -22,10 +22,10 @@ import { RateLimiter } from '../automation/rate-limiter.js';
 import { refreshCookies } from '../automation/cookie-refresh.js';
 import { SideEffectClass, FailureCause } from '../skill/types.js';
 import { detectAuth } from '../capture/auth-detector.js';
-import { discoverParams } from '../capture/param-discoverer.js';
+import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
 import { parseHar, extractRequestResponse, type StructuredRecord } from '../capture/har-extractor.js';
-import { filterRequests } from '../capture/noise-filter.js';
+import { filterRequestsNative as filterRequests } from '../native/noise-filter.js';
 import { clusterEndpoints } from '../capture/api-extractor.js';
 import { generateSkill } from '../skill/generator.js';
 

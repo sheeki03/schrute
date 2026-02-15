@@ -2,7 +2,8 @@ import * as crypto from 'node:crypto';
 import type { ActionFrame } from '../skill/types.js';
 import type { AgentDatabase } from '../storage/database.js';
 import { getLogger } from '../core/logger.js';
-import { filterRequests, recordFilteredEntries } from './noise-filter.js';
+import { filterRequestsNative as filterRequests } from '../native/noise-filter.js';
+import { recordFilteredEntries } from './noise-filter.js';
 import type { HarEntry } from './har-extractor.js';
 
 const log = getLogger();

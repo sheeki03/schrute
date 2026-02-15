@@ -1,6 +1,6 @@
 import type { SideEffectClassName } from './types.js';
 import { SideEffectClass } from './types.js';
-import { checkPathRisk } from './path-risk.js';
+import { checkPathRiskNative as checkPathRisk } from '../native/path-risk.js';
 
 // ─── Observed Effects ───────────────────────────────────────────
 

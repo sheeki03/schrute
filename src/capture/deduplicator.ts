@@ -1,4 +1,4 @@
-import { canonicalizeRequest } from './canonicalizer.js';
+import { canonicalizeRequestNative as canonicalizeRequest } from '../native/canonicalizer.js';
 import { parameterizePath } from './api-extractor.js';
 import type { StructuredRecord } from './har-extractor.js';
 import type { RequestSample } from './param-discoverer.js';
