@@ -42,13 +42,13 @@ export function computeEntryHashNative(
     }
   }
 
-  // TS fallback
+  // TS fallback — use null (not undefined) to match Rust serialization
   const entry = JSON.parse(entryJson);
   const withHashes = {
     ...entry,
     previousHash,
-    entryHash: undefined,
-    signature: undefined,
+    entryHash: null,
+    signature: null,
   };
   const payload = JSON.stringify(withHashes);
   return createHash('sha256').update(payload).digest('hex');

@@ -61,13 +61,13 @@ function redactValue(value: string, fieldPath: string, salt: string): string {
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-export function discoverParams(recordings: RequestSample[]): ParameterEvidence[] {
+export function discoverParams(recordings: RequestSample[], salt?: string): ParameterEvidence[] {
   if (recordings.length < 2) {
     log.warn('Parameter discovery requires at least 2 recordings');
     return [];
   }
 
-  const salt = crypto.randomBytes(16).toString('hex');
+  const effectiveSalt = salt ?? crypto.randomBytes(16).toString('hex');
 
   // Collect observations across all recordings
   const observations = collectObservations(recordings);
@@ -77,7 +77,7 @@ export function discoverParams(recordings: RequestSample[]): ParameterEvidence[]
 
   for (const [path, obs] of observations) {
     const classification = classifyField(obs, recordings);
-    const redactedValues = obs.values.map(v => redactValue(v, path, salt));
+    const redactedValues = obs.values.map(v => redactValue(v, path, effectiveSalt));
 
     // Check correlation with declared inputs
     const correlatesWithInput = checkInputCorrelation(obs, recordings);

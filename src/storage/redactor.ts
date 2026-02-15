@@ -143,10 +143,24 @@ export async function redactBody(
   }, timeoutMs);
 }
 
-async function redactObject(obj: unknown): Promise<unknown> {
+const SENSITIVE_FIELD_NAMES = new Set([
+  'password', 'passwd', 'secret', 'token', 'api_key', 'apikey',
+  'api_secret', 'access_token', 'refresh_token', 'private_key',
+  'client_secret', 'credential', 'credentials', 'ssn', 'credit_card',
+]);
+
+function isSensitiveFieldName(key: string): boolean {
+  return SENSITIVE_FIELD_NAMES.has(key.toLowerCase());
+}
+
+async function redactObject(obj: unknown, parentKey?: string): Promise<unknown> {
   if (obj === null || obj === undefined) return obj;
 
   if (typeof obj === 'string') {
+    // If the parent field name is sensitive, always redact the value
+    if (parentKey && isSensitiveFieldName(parentKey)) {
+      return hmacRedact(obj);
+    }
     return redactString(obj);
   }
 
@@ -155,13 +169,13 @@ async function redactObject(obj: unknown): Promise<unknown> {
   }
 
   if (Array.isArray(obj)) {
-    return Promise.all(obj.map(item => redactObject(item)));
+    return Promise.all(obj.map(item => redactObject(item, parentKey)));
   }
 
   if (typeof obj === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      result[key] = await redactObject(value);
+      result[key] = await redactObject(value, key);
     }
     return result;
   }

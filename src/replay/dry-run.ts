@@ -7,6 +7,11 @@ import type {
   FieldVolatility,
 } from '../skill/types.js';
 import { buildRequest } from './request-builder.js';
+import {
+  redactHeaders as canonicalRedactHeaders,
+  redactBody as canonicalRedactBody,
+  redactString,
+} from '../storage/redactor.js';
 
 const log = getLogger();
 
@@ -23,23 +28,9 @@ export interface DryRunResult {
   tierDecision?: string;
 }
 
-// ─── Redaction Patterns ─────────────────────────────────────────
-
-const SENSITIVE_HEADER_KEYS = [
-  'authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'x-auth-token',
-];
-
-const SENSITIVE_BODY_PATTERNS = [
-  /("(?:password|secret|token|api_key|apiKey|access_token|refresh_token|private_key|client_secret)")\s*:\s*"[^"]*"/gi,
-];
-
 // ─── Dry Run ────────────────────────────────────────────────────
 
-export function dryRun(
+export async function dryRun(
   skill: SkillSpec,
   params: Record<string, unknown>,
   mode: RedactionMode,
@@ -48,7 +39,7 @@ export function dryRun(
     volatilityReport?: FieldVolatility[];
     policyDecision?: PolicyDecision;
   },
-): DryRunResult {
+): Promise<DryRunResult> {
   // Determine tier
   const tier: ExecutionTierName = options?.tier ?? tierFromSkill(skill);
 
@@ -64,10 +55,10 @@ export function dryRun(
     redactionsApplied: [],
   };
 
-  // NEVER show raw unredacted request — always redact
-  const redactedHeaders = redactHeaders(request.headers);
-  const redactedBody = request.body ? redactBody(request.body) : undefined;
-  const redactedUrl = redactUrl(request.url);
+  // NEVER show raw unredacted request — always redact using the canonical redactor
+  const redactedHeaders = await canonicalRedactHeaders(request.headers);
+  const redactedBody = request.body ? await canonicalRedactBody(request.body) : undefined;
+  const redactedUrl = await redactUrl(request.url);
 
   const redactionsApplied: string[] = [];
   if (JSON.stringify(redactedHeaders) !== JSON.stringify(request.headers)) {
@@ -108,40 +99,15 @@ export function dryRun(
 
 // ─── Redaction Helpers ──────────────────────────────────────────
 
-function redactHeaders(headers: Record<string, string>): Record<string, string> {
-  const redacted: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (SENSITIVE_HEADER_KEYS.includes(key.toLowerCase())) {
-      redacted[key] = '[REDACTED]';
-    } else {
-      redacted[key] = value;
-    }
-  }
-  return redacted;
-}
-
-function redactBody(body: string): string {
-  let redacted = body;
-  for (const pattern of SENSITIVE_BODY_PATTERNS) {
-    redacted = redacted.replace(pattern, (match, keyPart) => {
-      return `${keyPart}: "[REDACTED]"`;
-    });
-  }
-  return redacted;
-}
-
-function redactUrl(url: string): string {
+async function redactUrl(url: string): Promise<string> {
   try {
     const parsed = new URL(url);
-    const sensitiveParams = ['token', 'api_key', 'apiKey', 'access_token', 'secret', 'key'];
-    for (const param of sensitiveParams) {
-      if (parsed.searchParams.has(param)) {
-        parsed.searchParams.set(param, '[REDACTED]');
-      }
+    for (const [key, value] of parsed.searchParams.entries()) {
+      parsed.searchParams.set(key, await redactString(value));
     }
     return parsed.toString();
   } catch {
-    return url;
+    return redactString(url);
   }
 }
 
