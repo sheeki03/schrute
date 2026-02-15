@@ -293,11 +293,15 @@ async function checkWalCheckpoint(config: OneAgentConfig): Promise<CheckResult> 
 }
 
 function checkBuildProfile(): CheckResult {
-  // v0.1: only stdio transport, no HTTP
+  const profile = process.env.ONEAGENT_BUILD_PROFILE ?? 'v01';
+  const isV01 = profile === 'v01';
+
   return {
     name: 'build_profile',
     status: 'pass',
-    message: 'v0.1 — stdio MCP transport, local-only, no HTTP',
+    message: isV01
+      ? 'v0.1 — stdio MCP transport, local-only, HTTP hard-disabled'
+      : `${profile} — all transports enabled`,
   };
 }
 

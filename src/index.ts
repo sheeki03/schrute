@@ -312,12 +312,12 @@ program
 program
   .command('trust')
   .description('Show trust posture report')
-  .action(() => {
+  .action(async () => {
     const config = getConfig();
     createLogger(config.logLevel);
     ensureDirectories(config);
 
-    const posture = getTrustPosture(config);
+    const posture = await getTrustPosture(config);
     console.log('Trust Posture Report');
     console.log('='.repeat(40));
     console.log(formatTrustReport(posture));
@@ -415,6 +415,16 @@ program
     ensureDirectories(config);
 
     if (options.http || config.server.network) {
+      // Hard v0.1 gate — HTTP transport is physically excluded from v0.1 builds
+      const BUILD_PROFILE = process.env.ONEAGENT_BUILD_PROFILE ?? 'v01';
+      if (BUILD_PROFILE === 'v01') {
+        console.error(
+          'Error: HTTP transport is not available in v0.1 builds.\n' +
+          'HTTP/REST/OpenAPI transport requires v0.2.',
+        );
+        process.exit(1);
+      }
+
       // v0.2 HTTP transport requires the feature flag
       if (!config.features.httpTransport) {
         console.error(
