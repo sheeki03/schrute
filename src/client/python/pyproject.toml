@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oneagent-client"
+version = "0.2.0"
+description = "Python client SDK for OneAgent REST API"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["oneagent", "browser-agent", "api-client", "sdk"]
+
+[project.urls]
+Homepage = "https://github.com/anthropics/oneagent"
+
+[tool.setuptools.packages.find]
+where = ["."]

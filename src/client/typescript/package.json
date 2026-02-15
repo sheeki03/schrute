@@ -1,0 +1,30 @@
+{
+  "name": "@oneagent/client",
+  "version": "0.2.0",
+  "description": "TypeScript client SDK for OneAgent REST API",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "oneagent",
+    "browser-agent",
+    "api-client",
+    "sdk"
+  ]
+}
