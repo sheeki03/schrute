@@ -13,6 +13,22 @@ import {
 
 const log = getLogger();
 
+// Tier 3 blocked headers: blocks hop-by-hop + proxy + security-sensitive
+// headers that should not be forwarded through browser-proxied fetches.
+// Less restrictive than Tier 1 (which uses an allowlist), but still filters
+// dangerous headers.
+const TIER3_BLOCKED_HEADERS: string[] = [
+  // hop-by-hop (duplicates the global filter for defense-in-depth)
+  'host', 'connection', 'transfer-encoding', 'upgrade', 'te', 'trailer',
+  'keep-alive', 'via',
+  // proxy headers
+  'proxy-authorization', 'proxy-connection', 'proxy-authenticate',
+  'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip',
+  // security-sensitive: do not leak internal routing / debug info
+  'x-request-id', 'x-correlation-id', 'x-amzn-trace-id',
+  'x-debug', 'x-debug-token', 'x-powered-by',
+];
+
 // ─── Types ──────────────────────────────────────────────────────
 
 export interface BuildRequestResult {
@@ -199,6 +215,14 @@ function filterHeadersForTier(
       }
     }
 
+    // Tier 3 specific filtering: less restrictive than Tier 1 but still
+    // blocks hop-by-hop, proxy, and security-sensitive headers
+    if (tier === ExecutionTier.BROWSER_PROXIED) {
+      if (TIER3_BLOCKED_HEADERS.includes(lowerKey)) {
+        continue;
+      }
+    }
+
     filtered[lowerKey] = value;
   }
 
@@ -213,7 +237,7 @@ function extractPathParams(template: string): string[] {
   return matches.map((m) => m.slice(1, -1));
 }
 
-function extractDomain(url: string): string | undefined {
+export function extractDomain(url: string): string | undefined {
   try {
     return new URL(url).hostname;
   } catch {

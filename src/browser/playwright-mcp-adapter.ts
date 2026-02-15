@@ -31,6 +31,16 @@ export class PlaywrightMcpAdapter implements BrowserProvider {
 
   constructor(page: Page, domainAllowlist: string[]) {
     this.page = page;
+    // Reject wildcard .domain entries — require exact domain or explicit subdomain
+    for (const domain of domainAllowlist) {
+      if (domain.startsWith('.')) {
+        throw new Error(
+          `Invalid domain allowlist entry "${domain}": wildcard entries starting ` +
+          `with "." are not allowed. Use the exact domain (e.g., "${domain.slice(1)}") ` +
+          `or list subdomains explicitly.`,
+        );
+      }
+    }
     this.domainAllowlist = domainAllowlist;
     this.setupNetworkCapture();
   }
@@ -255,11 +265,9 @@ export class PlaywrightMcpAdapter implements BrowserProvider {
     }
 
     const allowed = this.domainAllowlist.some((domain) => {
-      if (domain.startsWith('.')) {
-        // Wildcard subdomain match: .example.com matches foo.example.com
-        return hostname === domain.slice(1) || hostname.endsWith(domain);
-      }
-      return hostname === domain;
+      // Exact match or explicit subdomain match (e.g., "example.com"
+      // matches both "example.com" and "sub.example.com")
+      return hostname === domain || hostname.endsWith('.' + domain);
     });
 
     if (!allowed) {

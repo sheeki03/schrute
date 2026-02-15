@@ -17,11 +17,18 @@ import {
   Capability,
   TierState,
 } from '../skill/types.js';
-import { buildRequest } from './request-builder.js';
+import { buildRequest, extractDomain } from './request-builder.js';
 import { parseResponse } from './response-parser.js';
 import { checkSemantic } from './semantic-check.js';
 import { AuditLog } from './audit-log.js';
 import { ToolBudgetTracker } from './tool-budget.js';
+import {
+  checkCapability,
+  enforceDomainAllowlist,
+  resolveAndValidate,
+  checkRedirectAllowed,
+} from '../core/policy.js';
+import { getConfig } from '../core/config.js';
 import type { MetricsRepository } from '../storage/metrics-repository.js';
 
 const log = getLogger();
@@ -73,16 +80,72 @@ export async function executeSkill(
     'Executing skill',
   );
 
-  // Budget check
+  // Extract target domain from pathTemplate for budget/policy checks
+  const targetDomain = extractDomain(
+    skill.pathTemplate.startsWith('http')
+      ? skill.pathTemplate
+      : `https://${skill.allowedDomains[0] ?? skill.siteId}${skill.pathTemplate}`,
+  );
+
+  // Pre-build request to get body size for budget check
+  const preBuiltRequest = buildRequest(skill, params, startingTier);
+  const requestBodyBytes = preBuiltRequest.body
+    ? new TextEncoder().encode(preBuiltRequest.body).byteLength
+    : 0;
+
+  // Budget check (Fix 3: include targetDomain and requestBodyBytes)
   if (options?.budgetTracker) {
     const budgetCheck = options.budgetTracker.checkBudget(skill.id, skill.siteId, {
       hasSecrets: skill.authType != null,
+      targetDomain,
+      requestBodyBytes,
     });
     if (!budgetCheck.allowed) {
       log.warn({ skillId: skill.id, reason: budgetCheck.reason }, 'Budget check failed');
       return failureResult(startTime, startingTier, 'unknown' as FailureCauseName);
     }
     options.budgetTracker.recordCall(skill.id, skill.siteId);
+  }
+
+  // Build policy decision for audit
+  const policyDecision: PolicyDecision = options?.policyDecision ?? {
+    proposed: `${skill.method} ${skill.pathTemplate}`,
+    policyResult: 'allowed',
+    policyRule: 'executor.default',
+    userConfirmed: null,
+    redactionsApplied: [],
+  };
+
+  // Fix 2: Record audit intent BEFORE execution in strict mode
+  if (options?.auditLog) {
+    const intentAudit = options.auditLog.appendEntry({
+      id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      skillId: skill.id,
+      executionTier: startingTier,
+      success: false, // intent — not yet executed
+      latencyMs: 0,
+      capabilityUsed: tierToCapability(startingTier),
+      policyDecision,
+      requestSummary: {
+        method: skill.method,
+        url: skill.pathTemplate,
+      },
+    });
+
+    if ('type' in intentAudit && intentAudit.type === 'audit_write_error') {
+      if (options.auditLog.isStrictMode()) {
+        log.error({ skillId: skill.id }, 'Audit intent write failed in strict mode — aborting execution');
+        if (options.budgetTracker) {
+          options.budgetTracker.releaseCall(skill.siteId);
+        }
+        const abortResult = failureResult(startTime, startingTier, FailureCause.UNKNOWN);
+        abortResult.auditIncomplete = true;
+        return abortResult;
+      } else {
+        log.warn({ skillId: skill.id }, 'Audit intent write failed — flagged as audit_incomplete');
+      }
+    }
   }
 
   let result: ExecutionResult;
@@ -97,18 +160,10 @@ export async function executeSkill(
     }
   }
 
-  // Record audit entry
+  // Record audit outcome AFTER execution
   if (options?.auditLog) {
-    const policyDecision: PolicyDecision = options.policyDecision ?? {
-      proposed: `${skill.method} ${skill.pathTemplate}`,
-      policyResult: 'allowed',
-      policyRule: 'executor.default',
-      userConfirmed: null,
-      redactionsApplied: [],
-    };
-
-    const auditResult = options.auditLog.appendEntry({
-      id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    const outcomeAudit = options.auditLog.appendEntry({
+      id: `exec-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: Date.now(),
       skillId: skill.id,
       executionTier: result.tier,
@@ -127,14 +182,14 @@ export async function executeSkill(
       },
     });
 
-    if ('type' in auditResult && auditResult.type === 'audit_write_error') {
+    if ('type' in outcomeAudit && outcomeAudit.type === 'audit_write_error') {
       if (options.auditLog.isStrictMode()) {
         result.success = false;
         result.auditIncomplete = true;
-        log.error({ skillId: skill.id }, 'Audit write failed in strict mode — blocking execution');
+        log.error({ skillId: skill.id }, 'Audit outcome write failed in strict mode');
       } else {
         result.auditIncomplete = true;
-        log.warn({ skillId: skill.id }, 'Audit write failed — flagged as audit_incomplete');
+        log.warn({ skillId: skill.id }, 'Audit outcome write failed — flagged as audit_incomplete');
       }
     }
   }
@@ -156,14 +211,47 @@ async function executeTier(
 
   const request = buildRequest(skill, params, tier);
 
+  // ── Fix 1: Policy / security gates before any network call ──
+
+  // 1a. Capability check
+  const capCheck = checkCapability(skill.siteId, tierToCapability(tier));
+  if (!capCheck.allowed) {
+    log.warn({ skillId: skill.id, tier, rule: capCheck.rule }, 'Capability not allowed');
+    return failureResult(startTime, tier, FailureCause.UNKNOWN);
+  }
+
+  // 1b. Domain allowlist check
+  const requestDomain = extractDomain(request.url);
+  if (requestDomain) {
+    const domainCheck = enforceDomainAllowlist(skill.siteId, requestDomain);
+    if (!domainCheck.allowed) {
+      log.warn({ skillId: skill.id, domain: requestDomain, rule: domainCheck.rule }, 'Domain not allowlisted');
+      return failureResult(startTime, tier, FailureCause.UNKNOWN);
+    }
+  }
+
+  // 1c. Private IP blocking (resolve hostname, reject if private)
+  if (requestDomain) {
+    const ipCheck = await resolveAndValidate(requestDomain);
+    if (!ipCheck.allowed) {
+      log.warn({ skillId: skill.id, domain: requestDomain, ip: ipCheck.ip, category: ipCheck.category }, 'Private IP blocked');
+      return failureResult(startTime, tier, FailureCause.UNKNOWN);
+    }
+  }
+
+  // Determine max response size for body capping
+  const maxResponseBytes = options?.budgetTracker
+    ? options.budgetTracker.getMaxResponseBytes()
+    : getConfig().payloadLimits.maxResponseBodyBytes;
+
   let response: SealedFetchResponse;
   try {
     if (tier === ExecutionTier.DIRECT) {
-      response = await withTimeout(directFetch(request, options?.fetchFn), timeoutMs);
+      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
     } else if (tier === ExecutionTier.BROWSER_PROXIED) {
       if (!options?.browserProvider) {
         // Fall back to direct fetch if no browser provider
-        response = await withTimeout(directFetch(request, options?.fetchFn), timeoutMs);
+        response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
       } else {
         response = await withTimeout(options.browserProvider.evaluateFetch(request), timeoutMs);
       }
@@ -174,7 +262,7 @@ async function executeTier(
       // Full browser automation: navigate + extract
       response = await withTimeout(fullBrowserExecution(skill, options.browserProvider), timeoutMs);
     } else {
-      response = await withTimeout(directFetch(request, options?.fetchFn), timeoutMs);
+      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn), timeoutMs);
     }
   } catch (err) {
     const latencyMs = Date.now() - startTime;
@@ -191,6 +279,18 @@ async function executeTier(
       semanticPass: false,
       failureCause: FailureCause.UNKNOWN,
     };
+  }
+
+  // 1d. Redirect validation: if response is 3xx with Location header, check domain
+  if (response.status >= 300 && response.status < 400 && response.headers['location']) {
+    const redirectCheck = checkRedirectAllowed(skill.siteId, response.headers['location']);
+    if (!redirectCheck.allowed) {
+      log.warn(
+        { skillId: skill.id, location: response.headers['location'], rule: redirectCheck.rule },
+        'Redirect to disallowed domain blocked',
+      );
+      return failureResult(startTime, tier, FailureCause.UNKNOWN);
+    }
   }
 
   const latencyMs = Date.now() - startTime;
@@ -306,13 +406,13 @@ async function classifyFailure(
     return FailureCause.SCHEMA_DRIFT;
   }
 
-  // 7. auth_expired: 401/403 + auth token is stale
-  if ((response.status === 401 || response.status === 403) && skill.authType) {
-    return FailureCause.AUTH_EXPIRED;
-  }
-
-  // 8. cookie_refresh: 401/403 + auth is fresh + cookie refresh fixes it
-  if ((response.status === 401 || response.status === 403) && !skill.authType) {
+  // 7-8. auth_expired vs cookie_refresh on 401/403
+  if (response.status === 401 || response.status === 403) {
+    // Token-based auth (bearer, api_key, oauth2) => auth_expired
+    // Cookie-based auth or no explicit auth => cookie_refresh
+    if (skill.authType && skill.authType !== 'cookie') {
+      return FailureCause.AUTH_EXPIRED;
+    }
     return FailureCause.COOKIE_REFRESH;
   }
 
@@ -324,6 +424,7 @@ async function classifyFailure(
 
 async function directFetch(
   request: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
+  maxResponseBytes: number,
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>,
 ): Promise<SealedFetchResponse> {
   if (fetchFn) {
@@ -336,11 +437,41 @@ async function directFetch(
     body: request.body,
   });
 
-  const body = await response.text();
   const headers: Record<string, string> = {};
   response.headers.forEach((value, key) => {
     headers[key] = value;
   });
+
+  // Fix 4: Read response body incrementally with size cap enforcement.
+  // If the body exceeds maxResponseBytes, abort reading and throw.
+  let body: string;
+  if (response.body) {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxResponseBytes) {
+          reader.cancel();
+          throw new Error(
+            `Response body exceeded maxResponseBodyBytes (${maxResponseBytes}). ` +
+            `Read ${totalBytes} bytes before aborting.`,
+          );
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const decoder = new TextDecoder();
+    body = chunks.map((c) => decoder.decode(c, { stream: true })).join('') +
+      decoder.decode();
+  } else {
+    body = await response.text();
+  }
 
   return { status: response.status, headers, body };
 }
