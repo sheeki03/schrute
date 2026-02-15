@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { hostname } from 'node:os';
 import { getLogger } from '../core/logger.js';
 import { retrieve, store } from '../storage/secrets.js';
 import type { AuditEntry, PolicyDecision, OneAgentConfig } from '../skill/types.js';
@@ -39,8 +40,8 @@ export class AuditLog {
     this.auditFilePath = join(config.dataDir, 'audit', 'audit.jsonl');
     this.rootHashDir = join(config.dataDir, 'audit', 'roots');
     this.strictMode = config.audit.strictMode;
-    // Fallback key derived from dataDir; replaced by keychain key after initHmacKey()
-    this.hmacKey = createHash('sha256').update(`oneagent-audit-key:${config.dataDir}`).digest('hex');
+    // Fallback key: stronger derivation using dataDir + hostname; replaced by keychain key after initHmacKey()
+    this.hmacKey = createHash('sha256').update(`oneagent-audit:${config.dataDir}:${hostname()}`).digest('hex');
 
     this.ensureDirs();
     this.loadLastHash();
@@ -110,9 +111,9 @@ export class AuditLog {
     const entryHash = createHash('sha256').update(hashPayload).digest('hex');
     entryWithHashes.entryHash = entryHash;
 
-    // Sign with HMAC-SHA256
+    // Sign with HMAC-SHA256 (covers entryHash + previousHash to prevent reordering)
     const signature = createHmac('sha256', this.hmacKey)
-      .update(entryHash)
+      .update(`${previousHash}:${entryHash}`)
       .digest('hex');
     entryWithHashes.signature = signature;
 
@@ -205,10 +206,10 @@ export class AuditLog {
         };
       }
 
-      // Verify HMAC signature
+      // Verify HMAC signature (covers previousHash + entryHash to prevent reordering)
       if (entry.signature) {
         const expectedSig = createHmac('sha256', this.hmacKey)
-          .update(entry.entryHash)
+          .update(`${entry.previousHash}:${entry.entryHash}`)
           .digest('hex');
         if (entry.signature !== expectedSig) {
           return {
