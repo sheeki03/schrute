@@ -1,0 +1,50 @@
+{
+  "name": "oneagent",
+  "version": "0.1.0",
+  "description": "Universal Self-Learning Browser Agent — UI automation for the first run, API-level replay for the 100th run",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "oneagent": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:v01": "tsc -p tsconfig.v01.json",
+    "build:native": "cd native && cargo build --release && cp target/release/liboneagent_native.dylib index.node 2>/dev/null; cp target/release/oneagent_native.dll index.node 2>/dev/null; cp target/release/liboneagent_native.so index.node 2>/dev/null; echo 'Native build complete'",
+    "dev": "tsc -w -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "serve": "node dist/index.js serve",
+    "setup": "node dist/index.js setup",
+    "doctor": "node dist/index.js doctor"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.8.1",
+    "commander": "^13.1.0",
+    "ipaddr.js": "^2.2.0",
+    "keytar": "^7.9.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "playwright": "^1.50.1",
+    "zod": "^3.24.2",
+    "zod-to-json-schema": "^3.24.3",
+    "fastify": "^5.2.1",
+    "@fastify/swagger": "^9.4.2",
+    "@fastify/swagger-ui": "^5.2.1"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT"
+}
