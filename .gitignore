@@ -2,6 +2,7 @@ node_modules/
 dist/
 native/target/
 *.tsbuildinfo
+*.node
 bun.lock
 yarn.lock
 .DS_Store
