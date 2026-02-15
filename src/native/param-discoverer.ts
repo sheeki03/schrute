@@ -1,0 +1,34 @@
+/**
+ * Parameter discoverer — native Rust acceleration with TS fallback.
+ *
+ * JSON contract:
+ *   Input:  { samples: Array<{ headers, queryParams, body?, declaredInputs? }> }
+ *   Output: ParameterEvidence[]
+ */
+
+import type { ParameterEvidence } from '../skill/types.js';
+import type { RequestSample } from '../capture/param-discoverer.js';
+import { discoverParams as tsDiscoverParams } from '../capture/param-discoverer.js';
+import { getNativeModule } from './index.js';
+
+export function discoverParamsNative(recordings: RequestSample[]): ParameterEvidence[] {
+  const native = getNativeModule();
+
+  if (native?.discoverParams) {
+    try {
+      const samples = recordings.map(r => ({
+        headers: r.record.request.headers,
+        queryParams: r.record.request.queryParams,
+        body: r.record.request.body,
+        declaredInputs: r.declaredInputs,
+      }));
+      const input = JSON.stringify({ samples });
+      const resultJson: string = native.discoverParams(input);
+      return JSON.parse(resultJson) as ParameterEvidence[];
+    } catch {
+      // Fall through to TS fallback
+    }
+  }
+
+  return tsDiscoverParams(recordings);
+}

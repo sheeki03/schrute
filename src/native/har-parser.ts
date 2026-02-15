@@ -1,0 +1,28 @@
+/**
+ * HAR parser — native Rust acceleration with TS fallback.
+ *
+ * JSON contract:
+ *   Input:  HAR JSON string (full HAR 1.2 format)
+ *   Output: StructuredRecord[] as JSON string
+ */
+
+import type { StructuredRecord, HarData } from '../capture/har-extractor.js';
+import { extractRequestResponse } from '../capture/har-extractor.js';
+import { getNativeModule } from './index.js';
+
+export function parseHarNative(harJson: string): StructuredRecord[] {
+  const native = getNativeModule();
+
+  if (native?.parseHar) {
+    try {
+      const resultJson: string = native.parseHar(harJson);
+      return JSON.parse(resultJson) as StructuredRecord[];
+    } catch {
+      // Fall through to TS fallback on native error
+    }
+  }
+
+  // TS fallback: parse and extract each entry
+  const harData: HarData = JSON.parse(harJson);
+  return harData.log.entries.map(extractRequestResponse);
+}

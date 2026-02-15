@@ -1,0 +1,27 @@
+/**
+ * Path risk checker — native Rust acceleration with TS fallback.
+ *
+ * JSON contract:
+ *   Input:  { method, path }
+ *   Output: { blocked: boolean, reason?: string }
+ */
+
+import type { PathRiskResult } from '../skill/path-risk.js';
+import { checkPathRisk as tsCheckPathRisk } from '../skill/path-risk.js';
+import { getNativeModule } from './index.js';
+
+export function checkPathRiskNative(method: string, path: string): PathRiskResult {
+  const native = getNativeModule();
+
+  if (native?.checkPathRisk) {
+    try {
+      const input = JSON.stringify({ method, path });
+      const resultJson: string = native.checkPathRisk(input);
+      return JSON.parse(resultJson) as PathRiskResult;
+    } catch {
+      // Fall through to TS fallback
+    }
+  }
+
+  return tsCheckPathRisk(method, path);
+}
