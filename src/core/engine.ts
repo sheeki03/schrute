@@ -9,6 +9,7 @@ import {
   enforceDomainAllowlist,
   checkMethodAllowed,
   checkPathRisk,
+  getSitePolicy,
 } from './policy.js';
 import { Capability } from '../skill/types.js';
 import { getDatabase } from '../storage/database.js';
@@ -131,6 +132,17 @@ export class Engine {
       this.activeSessionId = persisted.sessionId;
       this.mode = persisted.mode;
       this.currentRecording = persisted.currentRecording;
+
+      // Rehydrate session manager from persisted state
+      if (persisted.sessionId) {
+        this.sessionManager.rehydrate({
+          id: persisted.sessionId,
+          siteId: persisted.siteId,
+          url: persisted.url,
+          startedAt: Date.now(), // approximate
+          browserContextId: '', // will be re-established on browser ops
+        });
+      }
     }
 
     const db = getDatabase(config);
@@ -187,19 +199,27 @@ export class Engine {
       );
     }
 
-    // Create browser session
-    const session = await this.sessionManager.create(siteId, url);
-    this.activeSessionId = session.id;
-    this.mode = 'exploring';
+    // Create browser session with rollback on failure
+    const previousMode = this.mode;
+    const previousSessionId = this.activeSessionId;
+    try {
+      const session = await this.sessionManager.create(siteId, url);
+      this.activeSessionId = session.id;
+      this.mode = 'exploring';
 
-    this.persistState();
-    this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
+      this.persistState();
+      this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
-    return {
-      sessionId: session.id,
-      siteId,
-      url,
-    };
+      return {
+        sessionId: session.id,
+        siteId,
+        url,
+      };
+    } catch (err) {
+      this.mode = previousMode;
+      this.activeSessionId = previousSessionId;
+      throw err;
+    }
   }
 
   async startRecording(
@@ -216,25 +236,33 @@ export class Engine {
       throw new Error('No active session to record');
     }
 
-    const session = await this.sessionManager.resume(this.activeSessionId);
+    const previousMode = this.mode;
+    const previousRecording = this.currentRecording;
+    try {
+      const session = await this.sessionManager.resume(this.activeSessionId);
 
-    this.currentRecording = {
-      id: randomUUID(),
-      name,
-      siteId: session.siteId,
-      startedAt: Date.now(),
-      requestCount: 0,
-      inputs,
-    };
+      this.currentRecording = {
+        id: randomUUID(),
+        name,
+        siteId: session.siteId,
+        startedAt: Date.now(),
+        requestCount: 0,
+        inputs,
+      };
 
-    this.mode = 'recording';
-    this.persistState();
-    this.log.info(
-      { recordingId: this.currentRecording.id, name, siteId: session.siteId },
-      'Recording started',
-    );
+      this.mode = 'recording';
+      this.persistState();
+      this.log.info(
+        { recordingId: this.currentRecording.id, name, siteId: session.siteId },
+        'Recording started',
+      );
 
-    return { ...this.currentRecording };
+      return { ...this.currentRecording };
+    } catch (err) {
+      this.mode = previousMode;
+      this.currentRecording = previousRecording;
+      throw err;
+    }
   }
 
   async stopRecording(): Promise<RecordingInfo> {
@@ -401,6 +429,12 @@ export class Engine {
       userConfirmed: null,
       redactionsApplied: [],
     };
+
+    // Load domain allowlist from policy into budget tracker
+    const policy = getSitePolicy(skill.siteId);
+    if (policy.domainAllowlist.length > 0) {
+      this.budgetTracker.setDomainAllowlist(policy.domainAllowlist);
+    }
 
     const executorOptions = {
       auditLog: this.auditLog,

@@ -93,6 +93,22 @@ export class SessionManager {
     );
   }
 
+  /**
+   * Rehydrate a session from persisted state (cross-process continuity).
+   * Puts the session back into the in-memory Map without creating a browser context.
+   */
+  rehydrate(session: SessionInfo): void {
+    if (this.sessions.has(session.id)) {
+      return; // already present
+    }
+    this.sessions.set(session.id, session);
+    this.log.debug({ sessionId: session.id, siteId: session.siteId }, 'Session rehydrated from persisted state');
+  }
+
+  getSession(id: string): SessionInfo | undefined {
+    return this.sessions.get(id);
+  }
+
   listActive(): SessionInfo[] {
     return Array.from(this.sessions.values());
   }
