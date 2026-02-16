@@ -1,6 +1,9 @@
 import type { SideEffectClassName } from './types.js';
 import { SideEffectClass } from './types.js';
 import { checkPathRiskNative as checkPathRisk } from '../native/path-risk.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
 
 // ─── Observed Effects ───────────────────────────────────────────
 
@@ -27,7 +30,8 @@ export function detectGraphQLOperation(body?: string): GraphQLOperationType | nu
     if (trimmed.startsWith('query') || trimmed.startsWith('{')) return 'query';
 
     return null;
-  } catch {
+  } catch (err) {
+    log.debug({ err }, 'GraphQL detection failed');
     return null;
   }
 }

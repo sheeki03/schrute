@@ -1,3 +1,4 @@
+import { extractPathParams } from '../core/utils.js';
 import type {
   SkillSpec,
   SkillParameter,
@@ -349,11 +350,7 @@ function buildRequiredCapabilities(authRecipe?: AuthRecipe): CapabilityName[] {
   return caps;
 }
 
-function extractPathParams(template: string): string[] {
-  const matches = template.match(/\{(\w+)\}/g);
-  if (!matches) return [];
-  return matches.map((m) => m.slice(1, -1));
-}
+// extractPathParams imported from core/utils.ts
 
 // ─── Evidence Report Generation ─────────────────────────────────
 

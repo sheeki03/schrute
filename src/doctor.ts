@@ -5,6 +5,9 @@ import { getLogger } from './core/logger.js';
 import * as secrets from './storage/secrets.js';
 import { AuditLog } from './replay/audit-log.js';
 import type { OneAgentConfig } from './skill/types.js';
+import { VERSION } from './version.js';
+
+const log = getLogger();
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -26,23 +29,43 @@ export interface DoctorReport {
 
 // ─── Individual Checks ────────────────────────────────────────────
 
-async function checkPlaywrightBrowsers(): Promise<CheckResult> {
+async function checkBrowserEngine(cfg: OneAgentConfig): Promise<CheckResult> {
+  const engine = cfg.browser?.engine ?? 'patchright';
+  const installInstructions: Record<string, string> = {
+    playwright: 'npx playwright install chromium',
+    patchright: 'npm install patchright && npx patchright install chromium',
+    camoufox: 'npm install camoufox-js && npx camoufox-js fetch',
+  };
+
+  let browser: import('playwright').Browser | null = null;
   try {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.launch({ headless: true });
-    await browser.close();
+    const { launchBrowserEngine } = await import('./browser/engine.js');
+    const result = await launchBrowserEngine(engine, { headless: true });
+    browser = result.browser;
+
+    if (result.capabilities.configuredEngine !== result.capabilities.effectiveEngine) {
+      return {
+        name: 'browser_engine',
+        status: 'warning',
+        message: `Configured engine "${result.capabilities.configuredEngine}" unavailable — fell back to "${result.capabilities.effectiveEngine}"`,
+        details: `Install: ${installInstructions[engine] ?? 'unknown engine'}`,
+      };
+    }
+
     return {
-      name: 'playwright_browsers',
+      name: 'browser_engine',
       status: 'pass',
-      message: 'Chromium browser available',
+      message: `Browser engine "${result.capabilities.effectiveEngine}" available`,
     };
   } catch (err) {
     return {
-      name: 'playwright_browsers',
+      name: 'browser_engine',
       status: 'fail',
-      message: 'Chromium browser not available',
-      details: `Install with: npx playwright install chromium\n${err instanceof Error ? err.message : String(err)}`,
+      message: `Browser engine "${engine}" not available`,
+      details: `Install with: ${installInstructions[engine] ?? 'unknown engine'}\n${err instanceof Error ? err.message : String(err)}`,
     };
+  } finally {
+    await browser?.close().catch((err) => log.debug({ err }, 'Doctor: browser cleanup failed'));
   }
 }
 
@@ -100,8 +123,13 @@ function checkDurableStorageClean(config: OneAgentConfig): CheckResult {
         issues.push(String(entry));
       }
     }
-  } catch {
-    // Directory read error is not a storage cleanliness issue
+  } catch (err) {
+    return {
+      name: 'durable_storage_clean',
+      status: 'warning' as const,
+      message: 'Could not read durable storage directory',
+      details: err instanceof Error ? err.message : String(err),
+    };
   }
 
   if (issues.length > 0) {
@@ -154,7 +182,8 @@ function checkTempDirCleanup(config: OneAgentConfig): CheckResult {
           try {
             fs.rmSync(entryPath, { recursive: true, force: true });
             cleanedCount++;
-          } catch {
+          } catch (err) {
+            log.debug({ err }, 'Failed to stat file during stale check');
             staleCount++;
           }
         }
@@ -163,8 +192,13 @@ function checkTempDirCleanup(config: OneAgentConfig): CheckResult {
         warnings.push(entry);
       }
     }
-  } catch {
-    // temp dir read error
+  } catch (err) {
+    return {
+      name: 'temp_dir_cleanup',
+      status: 'warning' as const,
+      message: 'Could not read temp directory',
+      details: err instanceof Error ? err.message : String(err),
+    };
   }
 
   if (staleCount > 0) {
@@ -292,19 +326,6 @@ async function checkWalCheckpoint(config: OneAgentConfig): Promise<CheckResult> 
   }
 }
 
-function checkBuildProfile(): CheckResult {
-  const profile = process.env.ONEAGENT_BUILD_PROFILE ?? 'v01';
-  const isV01 = profile === 'v01';
-
-  return {
-    name: 'build_profile',
-    status: 'pass',
-    message: isV01
-      ? 'v0.1 — stdio MCP transport, local-only, HTTP hard-disabled'
-      : `${profile} — all transports enabled`,
-  };
-}
-
 function checkAuditHashChain(config: OneAgentConfig): CheckResult {
   // Audit is JSONL file-based, not a DB table. Use AuditLog.verifyChain().
   try {
@@ -343,6 +364,36 @@ function checkAuditHashChain(config: OneAgentConfig): CheckResult {
   }
 }
 
+function checkNativeModules(): CheckResult {
+  try {
+    const DatabaseModule = require('better-sqlite3');
+    // If require succeeds, the native module ABI matches the current Node version
+    if (typeof DatabaseModule === 'function' || typeof DatabaseModule.default === 'function') {
+      return {
+        name: 'native_modules',
+        status: 'pass',
+        message: `better-sqlite3 native module loaded (Node ${process.version})`,
+      };
+    }
+    return {
+      name: 'native_modules',
+      status: 'warning',
+      message: 'better-sqlite3 loaded but export shape unexpected',
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isAbiMismatch = msg.includes('NODE_MODULE_VERSION') || msg.includes('was compiled against');
+    return {
+      name: 'native_modules',
+      status: 'fail',
+      message: isAbiMismatch
+        ? `better-sqlite3 ABI mismatch — rebuild with: npm rebuild better-sqlite3`
+        : `better-sqlite3 native module failed to load`,
+      details: `Node ${process.version}. ${msg}`,
+    };
+  }
+}
+
 // ─── Main Doctor ──────────────────────────────────────────────────
 
 export async function runDoctor(
@@ -356,20 +407,20 @@ export async function runDoctor(
   const checks: CheckResult[] = [];
 
   // Run async checks
-  const [playwrightResult, keychainResult] = await Promise.all([
-    checkPlaywrightBrowsers(),
+  const [browserEngineResult, keychainResult] = await Promise.all([
+    checkBrowserEngine(cfg),
     checkKeychainAccess(),
   ]);
 
-  checks.push(playwrightResult);
+  checks.push(browserEngineResult);
   checks.push(keychainResult);
 
   // Run sync checks
+  checks.push(checkNativeModules());
   checks.push(checkDurableStorageClean(cfg));
   checks.push(checkTempDirCleanup(cfg));
   checks.push(checkFilePermissions(cfg));
   checks.push(await checkWalCheckpoint(cfg));
-  checks.push(checkBuildProfile());
   checks.push(checkAuditHashChain(cfg));
 
   const summary = {
@@ -380,7 +431,7 @@ export async function runDoctor(
 
   const report: DoctorReport = {
     timestamp: Date.now(),
-    version: '0.1.0',
+    version: VERSION,
     checks,
     summary,
   };

@@ -10,9 +10,47 @@
 import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getLogger } from '../core/logger.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let nativeModule: Record<string, (...args: any[]) => any> | null = null;
+const log = getLogger();
+
+/** Native binding function signature (all accept/return JSON strings). */
+type NativeBindingFn = (...args: string[]) => string;
+
+/** Known native binding function signatures. */
+interface NativeBindings {
+  // redactor
+  redact?: NativeBindingFn;
+  redactHeaders?: NativeBindingFn;
+  // param-discoverer
+  discoverParams?: NativeBindingFn;
+  // canonicalizer
+  canonicalizeRequest?: NativeBindingFn;
+  // har-parser
+  parseHar?: NativeBindingFn;
+  // noise-filter
+  filterRequests?: NativeBindingFn;
+  // audit-chain
+  computeEntryHash?: NativeBindingFn;
+  signEntryHash?: NativeBindingFn;
+  verifyChain?: NativeBindingFn;
+  // semantic-diff
+  checkSemantic?: NativeBindingFn;
+  // volatility
+  scoreVolatility?: NativeBindingFn;
+  // schema-inference
+  inferSchema?: NativeBindingFn;
+  // path-risk
+  checkPathRisk?: NativeBindingFn;
+  // ip-policy
+  isPublicIp?: NativeBindingFn;
+  normalizeDomainNative?: NativeBindingFn;
+  checkDomainAllowlist?: NativeBindingFn;
+  // Allow additional bindings not yet typed
+  [key: string]: NativeBindingFn | undefined;
+}
+
+let nativeModule: NativeBindings | null = null;
 let loadAttempted = false;
 
 export function getNativeModule(): typeof nativeModule {
@@ -31,12 +69,12 @@ export function getNativeModule(): typeof nativeModule {
       try {
         nativeModule = require(candidate);
         return nativeModule;
-      } catch {
-        // Try next candidate
+      } catch (err) {
+        log.debug({ err, candidate }, 'Native module candidate not loadable');
       }
     }
-  } catch {
-    // Native module not available — TS fallback will be used
+  } catch (err) {
+    log.info({ err }, 'Native module unavailable — using TypeScript fallback');
   }
 
   return null;

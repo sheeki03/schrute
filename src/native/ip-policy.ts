@@ -18,6 +18,9 @@
 import type { IpValidationResult } from '../core/policy.js';
 import { isPublicIp as tsIsPublicIp } from '../core/policy.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
 
 export function isPublicIpNative(ip: string): { ip: string; allowed: boolean; category: string } | null {
   const native = getNativeModule();
@@ -26,8 +29,8 @@ export function isPublicIpNative(ip: string): { ip: string; allowed: boolean; ca
     try {
       const resultJson: string = native.isPublicIp(ip);
       return JSON.parse(resultJson);
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      log.debug({ err }, 'Native isPublicIp failed, falling back to TS implementation');
     }
   }
 
@@ -42,8 +45,8 @@ export function normalizeDomainNative(domain: string): string {
   if (native?.normalizeDomainNative) {
     try {
       return native.normalizeDomainNative(domain) as string;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      log.debug({ err }, 'Native normalizeDomain failed, falling back to TS implementation');
     }
   }
 
@@ -71,8 +74,8 @@ export function checkDomainAllowlistNative(
       const input = JSON.stringify({ targetDomain, allowlist });
       const resultJson: string = native.checkDomainAllowlist(input);
       return JSON.parse(resultJson);
-    } catch {
-      // Fall through to null (caller uses TS)
+    } catch (err) {
+      log.debug({ err }, 'Native checkDomainAllowlist failed, falling back to TS implementation');
     }
   }
 

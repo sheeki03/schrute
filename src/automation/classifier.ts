@@ -97,11 +97,8 @@ export function classifySite(
   if (jsComputed) {
     // JS-computed fields require full browser for replay
     recommendedTier = ExecutionTier.FULL_BROWSER;
-  } else if (dynamicFieldsDetected && authRequired) {
-    // Dynamic fields + auth typically need cookie refresh tier
-    recommendedTier = ExecutionTier.COOKIE_REFRESH;
   } else if (authRequired) {
-    // Auth but no dynamic fields — can likely do cookie refresh
+    // Auth (with or without dynamic fields) typically needs cookie refresh tier
     recommendedTier = ExecutionTier.COOKIE_REFRESH;
   } else if (graphqlDetected) {
     // GraphQL without auth — direct fetch may work

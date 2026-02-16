@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { getLogger } from '../core/logger.js';
+import { defaultFetch, withTimeout } from '../core/utils.js';
+import { injectAuth, resolveUrl, buildDefaultHeaders, buildBodyOrQuery } from '../replay/request-builder.js';
 import type {
   SkillSpec,
   TierStateName,
@@ -131,29 +133,8 @@ function buildHttpRequest(
   authRecipe?: AuthRecipe,
 ): SealedFetchRequest {
   // Resolve parameterized URL
-  let url = spec.pathTemplate;
-  const pathParamNames = extractPathParams(spec.pathTemplate);
-
-  for (const paramName of pathParamNames) {
-    if (paramName in params) {
-      url = url.replace(
-        `{${paramName}}`,
-        encodeURIComponent(String(params[paramName])),
-      );
-    }
-  }
-
-  // Ensure full URL
-  if (!url.startsWith('http')) {
-    const domain = spec.allowedDomains[0] ?? spec.siteId;
-    url = `https://${domain}${url}`;
-  }
-
-  // Build headers
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    ...(spec.requiredHeaders ?? {}),
-  };
+  const resolved = resolveUrl(spec.pathTemplate, params, spec.allowedDomains, spec.siteId);
+  const headers = buildDefaultHeaders(spec.requiredHeaders);
 
   // Inject auth if recipe is present
   if (authRecipe) {
@@ -161,54 +142,9 @@ function buildHttpRequest(
   }
 
   // Build body or query params
-  let body: string | undefined;
-  const upperMethod = spec.method.toUpperCase();
+  const bodyResult = buildBodyOrQuery(spec.method, resolved.url, params, resolved.pathParamNames, headers);
 
-  if (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH') {
-    const bodyParams: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        bodyParams[key] = value;
-      }
-    }
-    if (Object.keys(bodyParams).length > 0) {
-      body = JSON.stringify(bodyParams);
-      headers['content-type'] = 'application/json';
-    }
-  } else if (upperMethod === 'GET' || upperMethod === 'HEAD') {
-    const queryEntries: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        queryEntries.push(
-          `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
-        );
-      }
-    }
-    if (queryEntries.length > 0) {
-      const separator = url.includes('?') ? '&' : '?';
-      url = `${url}${separator}${queryEntries.join('&')}`;
-    }
-  }
-
-  return { url, method: spec.method, headers, body };
-}
-
-// ─── Auth Injection ─────────────────────────────────────────────
-
-function injectAuth(
-  headers: Record<string, string>,
-  recipe: AuthRecipe,
-): void {
-  // Auth injection is based on the recipe's injection config.
-  // The actual secret values come from the secrets store at runtime.
-  // Here we set the header structure; the caller is responsible for
-  // populating the actual credential value.
-  if (recipe.injection.location === 'header') {
-    const prefix = recipe.injection.prefix ?? '';
-    headers[recipe.injection.key] = `${prefix}{{SECRET}}`;
-  }
-  // Cookie and query injection would be handled similarly but
-  // are deferred to the browser/cookie-jar layer.
+  return { url: bodyResult.url, method: spec.method, headers, body: bodyResult.body };
 }
 
 // ─── Zod Schema Building ────────────────────────────────────────
@@ -273,48 +209,3 @@ function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodType {
   return z.unknown();
 }
 
-// ─── Helpers ────────────────────────────────────────────────────
-
-function extractPathParams(template: string): string[] {
-  const matches = template.match(/\{(\w+)\}/g);
-  if (!matches) return [];
-  return matches.map((m) => m.slice(1, -1));
-}
-
-async function defaultFetch(req: SealedFetchRequest): Promise<SealedFetchResponse> {
-  const response = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.body,
-  });
-
-  const body = await response.text();
-  const headers: Record<string, string> = {};
-  response.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
-
-  return {
-    status: response.status,
-    headers,
-    body,
-  };
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Execution timed out after ${ms}ms`));
-    }, ms);
-
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-  });
-}

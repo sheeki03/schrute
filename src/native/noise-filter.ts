@@ -12,6 +12,10 @@ import type { HarEntry } from '../capture/har-extractor.js';
 import type { FilterResult, SiteOverride } from '../capture/noise-filter.js';
 import { filterRequests as tsFilterRequests } from '../capture/noise-filter.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function filterRequestsNative(
   entries: HarEntry[],
@@ -35,8 +39,11 @@ export function filterRequestsNative(
         noise: parsed.noiseIndices.map(i => entries[i]),
         ambiguous: parsed.ambiguousIndices.map(i => entries[i]),
       };
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native noise-filter unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

@@ -10,6 +10,10 @@ import type { CanonicalizedRequest } from '../capture/canonicalizer.js';
 import { canonicalizeRequest } from '../capture/canonicalizer.js';
 import type { StructuredRequest } from '../capture/har-extractor.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function canonicalizeRequestNative(req: StructuredRequest): CanonicalizedRequest {
   const native = getNativeModule();
@@ -24,8 +28,11 @@ export function canonicalizeRequestNative(req: StructuredRequest): Canonicalized
       });
       const resultJson: string = native.canonicalizeRequest(input);
       return JSON.parse(resultJson) as CanonicalizedRequest;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native canonicalizer unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

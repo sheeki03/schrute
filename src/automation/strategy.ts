@@ -21,9 +21,21 @@ export interface StrategyObservation {
 
 // ─── In-Memory Strategy Store ───────────────────────────────────
 
+const MAX_STRATEGY_CACHE_SIZE = 500;
+
 const strategies = new Map<string, SiteStrategy>();
 
 const tierSuccessCounts = new Map<string, Map<ExecutionTierName, { success: number; total: number }>>();
+
+/** Evict oldest entry (FIFO) if the map exceeds MAX_STRATEGY_CACHE_SIZE. */
+function evictIfNeeded<K, V>(map: Map<K, V>): void {
+  if (map.size > MAX_STRATEGY_CACHE_SIZE) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) {
+      map.delete(oldest);
+    }
+  }
+}
 
 // ─── Public API ─────────────────────────────────────────────────
 
@@ -36,6 +48,7 @@ export function getStrategy(siteId: string): SiteStrategy {
     overrides: {},
   };
   strategies.set(siteId, defaultStrategy);
+  evictIfNeeded(strategies);
   return defaultStrategy;
 }
 
@@ -48,6 +61,7 @@ export function updateStrategy(
   // Track success rates per tier for this site
   if (!tierSuccessCounts.has(siteId)) {
     tierSuccessCounts.set(siteId, new Map());
+    evictIfNeeded(tierSuccessCounts);
   }
   const siteCounts = tierSuccessCounts.get(siteId)!;
 
@@ -98,4 +112,11 @@ export function updateStrategy(
   }
 
   strategies.set(siteId, strategy);
+  evictIfNeeded(strategies);
+}
+
+/** Clear all strategy caches. Useful for testing. */
+export function resetStrategyCache(): void {
+  strategies.clear();
+  tierSuccessCounts.clear();
 }

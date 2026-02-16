@@ -4,23 +4,28 @@ import * as path from 'node:path';
 import { Command } from 'commander';
 import { getConfig, loadConfig, setConfigValue, ensureDirectories } from './core/config.js';
 import { createLogger, getLogger } from './core/logger.js';
-import { Engine } from './core/engine.js';
+import { Engine, removeStaleSessionJson } from './core/engine.js';
 import { getDatabase, closeDatabase } from './storage/database.js';
 import { SkillRepository } from './storage/skill-repository.js';
 import { SiteRepository } from './storage/site-repository.js';
+import { ConfirmationManager } from './server/confirmation.js';
 import { runDoctor, formatDoctorReport } from './doctor.js';
 import { getTrustPosture, formatTrustReport } from './trust.js';
 import { startMcpServer } from './server/mcp-stdio.js';
+import { startDaemonServer, type DaemonCloseHandles } from './server/daemon.js';
+import { createDaemonClient } from './client/daemon-client.js';
 import { validateSkill } from './skill/validator.js';
-import { SkillStatus } from './skill/types.js';
-import type { SkillSpec, SiteManifest, SitePolicy, CapabilityName } from './skill/types.js';
+import type { SkillSpec, SiteManifest, SitePolicy } from './skill/types.js';
+import { getSitePolicy } from './core/policy.js';
+import { VERSION } from './version.js';
+import { ConfigError } from './core/config.js';
 
 const program = new Command();
 
 program
   .name('oneagent')
   .description('Universal Self-Learning Browser Agent')
-  .version('0.1.0');
+  .version(VERSION);
 
 // ─── explore ────────────────────────────────────────────────────
 
@@ -32,9 +37,9 @@ program
     createLogger(config.logLevel);
     ensureDirectories(config);
 
-    const engine = new Engine(config);
+    const client = createDaemonClient(config);
     try {
-      const result = await engine.explore(url);
+      const result = await client.request('POST', '/ctl/explore', { url });
       console.log('Explore session started:');
       console.log(JSON.stringify(result, null, 2));
     } catch (err) {
@@ -55,8 +60,6 @@ program
     createLogger(config.logLevel);
     ensureDirectories(config);
 
-    const engine = new Engine(config);
-
     // Parse input pairs
     let inputs: Record<string, string> | undefined;
     if (options.input) {
@@ -69,8 +72,9 @@ program
       }
     }
 
+    const client = createDaemonClient(config);
     try {
-      const result = await engine.startRecording(options.name, inputs);
+      const result = await client.request('POST', '/ctl/record', { name: options.name, inputs });
       console.log('Recording started:');
       console.log(JSON.stringify(result, null, 2));
     } catch (err) {
@@ -88,9 +92,9 @@ program
     const config = getConfig();
     createLogger(config.logLevel);
 
-    const engine = new Engine(config);
+    const client = createDaemonClient(config);
     try {
-      const result = await engine.stopRecording();
+      const result = await client.request('POST', '/ctl/stop');
       console.log('Recording stopped:');
       console.log(JSON.stringify(result, null, 2));
     } catch (err) {
@@ -120,12 +124,7 @@ skillsCmd
     if (site) {
       skills = skillRepo.getBySiteId(site);
     } else {
-      skills = [
-        ...skillRepo.getByStatus(SkillStatus.ACTIVE),
-        ...skillRepo.getByStatus(SkillStatus.DRAFT),
-        ...skillRepo.getByStatus(SkillStatus.STALE),
-        ...skillRepo.getByStatus(SkillStatus.BROKEN),
-      ];
+      skills = skillRepo.getAll();
     }
 
     if (skills.length === 0) {
@@ -191,6 +190,7 @@ skillsCmd
       console.log(JSON.stringify(result, null, 2));
     } catch (err) {
       console.error('Validation error:', err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
     }
 
     closeDatabase();
@@ -327,7 +327,7 @@ program
 
 program
   .command('setup')
-  .description('Download Playwright chromium and verify keychain')
+  .description('Install browser engine and verify keychain')
   .action(async () => {
     const config = getConfig();
     createLogger(config.logLevel);
@@ -340,14 +340,45 @@ program
     ensureDirectories(config);
     console.log('  Done.\n');
 
-    // 2. Install Playwright Chromium
-    console.log('[2/3] Installing Playwright Chromium...');
+    // 2. Install browser (engine-aware)
+    const engine = config.browser?.engine ?? 'patchright';
+    let browserInstallOk = true;
+    console.log(`[2/3] Installing browser (engine: ${engine})...`);
     try {
       const { execSync } = await import('node:child_process');
-      execSync('npx playwright install chromium', { stdio: 'inherit' });
+      switch (engine) {
+        case 'playwright':
+          execSync('npx playwright install chromium', { stdio: 'inherit' });
+          break;
+        case 'patchright':
+          execSync('npx patchright install chromium', { stdio: 'inherit' });
+          break;
+        case 'camoufox': {
+          let camoufoxFound = false;
+          try {
+            const { createRequire } = await import('node:module');
+            const req = createRequire(import.meta.url);
+            req.resolve('camoufox-js');
+            camoufoxFound = true;
+          } catch { /* not installed */ }
+          if (!camoufoxFound) {
+            console.error('  camoufox-js is not installed.');
+            console.error('  Install with: npm install camoufox-js && npx camoufox-js fetch');
+            process.exit(1);
+          }
+          execSync('npx camoufox-js fetch', { stdio: 'inherit' });
+          break;
+        }
+        default:
+          console.error(`  Unknown engine: ${engine}`);
+          process.exit(1);
+      }
       console.log('  Done.\n');
-    } catch {
-      console.error('  Failed to install Chromium. Run manually: npx playwright install chromium\n');
+    } catch (err) {
+      browserInstallOk = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`  Failed to install browser: ${detail}`);
+      console.error(`  Run manually for engine "${engine}"\n`);
     }
 
     // 3. Verify keychain
@@ -360,6 +391,10 @@ program
       console.error(`  Keychain: ${keychainCheck?.message ?? 'unknown status'}\n`);
     }
 
+    if (!browserInstallOk) {
+      console.error('Setup completed with errors — browser install failed.');
+      process.exit(1);
+    }
     console.log('Setup complete.');
   });
 
@@ -415,27 +450,16 @@ program
     const log = getLogger();
     ensureDirectories(config);
 
+    // Validate HTTP config BEFORE creating any resources (avoids stale daemon artifacts)
     if (options.http || config.server.network) {
-      // Hard v0.1 gate — HTTP transport is physically excluded from v0.1 builds
-      const BUILD_PROFILE = process.env.ONEAGENT_BUILD_PROFILE ?? 'v01';
-      if (BUILD_PROFILE === 'v01') {
-        console.error(
-          'Error: HTTP transport is not available in v0.1 builds.\n' +
-          'HTTP/REST/OpenAPI transport requires v0.2.',
-        );
-        process.exit(1);
-      }
-
-      // v0.2 HTTP transport requires the feature flag
       if (!config.features.httpTransport) {
         console.error(
-          'Error: HTTP transport is a v0.2 feature and is disabled by default.\n' +
+          'Error: HTTP transport is disabled by default.\n' +
           'Enable it with: oneagent config set features.httpTransport true',
         );
         process.exit(1);
       }
 
-      // HTTP transport requires an auth token
       if (!config.server.authToken) {
         console.error(
           'Error: HTTP transport requires an auth token.\n' +
@@ -443,50 +467,62 @@ program
         );
         process.exit(1);
       }
+    }
 
-      const port = parseInt(options.port ?? '3000', 10);
+    // Create shared deps once
+    const engine = new Engine(config);
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const siteRepo = new SiteRepository(db);
+    const confirmation = new ConfirmationManager(db, config);
+    const deps = { engine, skillRepo, siteRepo, confirmation, config };
+
+    // Clean up stale session.json from pre-daemon versions
+    removeStaleSessionJson(config);
+
+    // Start daemon control socket (always) — handles populated below
+    const closeHandles: DaemonCloseHandles = { mcpCloseHandles: [] };
+    const daemon = await startDaemonServer(engine, config, closeHandles);
+
+    if (options.http || config.server.network) {
+      const port = parseInt(options.port ?? String(config.server.httpPort ?? 3000), 10);
       const host = '127.0.0.1';
 
       console.log(`Starting HTTP server on ${host}:${port}...`);
 
-      // Start REST server
+      // Start REST server — uses shared engine/deps (no second Engine instance)
       const { startRestServer } = await import('./server/rest-server.js');
-      const restApp = await startRestServer({ host, port });
+      const restApp = await startRestServer({ host, port, deps });
       console.log(`  REST API:     http://${host}:${port}/api`);
       console.log(`  API Docs:     http://${host}:${port}/api/docs`);
       console.log(`  OpenAPI Spec: http://${host}:${port}/api/openapi.json`);
 
       // Start MCP HTTP on port+1
-      try {
-        const { startMcpHttpServer } = await import('./server/mcp-http.js');
-        // Temporarily enable network for MCP HTTP
-        config.server.network = true;
-        const mcpHttp = await startMcpHttpServer({ host, port: port + 1 });
-        console.log(`  MCP HTTP:     http://${host}:${port + 1}/mcp`);
+      const { startMcpHttpServer } = await import('./server/mcp-http.js');
+      config.server.network = true;
+      const mcpHttp = await startMcpHttpServer(deps, { host, port: port + 1 });
+      console.log(`  MCP HTTP:     http://${host}:${port + 1}/mcp`);
 
-        // Graceful shutdown
-        const shutdown = async () => {
-          console.log('\nShutting down...');
-          await mcpHttp.close();
-          await restApp.close();
-          process.exit(0);
-        };
-        process.on('SIGINT', shutdown);
-        process.on('SIGTERM', shutdown);
-      } catch (err) {
-        log.warn({ err }, 'MCP HTTP transport not started');
-        // REST still running, set up shutdown for REST only
-        const shutdown = async () => {
-          console.log('\nShutting down...');
-          await restApp.close();
-          process.exit(0);
-        };
-        process.on('SIGINT', shutdown);
-        process.on('SIGTERM', shutdown);
-      }
+      // Register close handles so daemon's graceful shutdown closes MCP/REST servers
+      closeHandles.mcpCloseHandles!.push(mcpHttp, restApp);
     } else {
-      // Default: stdio only
-      await startMcpServer();
+      // stdio mode — NO HTTP
+      const mcpStdio = await startMcpServer(deps);
+
+      // Register close handle so daemon's graceful shutdown closes MCP stdio server
+      closeHandles.mcpCloseHandles!.push(mcpStdio);
+    }
+
+    // Shared graceful shutdown for both HTTP and stdio modes
+    {
+      const shutdown = async () => {
+        console.log('\nShutting down...');
+        await daemon.gracefulShutdown();
+        closeDatabase();
+        process.exit(0);
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
     }
   });
 
@@ -527,42 +563,8 @@ program
       };
     });
 
-    // Read the actual policy from the policies table
-    const policyRow = db.get<{
-      site_id: string;
-      allowed_methods: string;
-      max_qps: number;
-      max_concurrent: number;
-      read_only_default: number;
-      require_confirmation: string;
-      domain_allowlist: string | null;
-      redaction_rules: string;
-      capabilities: string;
-    }>('SELECT * FROM policies WHERE site_id = ?', siteId);
-
-    const policy: SitePolicy = policyRow
-      ? {
-          siteId: policyRow.site_id,
-          allowedMethods: JSON.parse(policyRow.allowed_methods) as string[],
-          maxQps: policyRow.max_qps,
-          maxConcurrent: policyRow.max_concurrent,
-          readOnlyDefault: policyRow.read_only_default === 1,
-          requireConfirmation: JSON.parse(policyRow.require_confirmation) as string[],
-          domainAllowlist: policyRow.domain_allowlist ? JSON.parse(policyRow.domain_allowlist) as string[] : [],
-          redactionRules: JSON.parse(policyRow.redaction_rules) as string[],
-          capabilities: JSON.parse(policyRow.capabilities) as CapabilityName[],
-        }
-      : {
-          siteId,
-          allowedMethods: ['GET', 'HEAD', 'POST:read-only'],
-          maxQps: 1,
-          maxConcurrent: 1,
-          readOnlyDefault: true,
-          requireConfirmation: [],
-          domainAllowlist: [],
-          redactionRules: [],
-          capabilities: [] as CapabilityName[],
-        };
+    // Use shared policy loader (reads from DB with caching, falls back to defaults)
+    const policy: SitePolicy = getSitePolicy(siteId, config);
 
     const bundle = {
       version: '0.2.0',
@@ -729,4 +731,12 @@ function sanitizeHeaders(
 
 // ─── Parse ──────────────────────────────────────────────────────
 
-program.parse(process.argv);
+try {
+  await program.parseAsync(process.argv);
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`Configuration error: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}

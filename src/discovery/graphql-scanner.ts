@@ -1,4 +1,6 @@
 import { getLogger } from '../core/logger.js';
+import { normalizeOrigin } from '../core/utils.js';
+import { resolveAndValidate } from '../core/policy.js';
 import type { DiscoveredEndpoint, GraphQLOperation, GraphQLScanResult } from './types.js';
 
 const log = getLogger();
@@ -62,6 +64,21 @@ export async function scanGraphQL(
 ): Promise<GraphQLScanResult> {
   const origin = normalizeOrigin(baseUrl);
 
+  // SSRF protection: validate that the target hostname resolves to a public IP.
+  // Skip when a custom fetchFn is provided (test/controlled mode).
+  if (fetchFn === fetch) {
+    try {
+      const hostname = new URL(origin).hostname;
+      const ipCheck = await resolveAndValidate(hostname);
+      if (!ipCheck.allowed) {
+        log.warn({ hostname, ip: ipCheck.ip, category: ipCheck.category }, 'GraphQL scan blocked — private IP');
+        return { found: false, queries: [], mutations: [] };
+      }
+    } catch {
+      // URL parse failure — let the fetch below handle it
+    }
+  }
+
   for (const gqlPath of GRAPHQL_PATHS) {
     const url = `${origin}${gqlPath}`;
     try {
@@ -93,8 +110,8 @@ export async function scanGraphQL(
         queries,
         mutations,
       };
-    } catch {
-      // Probe failed, try next path
+    } catch (err) {
+      log.debug({ err, url }, 'GraphQL probe failed');
     }
   }
 
@@ -190,13 +207,3 @@ function resolveTypeName(ref: IntrospectionTypeRef): string {
   return 'unknown';
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-function normalizeOrigin(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.origin;
-  } catch {
-    return url.replace(/\/+$/, '');
-  }
-}

@@ -8,7 +8,7 @@ export interface DiscoveredEndpoint {
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
   source: 'openapi' | 'graphql' | 'platform' | 'webmcp' | 'traffic';
-  trustLevel: number; // 1-5, higher = more trusted
+  trustLevel: 1 | 2 | 3 | 4 | 5; // discrete trust levels, higher = more trusted
 }
 
 export interface OpenApiScanResult {

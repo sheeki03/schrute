@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { getConfig } from '../core/config.js';
 import { BrowserManager } from '../browser/manager.js';
 import { CookieJar } from '../browser/cookie-jar.js';
 
@@ -8,20 +9,32 @@ const log = getLogger();
 
 let sharedBrowserManager: BrowserManager | null = null;
 
-function getBrowserManager(): BrowserManager {
+function getDefaultBrowserManager(): BrowserManager {
   if (!sharedBrowserManager) {
-    sharedBrowserManager = new BrowserManager();
+    sharedBrowserManager = new BrowserManager(getConfig());
   }
   return sharedBrowserManager;
 }
+
+// ─── sameSite mapping ───────────────────────────────────────────
+
+const SAME_SITE_MAP: Record<string, 'Strict' | 'Lax' | 'None'> = {
+  'Strict': 'Strict',
+  'Lax': 'Lax',
+  'None': 'None',
+};
 
 // ─── Cookie Refresh ──────────────────────────────────────────────
 
 export async function refreshCookies(
   siteId: string,
   cookieJar?: CookieJar,
+  browserManager?: BrowserManager,
 ): Promise<boolean> {
-  const manager = getBrowserManager();
+  // When no explicit manager is provided, create a per-cycle instance
+  // to avoid leaking a long-lived singleton browser process (CR-11).
+  const isDefaultManager = !browserManager;
+  const manager = browserManager ?? getDefaultBrowserManager();
   const jar = cookieJar ?? new CookieJar();
 
   log.info({ siteId }, 'Starting cookie refresh');
@@ -62,7 +75,7 @@ export async function refreshCookies(
       expires: c.expires,
       httpOnly: c.httpOnly,
       secure: c.secure,
-      sameSite: (c.sameSite === 'Strict' ? 'Strict' : c.sameSite === 'Lax' ? 'Lax' : 'None') as 'Strict' | 'Lax' | 'None',
+      sameSite: SAME_SITE_MAP[c.sameSite] ?? 'Lax',
     }));
 
     await jar.saveCookies(siteId, entries);
@@ -77,5 +90,16 @@ export async function refreshCookies(
   } catch (err) {
     log.error({ siteId, err }, 'Cookie refresh failed');
     return false;
+  } finally {
+    // CR-11: Close the default singleton browser manager after each refresh
+    // cycle to avoid leaking a long-lived browser process.
+    if (isDefaultManager && sharedBrowserManager) {
+      try {
+        await sharedBrowserManager.closeAll();
+      } catch (err) {
+        log.warn({ err }, 'Failed to close shared browser manager after cookie refresh');
+      }
+      sharedBrowserManager = null;
+    }
   }
 }

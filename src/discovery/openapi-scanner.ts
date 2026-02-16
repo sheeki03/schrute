@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { normalizeOrigin } from '../core/utils.js';
 import type { DiscoveredEndpoint, OpenApiScanResult } from './types.js';
 
 const log = getLogger();
@@ -53,8 +54,8 @@ export async function scanOpenApi(
         endpoints,
         rawSpec: spec,
       };
-    } catch {
-      // Probe failed, try next path
+    } catch (err) {
+      log.debug({ err, url }, 'OpenAPI probe failed');
     }
   }
 
@@ -86,9 +87,10 @@ function parseSpec(text: string): Record<string, unknown> | null {
   return null;
 }
 
+// WARNING: This minimal YAML parser only handles flat key:value pairs.
+// Nested OpenAPI specs will silently lose all structured endpoint data.
+// A full YAML parser (e.g., js-yaml) would be needed for complete support.
 function yamlToJson(yaml: string): string {
-  // Very minimal YAML conversion — handles flat key-value pairs.
-  // This is intentionally limited; real YAML parsing should use js-yaml.
   const lines = yaml.split('\n');
   const obj: Record<string, unknown> = {};
   for (const line of lines) {
@@ -295,11 +297,3 @@ function extractSchemaType(schema: Record<string, unknown> | undefined): string 
   return String(schema.type ?? 'string');
 }
 
-function normalizeOrigin(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.origin;
-  } catch {
-    return url.replace(/\/+$/, '');
-  }
-}

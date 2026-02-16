@@ -73,6 +73,9 @@ class McpSink implements NotificationSink {
  * REST webhook sink. POSTs events to configured URLs when the REST server
  * is enabled.
  */
+// Note: Webhook delivery is fire-and-forget with no retry or backoff.
+// Failed deliveries are logged but not retried. Consider adding retry
+// logic if webhook reliability becomes important.
 class WebhookSink implements NotificationSink {
   name = 'webhook';
 

@@ -79,16 +79,14 @@ export function signRequest(
 // ─── Verify Signature ────────────────────────────────────────────
 
 /**
- * Verify an RFC 9421 signature on a request.
+ * Validates signature string format (base64 encoding, expected structure).
+ * Does NOT perform cryptographic verification — use {@link verifySignatureWithKey}
+ * for actual signature validation against a public key.
  *
- * NOTE: Requires the public key to be available. This is a simplified
- * verification that checks signature format and structural validity.
- * Full verification requires the public key from the server's key registry.
- *
- * @param req - The request to verify
- * @returns true if the signature is structurally valid (headers present and well-formed)
+ * @param req - The request to check
+ * @returns true if the signature headers are present and well-formed
  */
-export function verifySignature(req: SealedFetchRequest): boolean {
+export function hasValidSignatureFormat(req: SealedFetchRequest): boolean {
   const sigHeader = req.headers['Signature'] ?? req.headers['signature'];
   const inputHeader = req.headers['Signature-Input'] ?? req.headers['signature-input'];
 
@@ -234,21 +232,21 @@ function algorithmToPadding(algorithm: string): number | undefined {
 }
 
 function parseSignatureInput(input: string): SignatureParams | null {
-  try {
-    const createdMatch = input.match(/created=(\d+)/);
-    const keyidMatch = input.match(/keyid="([^"]+)"/);
-    const algMatch = input.match(/alg="([^"]+)"/);
-    const nonceMatch = input.match(/nonce="([^"]+)"/);
-
-    if (!createdMatch || !keyidMatch) return null;
-
-    return {
-      created: parseInt(createdMatch[1], 10),
-      keyId: keyidMatch[1],
-      algorithm: algMatch?.[1] ?? DEFAULT_ALGORITHM,
-      nonce: nonceMatch?.[1] ?? '',
-    };
-  } catch {
+  if (typeof input !== 'string' || input.length === 0) {
     return null;
   }
+
+  const createdMatch = input.match(/created=(\d+)/);
+  const keyidMatch = input.match(/keyid="([^"]+)"/);
+  const algMatch = input.match(/alg="([^"]+)"/);
+  const nonceMatch = input.match(/nonce="([^"]+)"/);
+
+  if (!createdMatch || !keyidMatch) return null;
+
+  return {
+    created: parseInt(createdMatch[1], 10),
+    keyId: keyidMatch[1],
+    algorithm: algMatch?.[1] ?? DEFAULT_ALGORITHM,
+    nonce: nonceMatch?.[1] ?? '',
+  };
 }

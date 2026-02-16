@@ -1,10 +1,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getConfig, getDataDir, getDbPath } from './core/config.js';
+import { getLogger } from './core/logger.js';
 import { getDatabase } from './storage/database.js';
 import { isPublicIp } from './core/policy.js';
 import * as secrets from './storage/secrets.js';
 import type { OneAgentConfig, SkillStatusName } from './skill/types.js';
+
+const log = getLogger();
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -20,8 +23,8 @@ export interface TrustPosture {
     exportExcludesCreds: boolean;
   };
   redaction: {
-    lastScanClean: boolean;
-    violations: number;
+    piiDetected: boolean;
+    redactionsApplied: number;
   };
   skills: {
     active: number;
@@ -50,11 +53,11 @@ function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
           "SELECT COUNT(DISTINCT json_each.value) as cnt FROM policies, json_each(policies.domain_allowlist)",
         );
         allowedHosts = row?.cnt ?? 0;
-      } catch {
-        // Table may not exist yet
+      } catch (err) {
+        log.warn({ err }, 'Trust computation: failed to query allowed hosts');
       }
-    } catch {
-      // DB not available
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to open database for network info');
     }
   }
 
@@ -80,7 +83,8 @@ async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['sec
     const retrieved = await secrets.retrieve(testKey);
     await secrets.remove(testKey);
     keychainOk = retrieved === testVal;
-  } catch {
+  } catch (err) {
+    log.warn({ err }, 'Trust computation: keychain access test failed');
     keychainOk = false;
   }
 
@@ -92,23 +96,23 @@ async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['sec
       try {
         const row = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM sites');
         storedSessions = row?.cnt ?? 0;
-      } catch {
-        // Table may not exist yet
+      } catch (err) {
+        log.warn({ err }, 'Trust computation: failed to query stored sessions');
       }
-    } catch {
-      // DB not available
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to open database for secrets info');
     }
   }
 
   return {
     keychainOk,
     storedSessions,
-    exportExcludesCreds: true, // always enforced in v0.1
+    exportExcludesCreds: true, // always enforced
   };
 }
 
 function getRedactionInfo(config: OneAgentConfig): TrustPosture['redaction'] {
-  let violations = 0;
+  let redactionsApplied = 0;
 
   // Audit is JSONL file-based, not a DB table. Read the audit file and count redaction violations.
   const auditFilePath = path.join(config.dataDir, 'audit', 'audit.jsonl');
@@ -121,21 +125,21 @@ function getRedactionInfo(config: OneAgentConfig): TrustPosture['redaction'] {
             const entry = JSON.parse(line);
             const redactions = entry.policyDecision?.redactionsApplied;
             if (Array.isArray(redactions) && redactions.length > 0) {
-              violations++;
+              redactionsApplied++;
             }
-          } catch {
-            // skip malformed lines
+          } catch (err) {
+            log.warn({ err }, 'Trust computation: failed to parse audit log line');
           }
         }
       }
-    } catch {
-      // audit file unreadable
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to read audit file');
     }
   }
 
   return {
-    lastScanClean: violations === 0,
-    violations,
+    piiDetected: redactionsApplied > 0,
+    redactionsApplied,
   };
 }
 
@@ -162,16 +166,16 @@ function getSkillsInfo(config: OneAgentConfig): TrustPosture['skills'] {
             try {
               const lock = JSON.parse(row.tier_lock);
               if (lock?.type === 'permanent') result.locked++;
-            } catch {
-              // not valid JSON
+            } catch (err) {
+              log.warn({ err }, 'Trust computation: failed to parse tier_lock JSON');
             }
           }
         }
-      } catch {
-        // Table may not exist yet
+      } catch (err) {
+        log.warn({ err }, 'Trust computation: failed to query skills table');
       }
-    } catch {
-      // DB not available
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to open database for skills info');
     }
   }
 
@@ -196,12 +200,12 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
           if (stat.isFile()) {
             usedMb += stat.size / (1024 * 1024);
           }
-        } catch {
-          // skip inaccessible files
+        } catch (err) {
+          log.warn({ err, entryPath }, 'Trust computation: failed to stat file for retention calculation');
         }
       }
-    } catch {
-      // data dir unreadable
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to read data directory');
     }
   }
 
@@ -219,11 +223,11 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
             (Date.now() - row.oldest) / (1000 * 60 * 60 * 24),
           );
         }
-      } catch {
-        // Table may not exist yet
+      } catch (err) {
+        log.warn({ err }, 'Trust computation: failed to query oldest action frame');
       }
-    } catch {
-      // DB not available
+    } catch (err) {
+      log.warn({ err }, 'Trust computation: failed to open database for retention info');
     }
   }
 
@@ -258,7 +262,7 @@ export function formatTrustReport(posture: TrustPosture): string {
     `Secrets:    keychain ${posture.secrets.keychainOk ? 'OK' : 'UNAVAILABLE'}, ${posture.secrets.storedSessions} stored sessions, export ${posture.secrets.exportExcludesCreds ? 'excludes' : 'INCLUDES'} creds`,
   );
   lines.push(
-    `Redaction:  last scan ${posture.redaction.lastScanClean ? 'clean' : 'DIRTY'}, ${posture.redaction.violations} violations`,
+    `Redaction:  ${posture.redaction.redactionsApplied} redactions applied, PII detected: ${posture.redaction.piiDetected ? 'yes' : 'no'}`,
   );
   lines.push(
     `Skills:     ${posture.skills.active} active, ${posture.skills.stale} stale, ${posture.skills.locked} locked (Tier 3), ${posture.skills.broken} broken`,

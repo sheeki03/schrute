@@ -140,8 +140,8 @@ async function runPlatformScanner(
     try {
       const snapshot = await browser.snapshot();
       html = snapshot.content;
-    } catch {
-      // No browser content available
+    } catch (err) {
+      log.warn({ err, url }, 'Site unreachable during cold-start discovery');
     }
   }
 
@@ -153,12 +153,15 @@ async function runPlatformScanner(
       });
       html = await resp.text();
       headers = Object.fromEntries(resp.headers.entries());
-    } catch {
-      // Can't reach the site
+    } catch (err) {
+      log.warn({ err, url }, 'Site unreachable during cold-start discovery');
     }
   }
 
   const result = detectPlatform(url, html, headers);
+  if (result.platform === null) {
+    log.info({ url }, 'No platform indicators detected');
+  }
   const endpoints = platformToEndpoints(result);
   return {
     source: {

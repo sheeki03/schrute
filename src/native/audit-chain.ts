@@ -17,6 +17,10 @@
 
 import { createHash, createHmac } from 'node:crypto';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export interface ChainVerificationNative {
   valid: boolean;
@@ -37,8 +41,11 @@ export function computeEntryHashNative(
       const resultJson: string = native.computeEntryHash(input);
       const parsed = JSON.parse(resultJson);
       return parsed.entryHash;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 
@@ -66,8 +73,11 @@ export function signEntryHashNative(
       const resultJson: string = native.signEntryHash(input);
       const parsed = JSON.parse(resultJson);
       return parsed.signature;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 
@@ -86,8 +96,11 @@ export function verifyChainNative(
       const input = JSON.stringify({ entriesJson, hmacKey });
       const resultJson: string = native.verifyChain(input);
       return JSON.parse(resultJson);
-    } catch {
-      // Fall through to null (caller uses class-based TS)
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

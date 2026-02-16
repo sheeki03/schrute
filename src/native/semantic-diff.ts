@@ -10,6 +10,10 @@ import type { SemanticCheckResult } from '../replay/semantic-check.js';
 import { checkSemantic as tsCheckSemantic } from '../replay/semantic-check.js';
 import type { SkillSpec } from '../skill/types.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function checkSemanticNative(
   response: { status: number; headers: Record<string, string>; body: string },
@@ -29,8 +33,11 @@ export function checkSemanticNative(
       });
       const resultJson: string = native.checkSemantic(input);
       return JSON.parse(resultJson) as SemanticCheckResult;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native semantic-diff unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

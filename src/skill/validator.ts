@@ -1,4 +1,7 @@
 import { getLogger } from '../core/logger.js';
+import { defaultFetch, ERROR_SIGNATURE_PATTERNS } from '../core/utils.js';
+import { resolveUrl, buildDefaultHeaders, buildBodyOrQuery } from '../replay/request-builder.js';
+import { evaluateInvariant } from '../shared/invariant-utils.js';
 import type { SkillSpec, SealedFetchRequest, SealedFetchResponse } from './types.js';
 
 const log = getLogger();
@@ -33,37 +36,6 @@ export interface CustomInvariant {
   check: (body: unknown, headers: Record<string, string>) => InvariantResult;
 }
 
-// ─── Error Signatures ───────────────────────────────────────────
-
-const ERROR_SIGNATURE_PATTERNS: Array<{ name: string; check: (body: string) => boolean }> = [
-  {
-    name: 'json_error_field',
-    check: (body) => {
-      try {
-        const parsed = JSON.parse(body);
-        return parsed != null && typeof parsed === 'object' && ('error' in parsed || 'errors' in parsed);
-      } catch {
-        return false;
-      }
-    },
-  },
-  {
-    name: 'please_refresh',
-    check: (body) => /please\s+refresh/i.test(body),
-  },
-  {
-    name: 'session_expired',
-    check: (body) => /session\s+expired/i.test(body),
-  },
-  {
-    name: 'redirect_to_login',
-    check: (body) => {
-      // Detect meta-refresh or JS redirect to login pages
-      return /(?:window\.location|location\.href|<meta\s+http-equiv="refresh").*(?:login|signin|sign-in|auth)/i.test(body);
-    },
-  },
-];
-
 // ─── Validate Skill ─────────────────────────────────────────────
 
 export async function validateSkill(
@@ -75,7 +47,7 @@ export async function validateSkill(
   const fetchFn = options?.fetchFn ?? defaultFetch;
 
   // Build the request from the skill spec + params
-  const request = buildRequest(skill, params);
+  const request = buildValidationRequest(skill, params);
 
   let response: SealedFetchResponse;
   try {
@@ -139,60 +111,15 @@ export async function validateSkill(
 
 // ─── Request Building ───────────────────────────────────────────
 
-function buildRequest(
+function buildValidationRequest(
   skill: SkillSpec,
   params: Record<string, unknown>,
 ): SealedFetchRequest {
-  // Resolve parameterized path
-  let url = skill.pathTemplate;
-  for (const [key, value] of Object.entries(params)) {
-    url = url.replace(`{${key}}`, encodeURIComponent(String(value)));
-  }
+  const resolved = resolveUrl(skill.pathTemplate, params, skill.allowedDomains, skill.siteId);
+  const headers = buildDefaultHeaders(skill.requiredHeaders);
+  const bodyResult = buildBodyOrQuery(skill.method, resolved.url, params, resolved.pathParamNames, headers);
 
-  // Ensure full URL
-  if (!url.startsWith('http')) {
-    const domain = skill.allowedDomains[0] ?? skill.siteId;
-    url = `https://${domain}${url}`;
-  }
-
-  // Build headers
-  const headers: Record<string, string> = {
-    'accept': 'application/json',
-    ...(skill.requiredHeaders ?? {}),
-  };
-
-  // Build body for POST/PUT/PATCH
-  let body: string | undefined;
-  const upperMethod = skill.method.toUpperCase();
-  if (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH') {
-    // Filter out path params from body
-    const pathParamNames = extractPathParams(skill.pathTemplate);
-    const bodyParams: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        bodyParams[key] = value;
-      }
-    }
-    if (Object.keys(bodyParams).length > 0) {
-      body = JSON.stringify(bodyParams);
-      headers['content-type'] = 'application/json';
-    }
-  } else if (upperMethod === 'GET') {
-    // Append query params for GET
-    const pathParamNames = extractPathParams(skill.pathTemplate);
-    const queryEntries: string[] = [];
-    for (const [key, value] of Object.entries(params)) {
-      if (!pathParamNames.includes(key)) {
-        queryEntries.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-      }
-    }
-    if (queryEntries.length > 0) {
-      const separator = url.includes('?') ? '&' : '?';
-      url = `${url}${separator}${queryEntries.join('&')}`;
-    }
-  }
-
-  return { url, method: skill.method, headers, body };
+  return { url: bodyResult.url, method: skill.method, headers, body: bodyResult.body };
 }
 
 // ─── Error Signature Detection ──────────────────────────────────
@@ -217,6 +144,9 @@ function detectErrorSignatures(response: SealedFetchResponse): string[] {
 
 // ─── Schema Match ───────────────────────────────────────────────
 
+// Note: Similar checkSchemaMatch exists in replay/semantic-check.ts but with different validation depth.
+// This version checks top-level required keys only (shallow structural match).
+// See semantic-check.ts for recursive structural validation via validateStructure().
 function checkSchemaMatch(
   skill: SkillSpec,
   response: SealedFetchResponse,
@@ -246,7 +176,12 @@ function checkSchemaMatch(
     }
 
     return true;
-  } catch {
+  } catch (err) {
+    // Re-throw code bugs (TypeError, ReferenceError) so they surface during development.
+    // Only swallow validation-related errors (e.g., JSON.parse failure on invalid body).
+    if (err instanceof TypeError || err instanceof ReferenceError) {
+      throw err;
+    }
     return false;
   }
 }
@@ -279,7 +214,7 @@ function runInvariants(
 
   // Custom invariants from skill spec
   for (const invariant of skill.validation.customInvariants) {
-    const result = evaluateCustomInvariant(invariant, response);
+    const result = evaluateCustomInvariantForResponse(invariant, response);
     results.push(result);
   }
 
@@ -299,92 +234,21 @@ function runInvariants(
   return results;
 }
 
-function evaluateCustomInvariant(
+function evaluateCustomInvariantForResponse(
   invariant: string,
   response: SealedFetchResponse,
 ): InvariantResult {
-  // Parse invariant expressions like:
-  // "must include field X" — check that field X exists in response
-  // "must not contain marker Y" — check that string Y is not in response body
-  // "field Y must be non-empty" — check that field Y exists and is non-empty
-
-  const mustIncludeField = invariant.match(/^must include field (\w+)$/i);
-  if (mustIncludeField) {
-    const fieldName = mustIncludeField[1];
-    try {
-      const parsed = JSON.parse(response.body);
-      const has = typeof parsed === 'object' && parsed !== null && fieldName in parsed;
-      return {
-        name: invariant,
-        passed: has,
-        detail: has ? undefined : `Field '${fieldName}' not found in response`,
-      };
-    } catch {
-      return { name: invariant, passed: false, detail: 'Response is not valid JSON' };
-    }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    parsed = response.body;
   }
-
-  const mustNotContain = invariant.match(/^must not contain marker (.+)$/i);
-  if (mustNotContain) {
-    const marker = mustNotContain[1];
-    const contains = response.body.includes(marker);
-    return {
-      name: invariant,
-      passed: !contains,
-      detail: contains ? `Marker '${marker}' found in response` : undefined,
-    };
-  }
-
-  const fieldNonEmpty = invariant.match(/^field (\w+) must be non-empty$/i);
-  if (fieldNonEmpty) {
-    const fieldName = fieldNonEmpty[1];
-    try {
-      const parsed = JSON.parse(response.body) as Record<string, unknown>;
-      const value = parsed[fieldName];
-      const nonEmpty = value != null && value !== '' && !(Array.isArray(value) && value.length === 0);
-      return {
-        name: invariant,
-        passed: nonEmpty,
-        detail: nonEmpty ? undefined : `Field '${fieldName}' is empty or missing`,
-      };
-    } catch {
-      return { name: invariant, passed: false, detail: 'Response is not valid JSON' };
-    }
-  }
-
-  // Unknown invariant — pass by default with warning
-  log.warn({ invariant }, 'Unknown custom invariant format, skipping');
+  const result = evaluateInvariant(invariant, parsed, response.body);
   return {
     name: invariant,
-    passed: true,
-    detail: 'Unknown invariant format — skipped',
+    passed: result.passed,
+    detail: result.reason || undefined,
   };
 }
 
-// ─── Helpers ────────────────────────────────────────────────────
-
-function extractPathParams(template: string): string[] {
-  const matches = template.match(/\{(\w+)\}/g);
-  if (!matches) return [];
-  return matches.map((m) => m.slice(1, -1));
-}
-
-async function defaultFetch(req: SealedFetchRequest): Promise<SealedFetchResponse> {
-  const response = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.body,
-  });
-
-  const body = await response.text();
-  const headers: Record<string, string> = {};
-  response.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
-
-  return {
-    status: response.status,
-    headers,
-    body,
-  };
-}

@@ -9,6 +9,10 @@
 import type { PathRiskResult } from '../skill/path-risk.js';
 import { checkPathRisk as tsCheckPathRisk } from '../skill/path-risk.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function checkPathRiskNative(method: string, path: string): PathRiskResult {
   const native = getNativeModule();
@@ -18,8 +22,11 @@ export function checkPathRiskNative(method: string, path: string): PathRiskResul
       const input = JSON.stringify({ method, path });
       const resultJson: string = native.checkPathRisk(input);
       return JSON.parse(resultJson) as PathRiskResult;
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native path-risk unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

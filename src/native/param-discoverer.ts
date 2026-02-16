@@ -10,6 +10,10 @@ import type { ParameterEvidence } from '../skill/types.js';
 import type { RequestSample } from '../capture/param-discoverer.js';
 import { discoverParams as tsDiscoverParams } from '../capture/param-discoverer.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function discoverParamsNative(recordings: RequestSample[]): ParameterEvidence[] {
   const native = getNativeModule();
@@ -25,8 +29,11 @@ export function discoverParamsNative(recordings: RequestSample[]): ParameterEvid
       const input = JSON.stringify({ samples });
       const resultJson: string = native.discoverParams(input);
       return JSON.parse(resultJson) as ParameterEvidence[];
-    } catch {
-      // Fall through to TS fallback
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native param-discoverer unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

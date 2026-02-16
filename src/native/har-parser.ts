@@ -9,6 +9,10 @@
 import type { StructuredRecord, HarData } from '../capture/har-extractor.js';
 import { extractRequestResponse } from '../capture/har-extractor.js';
 import { getNativeModule } from './index.js';
+import { getLogger } from '../core/logger.js';
+
+const log = getLogger();
+let _nativeFailureLogged = false;
 
 export function parseHarNative(harJson: string): StructuredRecord[] {
   const native = getNativeModule();
@@ -17,8 +21,11 @@ export function parseHarNative(harJson: string): StructuredRecord[] {
     try {
       const resultJson: string = native.parseHar(harJson);
       return JSON.parse(resultJson) as StructuredRecord[];
-    } catch {
-      // Fall through to TS fallback on native error
+    } catch (err) {
+      if (!_nativeFailureLogged) {
+        log.debug({ err }, 'Native har-parser unavailable, using TS fallback');
+        _nativeFailureLogged = true;
+      }
     }
   }
 

@@ -95,7 +95,9 @@ export class RateLimiter {
       bucket.backoffMultiplier = INITIAL_BACKOFF_MULTIPLIER;
     }
 
-    // Parse rate limit headers for adaptive calibration
+    // Rate limit header parsing: supports X-RateLimit-Remaining, X-RateLimit-Reset,
+    // Retry-After. Reset values >1e10 are treated as Unix timestamps (seconds),
+    // smaller values as seconds-from-now.
     const remaining = this.parseHeader(headers, 'x-ratelimit-remaining');
     const limit = this.parseHeader(headers, 'x-ratelimit-limit');
     const reset = this.parseHeader(headers, 'x-ratelimit-reset');

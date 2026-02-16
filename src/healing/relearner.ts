@@ -3,7 +3,6 @@ import { SkillStatus } from '../skill/types.js';
 import { incrementVersion, calculateConfidence } from '../skill/versioning.js';
 import type { SkillRepository } from '../storage/skill-repository.js';
 import type { MetricsRepository } from '../storage/metrics-repository.js';
-import type { OneAgentConfig } from '../skill/types.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -46,7 +45,6 @@ export async function relearnSkill(
   skill: SkillSpec,
   skillRepo: SkillRepository,
   metricsRepo: MetricsRepository,
-  _config: OneAgentConfig,
 ): Promise<RelearnResult> {
   log.info({ skillId: skill.id, status: skill.status }, 'Attempting to relearn skill');
 
