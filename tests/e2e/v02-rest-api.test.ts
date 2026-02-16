@@ -7,6 +7,13 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
+// Mock keychain to avoid real keytar calls (avoids 2s+ timeouts per call)
+vi.mock('../../src/storage/secrets.js', () => ({
+  store: vi.fn().mockResolvedValue(undefined),
+  retrieve: vi.fn().mockResolvedValue(null),
+  remove: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock external deps BEFORE importing the server
 vi.mock('../../src/storage/database.js', () => {
   const skills = new Map<string, any>();
@@ -18,6 +25,9 @@ vi.mock('../../src/storage/database.js', () => {
         get: (...args: unknown[]) => undefined,
         all: (...args: unknown[]) => [],
       }),
+      run: (...args: unknown[]) => ({ changes: 1 }),
+      get: (...args: unknown[]) => undefined,
+      all: (...args: unknown[]) => [],
       exec: () => {},
       close: () => {},
     }),
@@ -201,14 +211,16 @@ describe('v0.2 REST API', () => {
 
   // ─── Execute Skill ────────────────────────────────────────────
 
-  it('POST /api/sites/:id/skills/:name executes skill', async () => {
+  it('POST /api/sites/:id/skills/:name returns confirmation_required for unconfirmed skill', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/sites/example.com/skills/get_users',
       payload: { params: { page: 1 } },
     });
-    // Should succeed (consecutiveValidations=5, so no confirmation needed)
-    expect(res.statusCode).toBe(200);
+    // All unconfirmed skills now require confirmation before execution
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.status).toBe('confirmation_required');
   });
 
   it('POST /api/sites/:id/skills/:name returns 404 for unknown skill', async () => {

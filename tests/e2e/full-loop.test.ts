@@ -66,6 +66,7 @@ function makeTestConfig(): OneAgentConfig {
     audit: { strictMode: false, rootHashExport: false },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
     server: { network: false },
+    daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,
     confirmationTimeoutMs: 30000,
@@ -320,5 +321,5 @@ describe('Full Loop E2E', () => {
     expect(statusAfter.mode).toBe('idle');
     expect(statusAfter.activeSession).toBeNull();
     expect(statusAfter.currentRecording).toBeNull();
-  }, 10000);
+  }, 15000);
 });

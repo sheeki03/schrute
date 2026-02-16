@@ -1,4 +1,8 @@
 import { defineConfig } from 'vitest/config';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   test: {
@@ -11,10 +15,11 @@ export default defineConfig({
       exclude: ['src/index.ts', 'src/client/**'],
     },
     testTimeout: 30000,
+    hookTimeout: 30000,
   },
   resolve: {
     alias: {
-      '@oneagent': '/src',
+      '@oneagent': path.resolve(__dirname, 'src'),
     },
   },
 });

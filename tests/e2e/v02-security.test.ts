@@ -198,7 +198,7 @@ describe('v0.2 Security — Policy Blocks', () => {
 
     const result = checkCapability('any-site', 'browser.modelContext');
     expect(result.allowed).toBe(false);
-    expect(result.rule).toBe('capability.v01_disabled');
+    expect(result.rule).toBe('capability.disabled_by_default');
   });
 
   it('checkMethodAllowed blocks DELETE by default', async () => {

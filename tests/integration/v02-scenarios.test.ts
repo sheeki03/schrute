@@ -86,7 +86,7 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
     expect(checkPathRisk('GET', '/api/categories').blocked).toBe(false);
   });
 
-  it('router executes cooperative skill without confirmation', async () => {
+  it('router executes confirmed cooperative skill', async () => {
     const { createRouter } = await import('../../src/server/router.js');
 
     const skill = makeSkill({
@@ -105,12 +105,16 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
       getByStatus: () => [],
     } as any;
 
+    // Skill must be confirmed before execution (all skills require confirmation now)
+    const confirmation = makeConfirmationManager();
+    (confirmation.isSkillConfirmed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
     const router = createRouter({
       engine: mockEngine,
       skillRepo: mockSkillRepo,
       siteRepo: { getAll: () => [], getById: () => null } as any,
       config: makeTestConfig() as any,
-      confirmation: makeConfirmationManager() as any,
+      confirmation: confirmation as any,
     });
 
     const result = await router.executeSkill('shop.example.com', 'list_products', {});

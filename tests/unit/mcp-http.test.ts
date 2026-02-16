@@ -84,7 +84,16 @@ vi.mock('../../src/core/engine.js', () => {
 
 describe('mcp-http', () => {
   it('throws when server.network is false', async () => {
-    await expect(startMcpHttpServer()).rejects.toThrow(
+    const mockDeps = {
+      engine: {} as any,
+      skillRepo: {} as any,
+      siteRepo: {} as any,
+      confirmation: {} as any,
+      config: {
+        server: { network: false },
+      } as any,
+    };
+    await expect(startMcpHttpServer(mockDeps)).rejects.toThrow(
       'MCP HTTP transport is disabled',
     );
   });

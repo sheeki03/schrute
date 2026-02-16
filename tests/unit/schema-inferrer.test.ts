@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { inferSchema, detectEnums } from '../../src/capture/schema-inferrer.js';
+import { inferSchema } from '../../src/capture/schema-inferrer.js';
 
 describe('schema-inferrer', () => {
   describe('inferSchema', () => {
@@ -78,22 +78,4 @@ describe('schema-inferrer', () => {
     });
   });
 
-  describe('detectEnums', () => {
-    it('detects enum fields with limited distinct values', () => {
-      const samples = [
-        { status: 'active', name: 'a' },
-        { status: 'inactive', name: 'b' },
-        { status: 'active', name: 'c' },
-        { status: 'inactive', name: 'd' },
-      ];
-      const enums = detectEnums(samples);
-      expect(enums).toHaveProperty('status');
-      expect(enums.status).toContain('active');
-      expect(enums.status).toContain('inactive');
-    });
-
-    it('returns empty for single sample', () => {
-      expect(detectEnums([{ status: 'active' }])).toEqual({});
-    });
-  });
 });

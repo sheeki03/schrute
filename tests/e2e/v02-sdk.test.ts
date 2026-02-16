@@ -15,6 +15,9 @@ vi.mock('../../src/storage/database.js', () => ({
       get: () => undefined,
       all: () => [],
     }),
+    run: () => ({ changes: 1 }),
+    get: () => undefined,
+    all: () => [],
     exec: () => {},
     close: () => {},
   }),
@@ -138,17 +141,20 @@ describe('v0.2 SDK — TypeScript Client', () => {
     await app.close();
   });
 
-  it('SDK against Fastify inject — execute skill', async () => {
+  it('SDK against Fastify inject — execute skill returns confirmation_required', async () => {
     const { createRestServer } = await import('../../src/server/rest-server.js');
     const app = await createRestServer({ port: 0 });
     await app.ready();
 
+    // All unconfirmed skills now require confirmation before execution
     const res = await app.inject({
       method: 'POST',
       url: '/api/sites/example.com/skills/get_users',
       payload: { params: { page: 1 } },
     });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.status).toBe('confirmation_required');
 
     await app.close();
   });

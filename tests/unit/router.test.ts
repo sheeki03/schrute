@@ -27,6 +27,7 @@ const mockConfig: OneAgentConfig = {
   audit: { strictMode: true, rootHashExport: true },
   storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
   server: { network: false },
+  daemon: { port: 19420, autoStart: false },
   tempTtlMs: 3600000,
   gcIntervalMs: 900000,
   confirmationTimeoutMs: 30000,
@@ -246,9 +247,11 @@ describe('router', () => {
       expect((result.data as Record<string, unknown>).status).toBe('confirmation_required');
     });
 
-    it('executes validated skill', async () => {
+    it('executes confirmed skill', async () => {
       const skill = makeSkill({ consecutiveValidations: 3 });
       (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
+      // Mark skill as confirmed so it bypasses the confirmation gate
+      (deps.confirmation.isSkillConfirmed as ReturnType<typeof vi.fn>).mockReturnValue(true);
       const router = createRouter(deps);
       const result = await router.executeSkill('example.com', 'get_users', {});
       expect(result.success).toBe(true);

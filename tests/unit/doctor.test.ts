@@ -18,12 +18,12 @@ describe('doctor', () => {
   describe('formatDoctorReport', () => {
     it('formats all-pass report correctly', () => {
       const report = makeReport([
-        { name: 'playwright_browsers', status: 'pass', message: 'Chromium browser available' },
+        { name: 'browser_engine', status: 'pass', message: 'Browser engine "patchright" available' },
         { name: 'keychain_access', status: 'pass', message: 'Keychain working' },
         { name: 'build_profile', status: 'pass', message: 'v0.1' },
       ]);
       const output = formatDoctorReport(report);
-      expect(output).toContain('[PASS] playwright_browsers');
+      expect(output).toContain('[PASS] browser_engine');
       expect(output).toContain('[PASS] keychain_access');
       expect(output).toContain('3 passed, 0 failed, 0 warnings');
     });
@@ -31,15 +31,15 @@ describe('doctor', () => {
     it('formats failure with details', () => {
       const report = makeReport([
         {
-          name: 'playwright_browsers',
+          name: 'browser_engine',
           status: 'fail',
-          message: 'Chromium browser not available',
-          details: 'Install with: npx playwright install chromium',
+          message: 'Browser engine "patchright" not available',
+          details: 'Install with: npm install patchright && npx patchright install chromium',
         },
       ]);
       const output = formatDoctorReport(report);
-      expect(output).toContain('[FAIL] playwright_browsers');
-      expect(output).toContain('Install with: npx playwright install chromium');
+      expect(output).toContain('[FAIL] browser_engine');
+      expect(output).toContain('npm install patchright');
       expect(output).toContain('0 passed, 1 failed, 0 warnings');
     });
 
@@ -86,15 +86,27 @@ describe('doctor', () => {
       expect(check.status).toBe('pass');
     });
 
-    it('browser check fail result', () => {
+    it('browser engine fail result', () => {
       const check: CheckResult = {
-        name: 'playwright_browsers',
+        name: 'browser_engine',
         status: 'fail',
-        message: 'Chromium browser not available',
-        details: 'Install with: npx playwright install chromium\nError: ...',
+        message: 'Browser engine "camoufox" not available',
+        details: 'Install with: npm install camoufox-js && npx camoufox-js fetch\nError: ...',
       };
       expect(check.status).toBe('fail');
-      expect(check.details).toContain('npx playwright install chromium');
+      expect(check.details).toContain('camoufox-js');
+    });
+
+    it('browser engine fallback warning result', () => {
+      const check: CheckResult = {
+        name: 'browser_engine',
+        status: 'warning',
+        message: 'Configured engine "patchright" unavailable — fell back to "playwright"',
+        details: 'Install: npm install patchright && npx patchright install chromium',
+      };
+      expect(check.status).toBe('warning');
+      expect(check.message).toContain('fell back');
+      expect(check.details).toContain('patchright');
     });
 
     it('mixed results summary is correct', () => {

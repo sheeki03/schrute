@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
-import { signRequest, verifySignature, verifySignatureWithKey } from '../../src/automation/bot-auth.js';
+import { signRequest, hasValidSignatureFormat, verifySignatureWithKey } from '../../src/automation/bot-auth.js';
 import type { SealedFetchRequest } from '../../src/skill/types.js';
 
 function makeRequest(overrides: Partial<SealedFetchRequest> = {}): SealedFetchRequest {
@@ -77,7 +77,7 @@ describe('bot-auth', () => {
     });
   });
 
-  describe('verifySignature', () => {
+  describe('hasValidSignatureFormat', () => {
     it('returns true for structurally valid signed requests', () => {
       const { privateKey } = generateTestKeyPair();
       const req = makeRequest();
@@ -87,11 +87,11 @@ describe('bot-auth', () => {
         privateKey,
       });
 
-      expect(verifySignature(signed)).toBe(true);
+      expect(hasValidSignatureFormat(signed)).toBe(true);
     });
 
     it('returns false for requests without signatures', () => {
-      expect(verifySignature(makeRequest())).toBe(false);
+      expect(hasValidSignatureFormat(makeRequest())).toBe(false);
     });
 
     it('returns false for malformed Signature header', () => {
@@ -102,7 +102,7 @@ describe('bot-auth', () => {
           'Signature-Input': 'sig1=("@method");created=12345;keyid="k"',
         },
       });
-      expect(verifySignature(req)).toBe(false);
+      expect(hasValidSignatureFormat(req)).toBe(false);
     });
 
     it('returns false for malformed Signature-Input header', () => {
@@ -113,7 +113,7 @@ describe('bot-auth', () => {
           'Signature-Input': 'garbage',
         },
       });
-      expect(verifySignature(req)).toBe(false);
+      expect(hasValidSignatureFormat(req)).toBe(false);
     });
   });
 

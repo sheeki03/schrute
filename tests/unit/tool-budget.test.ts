@@ -23,6 +23,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     audit: { strictMode: true, rootHashExport: true },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
     server: { network: false },
+    daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,
     confirmationTimeoutMs: 30000,

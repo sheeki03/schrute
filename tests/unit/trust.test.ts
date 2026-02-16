@@ -14,8 +14,8 @@ function makePosture(overrides: Partial<TrustPosture> = {}): TrustPosture {
       exportExcludesCreds: true,
     },
     redaction: {
-      lastScanClean: true,
-      violations: 0,
+      piiDetected: false,
+      redactionsApplied: 0,
     },
     skills: {
       active: 10,
@@ -70,12 +70,12 @@ describe('trust', () => {
 
     it('generates redaction line', () => {
       const posture = makePosture({
-        redaction: { lastScanClean: false, violations: 5 },
+        redaction: { piiDetected: true, redactionsApplied: 5 },
       });
       const report = formatTrustReport(posture);
       expect(report).toContain('Redaction:');
-      expect(report).toContain('DIRTY');
-      expect(report).toContain('5 violations');
+      expect(report).toContain('5 redactions applied');
+      expect(report).toContain('PII detected: yes');
     });
 
     it('generates skills line with all categories', () => {
