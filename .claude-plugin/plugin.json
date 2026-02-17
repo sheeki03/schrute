@@ -1,0 +1,19 @@
+{
+  "name": "oneagent",
+  "version": "0.1.0",
+  "description": "Universal Self-Learning Browser Agent — record browser interactions, generate API skills, and replay them via MCP tools with progressive tier optimization.",
+  "author": {
+    "name": "OneAgent Contributors"
+  },
+  "repository": "https://github.com/user/oneagent",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "browser",
+    "automation",
+    "api-replay",
+    "skill-learning",
+    "playwright"
+  ],
+  "commands": "./commands"
+}
