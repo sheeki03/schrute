@@ -281,7 +281,7 @@ describe('router', () => {
       const router = createRouter(deps);
       const result = await router.explore('https://example.com');
       expect(result.success).toBe(true);
-      expect(deps.engine.explore).toHaveBeenCalledWith('https://example.com');
+      expect(deps.engine.explore).toHaveBeenCalledWith('https://example.com', undefined);
     });
 
     it('handles errors gracefully', async () => {

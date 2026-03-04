@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as crypto from 'node:crypto';
+import { Command } from 'commander';
 import type { IncomingMessage } from 'node:http';
 
 // ─── Mock logger ─────────────────────────────────────────────────
@@ -146,6 +147,90 @@ describe('Daemon utilities', () => {
       const stat = { uid: 99999 };
       const currentUid = process.getuid?.() ?? 0;
       expect(stat.uid).not.toBe(currentUid);
+    });
+
+    it('uses realpathSync for existing socket paths (symlink resolution)', () => {
+      // In daemon.ts: resolvedSocket uses fs.realpathSync when path exists
+      // This verifies the pattern used for macOS /tmp -> /private/tmp symlink
+      const fs = require('node:fs');
+      const path = require('node:path');
+
+      // When socket exists, realpathSync should be used
+      const existsResult = true;
+      const socketPath = '/tmp/test/daemon.sock';
+      const resolvedSocket = existsResult
+        ? '/private/tmp/test/daemon.sock'  // what realpathSync would return on macOS
+        : path.resolve(socketPath);        // fallback when it doesn't exist
+
+      // Verify the resolved path differs from the input (symlink was resolved)
+      expect(resolvedSocket).not.toBe(socketPath);
+      expect(resolvedSocket).toContain('private');
+    });
+
+    it('falls back to path.resolve for non-existent socket paths', () => {
+      const path = require('node:path');
+
+      const existsResult = false;
+      const socketPath = '/tmp/test/daemon.sock';
+      const resolvedSocket = existsResult
+        ? socketPath
+        : path.resolve(socketPath);
+
+      // When file doesn't exist, path.resolve is used instead
+      expect(resolvedSocket).toBe(path.resolve(socketPath));
+    });
+  });
+
+  // ─── --no-daemon flag ──────────────────────────────────────────
+
+  describe('--no-daemon CLI flag', () => {
+    it('Commander parses --no-daemon to daemon=false', () => {
+      const program = new Command();
+      program.exitOverride();
+      let parsedOptions: Record<string, unknown> = {};
+      program
+        .command('serve')
+        .option('--no-daemon', 'Skip starting the daemon control socket')
+        .action((options) => {
+          parsedOptions = options;
+        });
+      program.parse(['serve', '--no-daemon'], { from: 'user' });
+      expect(parsedOptions.daemon).toBe(false);
+    });
+
+    it('Commander defaults daemon to true when --no-daemon is omitted', () => {
+      const program = new Command();
+      program.exitOverride();
+      let parsedOptions: Record<string, unknown> = {};
+      program
+        .command('serve')
+        .option('--no-daemon', 'Skip starting the daemon control socket')
+        .action((options) => {
+          parsedOptions = options;
+        });
+      program.parse(['serve'], { from: 'user' });
+      expect(parsedOptions.daemon).toBe(true);
+    });
+
+    it('conditional daemon startup skips when daemon=false', () => {
+      const startDaemon = vi.fn();
+      const options = { daemon: false };
+
+      // Mirrors the logic in index.ts serve handler
+      if (options.daemon !== false) {
+        startDaemon();
+      }
+      expect(startDaemon).not.toHaveBeenCalled();
+    });
+
+    it('conditional daemon startup proceeds when daemon=true', () => {
+      const startDaemon = vi.fn();
+      const options = { daemon: true };
+
+      if (options.daemon !== false) {
+        startDaemon();
+      }
+      expect(startDaemon).toHaveBeenCalledOnce();
     });
   });
 

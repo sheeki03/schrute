@@ -28,6 +28,7 @@ function makeTestConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
       harCaptureMaxBodyBytes: 50 * 1024 * 1024,
       redactorTimeoutMs: 10000,
     },
+    daemon: { port: 19420, autoStart: false },
     audit: { strictMode: true, rootHashExport: false },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
     server: { network: false },

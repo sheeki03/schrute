@@ -57,6 +57,10 @@ vi.mock('../../src/server/tool-registry.js', () => ({
     { name: 'oneagent_status', description: 'Status', inputSchema: {} },
     { name: 'oneagent_dry_run', description: 'Dry Run', inputSchema: {} },
     { name: 'oneagent_confirm', description: 'Confirm', inputSchema: {} },
+    { name: 'oneagent_execute', description: 'Execute', inputSchema: {} },
+    { name: 'oneagent_activate', description: 'Activate', inputSchema: {} },
+    { name: 'oneagent_doctor', description: 'Doctor', inputSchema: {} },
+    { name: 'oneagent_export_cookies', description: 'Export Cookies', inputSchema: {} },
   ],
   getBrowserToolDefinitions: vi.fn().mockReturnValue([
     { name: 'browser_click', description: 'Click', inputSchema: {} },
@@ -158,6 +162,23 @@ function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
   } as SkillSpec;
 }
 
+function makeMultiSessionMock(activeSiteId?: string) {
+  const activeSession = {
+    name: 'default',
+    siteId: activeSiteId ?? '',
+    browserManager: {},
+    isCdp: false,
+    createdAt: Date.now(),
+  };
+  return {
+    getActive: vi.fn().mockReturnValue('default'),
+    get: vi.fn().mockReturnValue(activeSession),
+    list: vi.fn().mockReturnValue([activeSession]),
+    getOrCreate: vi.fn().mockReturnValue(activeSession),
+    setActive: vi.fn(),
+  };
+}
+
 function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
   return {
     engine: {
@@ -173,13 +194,20 @@ function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
           hasContext: vi.fn().mockReturnValue(false),
           getOrCreateContext: vi.fn(),
           getCapabilities: vi.fn().mockReturnValue(null),
+          getBrowser: vi.fn().mockReturnValue(null),
+          isCdpConnected: vi.fn().mockReturnValue(false),
+          supportsHarRecording: vi.fn().mockReturnValue(true),
+          exportCookies: vi.fn().mockResolvedValue([]),
         }),
       }),
+      getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
     } as any,
     skillRepo: {
       getByStatus: vi.fn().mockReturnValue([]),
       getById: vi.fn().mockReturnValue(undefined),
       getBySiteId: vi.fn().mockReturnValue([]),
+      getAll: vi.fn().mockReturnValue([]),
+      getActive: vi.fn().mockReturnValue([]),
     } as any,
     siteRepo: {
       getAll: vi.fn().mockReturnValue([]),
@@ -417,7 +445,7 @@ describe('tool-dispatch', () => {
     it('routes oneagent_explore to router.explore', async () => {
       const deps = makeDeps();
       await dispatchToolCall('oneagent_explore', { url: 'https://example.com' }, deps);
-      expect(mockRouter.explore).toHaveBeenCalledWith('https://example.com');
+      expect(mockRouter.explore).toHaveBeenCalledWith('https://example.com', undefined);
     });
 
     it('routes oneagent_record to router.startRecording', async () => {
@@ -462,6 +490,467 @@ describe('tool-dispatch', () => {
       const result = await dispatchToolCall('oneagent_explore', { url: 'https://example.com' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('Unexpected crash');
+    });
+  });
+
+  // ─── Strict Input Validation ──────────────────────────────────
+
+  describe('oneagent_explore strict validation', () => {
+    it('rejects non-string proxy.bypass', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        proxy: { server: 'http://proxy:8080', bypass: 123 },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('proxy.bypass must be a string');
+    });
+
+    it('rejects non-string proxy.username', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        proxy: { server: 'http://proxy:8080', username: true },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('proxy.username must be a string');
+    });
+
+    it('rejects non-string proxy.password', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        proxy: { server: 'http://proxy:8080', password: 42 },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('proxy.password must be a string');
+    });
+
+    it('rejects non-number geolocation.accuracy', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        geo: { geolocation: { latitude: 0, longitude: 0, accuracy: 'high' } },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('geolocation.accuracy must be a number');
+    });
+
+    it('rejects proxy.server with path', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        proxy: { server: 'http://proxy:8080/path' },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('host-only');
+    });
+
+    it('rejects proxy.server with credentials in URL', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        proxy: { server: 'http://user:pass@proxy:8080' },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('host-only');
+    });
+  });
+
+  // ─── Site-scoped buildToolList ──────────────────────────────────
+
+  describe('site-scoped buildToolList', () => {
+    it('uses skillRepo.getActive(siteId) when active session has a siteId', () => {
+      const skill = makeSkill();
+      const multiMock = makeMultiSessionMock('example.com');
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle' }),
+          executeSkill: vi.fn(),
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({}),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(multiMock),
+        } as any,
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(undefined),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+      });
+
+      const tools = buildToolList(deps);
+      expect((deps.skillRepo as any).getActive).toHaveBeenCalledWith('example.com');
+      const names = tools.map(t => t.name);
+      expect(names).toContain('example.com.get_users.v1');
+    });
+
+    it('falls back to getByStatus when no active siteId', () => {
+      const deps = makeDeps(); // default mock has empty siteId
+      buildToolList(deps);
+      expect((deps.skillRepo as any).getByStatus).toHaveBeenCalledWith('active');
+    });
+  });
+
+  // ─── oneagent_execute ─────────────────────────────────────────
+
+  describe('oneagent_execute', () => {
+    it('returns error when skillId is missing', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_execute', {}, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skillId is required');
+    });
+
+    it('returns error when skill is not found', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_execute', { skillId: 'nonexistent' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("skill 'nonexistent' not found");
+    });
+
+    it('returns confirmation_required when skill is unconfirmed', async () => {
+      const skill = makeSkill();
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+        confirmation: {
+          isSkillConfirmed: vi.fn().mockReturnValue(false),
+          generateToken: vi.fn().mockResolvedValue({
+            nonce: 'exec-token',
+            skillId: skill.id,
+            tier: 'tier_1',
+            expiresAt: Date.now() + 60000,
+          }),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.status).toBe('confirmation_required');
+      expect(data.confirmationToken).toBe('exec-token');
+    });
+
+    it('executes skill when confirmed', async () => {
+      const skill = makeSkill();
+      const mockExecute = vi.fn().mockResolvedValue({ success: true });
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle' }),
+          executeSkill: mockExecute,
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({}),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+        } as any,
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+        confirmation: {
+          isSkillConfirmed: vi.fn().mockReturnValue(true),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id, params: { page: 1 } }, deps);
+      expect(result.isError).toBeUndefined();
+      expect(mockExecute).toHaveBeenCalledWith(skill.id, { page: 1 });
+    });
+  });
+
+  // ─── Grouped skills output ────────────────────────────────────
+
+  describe('oneagent_skills grouped output', () => {
+    it('returns skills grouped by site when no siteId given', async () => {
+      const skill1 = makeSkill({ id: 's1', siteId: 'site-a.com', name: 'get_users' });
+      const skill2 = makeSkill({ id: 's2', siteId: 'site-a.com', name: 'create_order' });
+      const skill3 = makeSkill({ id: 's3', siteId: 'site-b.com', name: 'get_items' });
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(undefined),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill1, skill2, skill3]),
+          getActive: vi.fn().mockReturnValue([]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_skills', {}, deps);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.totalSkills).toBe(3);
+      expect(data.sites['site-a.com'].count).toBe(2);
+      expect(data.sites['site-b.com'].count).toBe(1);
+      expect(data.sites['site-a.com'].skills).toHaveLength(2);
+    });
+  });
+
+  // ─── oneagent_doctor ──────────────────────────────────────────
+
+  describe('oneagent_doctor', () => {
+    it('returns diagnostics object', async () => {
+      const skill = makeSkill();
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(undefined),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_doctor', {}, deps);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.diagnostics).toBeDefined();
+      expect(data.diagnostics.browser.hasInstance).toBe(false);
+      expect(data.diagnostics.browser.isCdp).toBe(false);
+      expect(data.diagnostics.browser.supportsHar).toBe(true);
+      expect(data.diagnostics.skills.total).toBe(1);
+      expect(data.diagnostics.sessions).toHaveLength(1);
+    });
+  });
+
+  // ─── Negative Paths ──────────────────────────────────────────
+
+  describe('negative paths', () => {
+    it('oneagent_execute with non-existent skill ID returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_execute', { skillId: 'nonexistent' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("skill 'nonexistent' not found");
+    });
+
+    it('oneagent_execute with empty string skillId returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_execute', { skillId: '' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skillId is required');
+    });
+
+    it('stale confirmation token returns error', async () => {
+      const deps = makeDeps({
+        confirmation: {
+          isSkillConfirmed: vi.fn().mockReturnValue(true),
+          verifyToken: vi.fn().mockReturnValue({ valid: false, error: 'token expired' }),
+          consumeToken: vi.fn(),
+        } as any,
+      });
+      mockRouter.confirm.mockReturnValue({
+        success: false,
+        error: 'Confirmation failed: token expired',
+      });
+
+      const result = await dispatchToolCall('oneagent_confirm', {
+        confirmationToken: 'stale-token-xyz',
+        approve: true,
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Confirmation failed');
+    });
+
+    it('latitude out of range (-90 to 90) returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        geo: { geolocation: { latitude: 91, longitude: 0 } },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('latitude must be between -90 and 90');
+    });
+
+    it('longitude out of range (-180 to 180) returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        geo: { geolocation: { latitude: 0, longitude: -181 } },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('longitude must be between -180 and 180');
+    });
+
+    it('negative latitude out of range returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        geo: { geolocation: { latitude: -91, longitude: 0 } },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('latitude must be between -90 and 90');
+    });
+
+    it('longitude at positive boundary overflow returns error', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_explore', {
+        url: 'https://example.com',
+        geo: { geolocation: { latitude: 0, longitude: 181 } },
+      }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('longitude must be between -180 and 180');
+    });
+  });
+
+  describe('oneagent_connect_cdp strict validation', () => {
+    it('rejects non-string name', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 123 }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('name is required and must be a string');
+    });
+
+    it('rejects non-integer port', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', port: 'abc' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('port must be an integer');
+    });
+
+    it('rejects non-string wsEndpoint', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', wsEndpoint: 42 }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('wsEndpoint must be a string');
+    });
+
+    it('rejects non-string host', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', host: true }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('host must be a string');
+    });
+
+    it('rejects non-string siteId', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', siteId: 99 }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('siteId must be a string');
+    });
+
+    it('rejects non-array domains', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', domains: 'example.com' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('domains must be an array');
+    });
+
+    it('rejects domains with non-string elements', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', domains: ['ok.com', 42] }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('domains must be an array of strings');
+    });
+  });
+
+  // ─── oneagent_activate ─────────────────────────────────────────
+
+  describe('oneagent_activate', () => {
+    it('activates a DRAFT skill and calls skillRepo.update', async () => {
+      const skill = makeSkill({ status: SkillStatus.DRAFT });
+      const updateFn = vi.fn();
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([]),
+          update: updateFn,
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_activate', { skillId: skill.id }, deps);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.activated).toBe(true);
+      expect(data.previousStatus).toBe('draft');
+      expect(data.newStatus).toBe('active');
+      expect(updateFn).toHaveBeenCalledWith(skill.id, expect.objectContaining({
+        status: 'active',
+        confidence: 0.5,
+      }));
+    });
+
+    it('rejects activation of non-draft skill', async () => {
+      const skill = makeSkill({ status: SkillStatus.ACTIVE });
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_activate', { skillId: skill.id }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("status is 'active'");
+      expect(result.content[0].text).toContain("must be 'draft'");
+    });
+
+    it('returns error when skillId is missing', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_activate', {}, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skillId is required');
+    });
+
+    it('returns error when skill is not found', async () => {
+      const deps = makeDeps();
+      const result = await dispatchToolCall('oneagent_activate', { skillId: 'nonexistent' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("skill 'nonexistent' not found");
+    });
+  });
+
+  // ─── oneagent_execute draft hint ───────────────────────────────
+
+  describe('oneagent_execute draft hint message', () => {
+    it('shows oneagent_activate hint when executing a DRAFT skill', async () => {
+      const skill = makeSkill({ status: SkillStatus.DRAFT });
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('oneagent_activate');
+      expect(result.content[0].text).toContain('not active');
+      expect(result.content[0].text).toContain('draft');
+    });
+
+    it('does not show activate hint for non-draft inactive skills', async () => {
+      const skill = makeSkill({ status: 'broken' as any });
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('not active');
+      expect(result.content[0].text).not.toContain('oneagent_activate');
     });
   });
 });

@@ -72,7 +72,7 @@ describe('v0.2 MCP HTTP — Tool Registry Parity', () => {
     // Both mcp-stdio.ts and mcp-http.ts import META_TOOLS from tool-registry.ts
     // This is a structural parity check — same import, same data
     const { META_TOOLS } = await import('../../src/server/tool-registry.js');
-    expect(META_TOOLS.length).toBe(8);
+    expect(META_TOOLS.length).toBe(18);
   });
 });
 

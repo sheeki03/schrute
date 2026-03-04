@@ -214,4 +214,45 @@ describe('retry', () => {
     // Final result should not succeed
     expect(result.success).toBe(false);
   });
+
+  describe('wiring: tier cascade', () => {
+    it('starts with DIRECT for tier_1 skill without locks', async () => {
+      const skill = makeSkill({ currentTier: 'tier_1', tierLock: null });
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+      });
+      expect(result.tier).toBe('direct');
+    });
+
+    it('skips DIRECT tier for permanently locked skill', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_1',
+        tierLock: { type: 'permanent', reason: 'signed_payload', evidence: 'test' },
+      });
+      const mockBrowserProvider = {
+        evaluateFetch: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+      };
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        browserProvider: mockBrowserProvider as any,
+      });
+      // Should start at browser_proxied, not direct
+      expect(result.tier).toBe('browser_proxied');
+    });
+
+    it('skips DIRECT tier for temporarily demoted skill', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_1',
+        tierLock: { type: 'temporary_demotion', since: new Date().toISOString(), demotions: 1 },
+      });
+      const mockBrowserProvider = {
+        evaluateFetch: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+      };
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        browserProvider: mockBrowserProvider as any,
+      });
+      expect(result.tier).toBe('browser_proxied');
+    });
+  });
 });

@@ -181,6 +181,363 @@ describe('config', () => {
     });
   });
 
+  describe('setConfigValue → loadConfig persistence round-trip', () => {
+    it('persists value that loadConfig reads back', () => {
+      const tmpDir = path.join('/tmp', `oneagent-roundtrip-${Date.now()}`);
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const tmpConfigPath = path.join(tmpDir, 'config.json');
+
+      try {
+        // setConfigValue writes to the default config path;
+        // to test round-trip we use loadConfig with explicit path
+        // First create a valid config at the path
+        fs.writeFileSync(tmpConfigPath, JSON.stringify({ dataDir: tmpDir }), 'utf-8');
+        const loaded = configModule.loadConfig(tmpConfigPath);
+        expect(loaded.dataDir).toBe(tmpDir);
+
+        // Now modify and save
+        loaded.logLevel = 'debug';
+        configModule.saveConfig(loaded);
+
+        // Read back
+        const reloaded = configModule.loadConfig(tmpConfigPath);
+        expect(reloaded.logLevel).toBe('debug');
+      } finally {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      }
+    });
+  });
+
+  describe('environment variable overrides are NOT persisted', () => {
+    it('env override appears in getConfig but setConfigValue does not save it', () => {
+      const origVal = process.env.ONEAGENT_LOG_LEVEL;
+      try {
+        process.env.ONEAGENT_LOG_LEVEL = 'trace';
+        configModule.resetConfigCache();
+
+        // Runtime config should reflect env override
+        const runtimeConfig = configModule.getConfig();
+        expect(runtimeConfig.logLevel).toBe('trace');
+
+        // setConfigValue for unrelated key — loadConfig returns defaults (no file)
+        // so the persisted file should have 'info', not 'trace'
+        configModule.setConfigValue('tempTtlMs', 5000);
+
+        // Verify the config was saved — we can check by loading from disk
+        // Since no real file exists at default path, the important thing is
+        // that setConfigValue's internal loadConfig() returns 'info' logLevel
+        // and only persists file-config (not env overlays)
+        const runtimeAfter = configModule.getConfig();
+        // Runtime still has trace because env is still set
+        expect(runtimeAfter.logLevel).toBe('trace');
+      } finally {
+        if (origVal === undefined) {
+          delete process.env.ONEAGENT_LOG_LEVEL;
+        } else {
+          process.env.ONEAGENT_LOG_LEVEL = origVal;
+        }
+        configModule.resetConfigCache();
+      }
+    });
+  });
+
+  describe('setConfigValueInMemory does NOT write to disk', () => {
+    it('modifies runtime config without persisting', () => {
+      configModule.resetConfigCache();
+
+      // Capture the baseline tempTtlMs from disk/defaults
+      const baseline = configModule.getConfig().tempTtlMs;
+
+      // Use a value that is definitely different from baseline
+      const inMemoryValue = baseline === 9999 ? 8888 : 9999;
+      configModule.setConfigValueInMemory('tempTtlMs', inMemoryValue);
+
+      // In-memory config reflects the change
+      const config = configModule.getConfig();
+      expect(config.tempTtlMs).toBe(inMemoryValue);
+
+      // Reset cache and reload — should get baseline back (setConfigValueInMemory did not write)
+      configModule.resetConfigCache();
+      const reloaded = configModule.getConfig();
+      expect(reloaded.tempTtlMs).toBe(baseline);
+    });
+  });
+
+  describe('setConfigValueInMemory preserves env-override precedence', () => {
+    it('env variable wins over in-memory write for the overridden key', () => {
+      const envKey = 'ONEAGENT_LOG_LEVEL';
+      const original = process.env[envKey];
+      try {
+        process.env[envKey] = 'warn';
+        configModule.resetConfigCache();
+
+        // getConfig should reflect env override
+        expect(configModule.getConfig().logLevel).toBe('warn');
+
+        // setConfigValueInMemory tries to set logLevel to 'debug'
+        configModule.setConfigValueInMemory('logLevel', 'debug');
+
+        // env override should still win — logLevel should be 'warn'
+        expect(configModule.getConfig().logLevel).toBe('warn');
+      } finally {
+        if (original === undefined) delete process.env[envKey];
+        else process.env[envKey] = original;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('non-overridden keys are still set by in-memory write', () => {
+      const envKey = 'ONEAGENT_LOG_LEVEL';
+      const original = process.env[envKey];
+      try {
+        // Ensure no env override for tempTtlMs
+        delete process.env[envKey];
+        configModule.resetConfigCache();
+
+        const baseline = configModule.getConfig().tempTtlMs;
+        const newValue = baseline === 5555 ? 6666 : 5555;
+        configModule.setConfigValueInMemory('tempTtlMs', newValue);
+
+        expect(configModule.getConfig().tempTtlMs).toBe(newValue);
+      } finally {
+        if (original !== undefined) process.env[envKey] = original;
+        configModule.resetConfigCache();
+      }
+    });
+  });
+
+  describe('resetConfigCache clears cached config', () => {
+    it('forces re-load on next getConfig call', () => {
+      configModule.resetConfigCache();
+
+      // Load defaults
+      const config1 = configModule.getConfig();
+      const defaultTtl = config1.tempTtlMs;
+
+      // Mutate in-memory
+      configModule.setConfigValueInMemory('tempTtlMs', 12345);
+      expect(configModule.getConfig().tempTtlMs).toBe(12345);
+
+      // Reset cache — next call re-loads from disk (no file → defaults)
+      configModule.resetConfigCache();
+      const config3 = configModule.getConfig();
+      expect(config3.tempTtlMs).toBe(defaultTtl);
+    });
+  });
+
+  describe('invalid logLevel falls back to info', () => {
+    it('unrecognized logLevel in config file falls back to info', () => {
+      const tmpPath = path.join('/tmp', `oneagent-test-loglevel-${Date.now()}.json`);
+      fs.writeFileSync(tmpPath, JSON.stringify({ logLevel: 'banana' }), 'utf-8');
+
+      try {
+        const config = configModule.loadConfig(tmpPath);
+        expect(config.logLevel).toBe('info');
+      } finally {
+        fs.unlinkSync(tmpPath);
+      }
+    });
+  });
+
+  describe('proxy validation in setConfigValue', () => {
+    it('accepts valid HTTP proxy', () => {
+      expect(() => configModule.setConfigValue('browser.proxy.server', 'http://proxy.example.com:8080')).not.toThrow();
+    });
+
+    it('accepts valid SOCKS5 proxy', () => {
+      expect(() => configModule.setConfigValue('browser.proxy.server', 'socks5://proxy.example.com:1080')).not.toThrow();
+    });
+
+    it('rejects invalid proxy URL', () => {
+      expect(() => configModule.setConfigValue('browser.proxy.server', 'not-a-url')).toThrow();
+    });
+
+    it('rejects proxy with path/query', () => {
+      expect(() => configModule.setConfigValue('browser.proxy.server', 'http://proxy.example.com/path?token=secret')).toThrow();
+    });
+  });
+
+  describe('geo validation in setConfigValue', () => {
+    it('accepts valid timezone', () => {
+      expect(() => configModule.setConfigValue('browser.geo.timezoneId', 'Europe/Paris')).not.toThrow();
+    });
+
+    it('rejects invalid timezone', () => {
+      expect(() => configModule.setConfigValue('browser.geo.timezoneId', 'Mars/Olympus')).toThrow();
+    });
+
+    it('accepts valid locale', () => {
+      expect(() => configModule.setConfigValue('browser.geo.locale', 'fr-FR')).not.toThrow();
+    });
+
+    it('rejects latitude > 90', () => {
+      expect(() => configModule.setConfigValue('browser.geo.geolocation.latitude', 91)).toThrow();
+    });
+
+    it('rejects longitude < -180', () => {
+      expect(() => configModule.setConfigValue('browser.geo.geolocation.longitude', -181)).toThrow();
+    });
+  });
+
+  describe('screenshot env overrides', () => {
+    it('ONEAGENT_SCREENSHOT_FORMAT=jpeg is applied', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'jpeg';
+        configModule.resetConfigCache();
+        const config = configModule.getConfig();
+        expect(config.browser?.features?.screenshotFormat).toBe('jpeg');
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
+        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('ONEAGENT_SCREENSHOT_FORMAT=png is applied', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'png';
+        configModule.resetConfigCache();
+        const config = configModule.getConfig();
+        expect(config.browser?.features?.screenshotFormat).toBe('png');
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
+        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('ONEAGENT_SCREENSHOT_FORMAT=webp is rejected', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'webp';
+        configModule.resetConfigCache();
+        expect(() => configModule.getConfig()).toThrow(/jpeg.*png/i);
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
+        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('ONEAGENT_SCREENSHOT_QUALITY=80 is applied as number', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_QUALITY = '80';
+        configModule.resetConfigCache();
+        const config = configModule.getConfig();
+        expect(config.browser?.features?.screenshotQuality).toBe(80);
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
+        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('ONEAGENT_SCREENSHOT_QUALITY=0 is rejected', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_QUALITY = '0';
+        configModule.resetConfigCache();
+        expect(() => configModule.getConfig()).toThrow(/1.*100/);
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
+        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        configModule.resetConfigCache();
+      }
+    });
+
+    it('ONEAGENT_SCREENSHOT_QUALITY=101 is rejected', () => {
+      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+      try {
+        process.env.ONEAGENT_SCREENSHOT_QUALITY = '101';
+        configModule.resetConfigCache();
+        expect(() => configModule.getConfig()).toThrow(/1.*100/);
+      } finally {
+        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
+        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        configModule.resetConfigCache();
+      }
+    });
+  });
+
+  describe('screenshot validation in setConfigValue', () => {
+    it('accepts screenshotFormat=jpeg', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', 'jpeg')).not.toThrow();
+    });
+
+    it('accepts screenshotFormat=png', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', 'png')).not.toThrow();
+    });
+
+    it('rejects screenshotFormat=webp', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', 'webp')).toThrow(/jpeg.*png/i);
+    });
+
+    it('rejects screenshotFormat=bmp', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', 'bmp')).toThrow(/jpeg.*png/i);
+    });
+
+    it('accepts screenshotQuality=50', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', 50)).not.toThrow();
+    });
+
+    it('accepts screenshotQuality=1 (minimum)', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', 1)).not.toThrow();
+    });
+
+    it('accepts screenshotQuality=100 (maximum)', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', 100)).not.toThrow();
+    });
+
+    it('rejects screenshotQuality=0', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', 0)).toThrow(/1.*100/);
+    });
+
+    it('rejects screenshotQuality=101', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', 101)).toThrow(/1.*100/);
+    });
+
+    it('rejects screenshotQuality=NaN', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotQuality', NaN)).toThrow(/1.*100/);
+    });
+
+    it('rejects non-string screenshotFormat (number)', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', 42 as any)).toThrow(/jpeg.*png/i);
+    });
+
+    it('rejects non-string screenshotFormat (boolean)', () => {
+      expect(() => configModule.setConfigValue('browser.features.screenshotFormat', true as any)).toThrow(/jpeg.*png/i);
+    });
+  });
+
+  describe('screenshot validation in setConfigValueInMemory', () => {
+    it('accepts screenshotFormat=jpeg', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotFormat', 'jpeg')).not.toThrow();
+    });
+
+    it('rejects screenshotFormat=webp', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotFormat', 'webp')).toThrow(/jpeg.*png/i);
+    });
+
+    it('rejects non-string screenshotFormat (number)', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotFormat', 42 as any)).toThrow(/jpeg.*png/i);
+    });
+
+    it('accepts screenshotQuality=80', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotQuality', 80)).not.toThrow();
+    });
+
+    it('rejects screenshotQuality=0', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotQuality', 0)).toThrow(/1.*100/);
+    });
+
+    it('rejects screenshotQuality=101', () => {
+      expect(() => configModule.setConfigValueInMemory('browser.features.screenshotQuality', 101)).toThrow(/1.*100/);
+    });
+  });
+
   describe('path helpers', () => {
     it('getDaemonSocketPath returns path under dataDir', () => {
       const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').OneAgentConfig;

@@ -63,6 +63,7 @@ vi.mock('../../src/server/tool-dispatch.js', () => ({
 
 import { startMcpServer, type McpStdioDeps } from '../../src/server/mcp-stdio.js';
 import { SkillStatus } from '../../src/skill/types.js';
+import { drainMcpNotifications, notify, createEvent } from '../../src/healing/notification.js';
 
 function makeMockDeps(): McpStdioDeps {
   return {
@@ -175,5 +176,62 @@ describe('mcp-stdio', () => {
       await handle.close();
       expect(mockClose).toHaveBeenCalled();
     });
+  });
+});
+
+describe('MCP notification drain', () => {
+  beforeEach(() => {
+    // Drain any leftover notifications from previous tests
+    drainMcpNotifications();
+  });
+
+  it('returns empty array when no notifications pending', () => {
+    const result = drainMcpNotifications();
+    expect(result).toEqual([]);
+  });
+
+  it('drains notifications after events are created and notified', async () => {
+    // Create and notify some events
+    const event = createEvent('skill_promoted', 'test.skill.v1', 'example.com', { previousStatus: 'draft' });
+    const config = {
+      dataDir: '/tmp/test',
+      logLevel: 'silent',
+      server: { network: false },
+      daemon: { port: 19420, autoStart: false },
+    };
+    await notify(event, config as any);
+
+    // Drain should return the pending MCP notifications
+    const drained = drainMcpNotifications();
+    // The McpSink always runs, so we should have at least one notification
+    expect(Array.isArray(drained)).toBe(true);
+    expect(drained.length).toBeGreaterThanOrEqual(1);
+
+    // Verify notification structure
+    const notification = drained[0];
+    expect(notification.method).toBe('notifications/tools/list_changed');
+    expect(notification.params).toMatchObject({
+      reason: 'skill_promoted',
+      skillId: 'test.skill.v1',
+      siteId: 'example.com',
+    });
+    expect(notification.params.timestamp).toBeDefined();
+  });
+
+  it('clears queue after drain', async () => {
+    const event = createEvent('skill_broken', 'test.skill.v1', 'example.com', { successRate: 0.1 });
+    await notify(event, {
+      dataDir: '/tmp/test',
+      logLevel: 'silent',
+      server: { network: false },
+      daemon: { port: 19420, autoStart: false },
+    } as any);
+
+    // First drain
+    drainMcpNotifications();
+
+    // Second drain should be empty
+    const secondDrain = drainMcpNotifications();
+    expect(secondDrain).toEqual([]);
   });
 });

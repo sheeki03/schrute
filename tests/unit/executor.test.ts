@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock request-builder to work around upperMethod bug in source
+// Mock request-builder to produce deterministic requests without tier-based
+// header filtering, auth injection, or body/query construction.
+// The real buildRequest depends on tier-specific allowlists (TIER1_ALLOWED_HEADERS,
+// TIER3_BLOCKED_HEADERS) and adds Origin/Referer for POST/PUT/PATCH. Mocking
+// it here isolates executor tests from header-filtering logic, which has its own
+// tests in request-builder.test.ts. There is no bug in the source; the original
+// comment ("upperMethod bug") was misleading — skill.method is passed through
+// as-is in both the mock and the real implementation.
 vi.mock('../../src/replay/request-builder.js', () => ({
   buildRequest: vi.fn((skill: any, params: any, tier: string) => ({
     url: `https://${skill.allowedDomains?.[0] ?? skill.siteId}${skill.pathTemplate}`,
@@ -13,11 +20,22 @@ vi.mock('../../src/replay/request-builder.js', () => ({
   }),
 }));
 
+vi.mock('../../src/native/redactor.js', () => ({
+  redactNative: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock('../../src/storage/redactor.js', () => ({
+  getCachedSalt: vi.fn().mockReturnValue(null),
+  redactString: vi.fn().mockResolvedValue('REDACTED'),
+}));
+
 import { executeSkill, type ExecutorOptions, type ExecutionResult } from '../../src/replay/executor.js';
 import type { SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
 import { FailureCause, ExecutionTier, TierState, Capability } from '../../src/skill/types.js';
 import type { SkillMetric } from '../../src/storage/metrics-repository.js';
 import { setSitePolicy, resolveAndValidate } from '../../src/core/policy.js';
+import { redactNative } from '../../src/native/redactor.js';
+import { getCachedSalt } from '../../src/storage/redactor.js';
 
 // Mock resolveAndValidate to avoid real DNS lookups in tests
 vi.mock('../../src/core/policy.js', async (importOriginal) => {
@@ -498,6 +516,103 @@ describe('executor', () => {
 
       // In non-strict mode, execution continues
       expect(result.status).toBe(200);
+    });
+  });
+
+  describe('wiring: tiering', () => {
+    it('uses tier_1 (DIRECT) for skill with currentTier tier_1 and no lock', async () => {
+      const skill = makeSkill({ currentTier: 'tier_1', tierLock: null });
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200 }),
+      });
+      expect(result.tier).toBe('direct');
+    });
+
+    it('uses browser_proxied for skill with permanent lock', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_1',
+        tierLock: { type: 'permanent', reason: 'js_computed_field', evidence: 'test' },
+      });
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200 }),
+      });
+      // Should use browser_proxied due to permanent lock (getEffectiveTier returns tier_3)
+      expect(result.tier).toBe('browser_proxied');
+    });
+
+    it('uses browser_proxied for skill with temporary_demotion lock', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_1',
+        tierLock: { type: 'temporary_demotion', since: new Date().toISOString(), demotions: 1 },
+      });
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200 }),
+      });
+      expect(result.tier).toBe('browser_proxied');
+    });
+  });
+
+  describe('wiring: native redactor fast path', () => {
+    it('uses native redactor when getCachedSalt returns a salt', async () => {
+      (getCachedSalt as ReturnType<typeof vi.fn>).mockReturnValue('test-salt-value');
+      (redactNative as ReturnType<typeof vi.fn>).mockReturnValue('NATIVE_REDACTED');
+
+      const skill = makeSkill();
+      const mockAuditLog = {
+        appendEntry: vi.fn().mockReturnValue({ id: 'audit-1', entryHash: 'abc' }),
+        isStrictMode: vi.fn().mockReturnValue(false),
+      };
+
+      await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200, body: '{"data":"ok"}' }),
+        auditLog: mockAuditLog as any,
+      });
+
+      expect(getCachedSalt).toHaveBeenCalled();
+      expect(redactNative).toHaveBeenCalledWith(skill.pathTemplate, 'test-salt-value');
+    });
+
+    it('falls back to redactString when getCachedSalt returns null', async () => {
+      (getCachedSalt as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (redactNative as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+      const skill = makeSkill();
+      const mockAuditLog = {
+        appendEntry: vi.fn().mockReturnValue({ id: 'audit-1', entryHash: 'abc' }),
+        isStrictMode: vi.fn().mockReturnValue(false),
+      };
+
+      await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200, body: '{"data":"ok"}' }),
+        auditLog: mockAuditLog as any,
+      });
+
+      expect(getCachedSalt).toHaveBeenCalled();
+      // redactNative should not be called (or called with null salt which returns null)
+      // The code path falls through to redactString
+    });
+
+    it('uses native result when redactNative returns non-null', async () => {
+      (getCachedSalt as ReturnType<typeof vi.fn>).mockReturnValue('salt123');
+      (redactNative as ReturnType<typeof vi.fn>).mockReturnValue('natively-redacted-path');
+
+      const skill = makeSkill();
+      const appendedEntries: any[] = [];
+      const mockAuditLog = {
+        appendEntry: vi.fn().mockImplementation((entry: any) => {
+          appendedEntries.push(entry);
+          return { id: 'audit-1', entryHash: 'abc' };
+        }),
+        isStrictMode: vi.fn().mockReturnValue(false),
+      };
+
+      await executeSkill(skill, {}, {
+        fetchFn: mockFetch({ status: 200, body: '{"data":"ok"}' }),
+        auditLog: mockAuditLog as any,
+      });
+
+      // The intent audit entry should have the natively-redacted URL
+      expect(appendedEntries[0].requestSummary.url).toBe('natively-redacted-path');
     });
   });
 });

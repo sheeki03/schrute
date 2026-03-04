@@ -16,6 +16,7 @@ function mockBrowser(
     evaluateFetch: vi.fn(),
     screenshot: vi.fn(),
     networkRequests: vi.fn(),
+    getCurrentUrl: vi.fn().mockReturnValue('about:blank'),
   };
 
   if (modelContextResult !== undefined) {
@@ -94,9 +95,10 @@ describe('webmcp-scanner', () => {
 
       expect(result.available).toBe(true);
       expect(result.tools).toHaveLength(2);
-      expect(result.tools[0].name).toBe('search');
-      expect(result.tools[0].description).toBe('Search products');
-      expect(result.tools[1].name).toBe('addToCart');
+      // Tools are sorted alphabetically
+      expect(result.tools[0].name).toBe('addToCart');
+      expect(result.tools[0].description).toBe('Add item to cart');
+      expect(result.tools[1].name).toBe('search');
     });
 
     it('stores discovered tools in database', async () => {

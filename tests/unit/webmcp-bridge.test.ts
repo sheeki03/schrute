@@ -15,6 +15,7 @@ function mockBrowser(
     evaluateFetch: vi.fn(),
     screenshot: vi.fn(),
     networkRequests: vi.fn(),
+    getCurrentUrl: vi.fn().mockReturnValue('about:blank'),
   };
 
   if (response !== undefined) {

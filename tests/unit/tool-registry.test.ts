@@ -71,10 +71,31 @@ describe('tool-registry', () => {
       expect(def.inputSchema.type).toBe('object');
     });
 
-    it('uses method + path as fallback description', () => {
+    it('uses buildAutoDescription as fallback description', () => {
       const skill = makeSkill({ description: undefined });
       const def = skillToToolDefinition(skill);
-      expect(def.description).toBe('GET /api/users/{id}');
+      // Should include method, path, side effect class
+      expect(def.description).toContain('GET /api/users/{id}');
+      expect(def.description).toContain('[read-only]');
+    });
+
+    it('buildAutoDescription includes auth type when present', () => {
+      const skill = makeSkill({ description: undefined, authType: 'bearer' });
+      const def = skillToToolDefinition(skill);
+      expect(def.description).toContain('(auth: bearer)');
+    });
+
+    it('buildAutoDescription includes user_input params', () => {
+      const skill = makeSkill({
+        description: undefined,
+        parameters: [
+          { name: 'id', type: 'string', source: 'user_input', evidence: [] },
+          { name: 'token', type: 'string', source: 'extracted', evidence: [] },
+        ],
+      });
+      const def = skillToToolDefinition(skill);
+      expect(def.description).toContain('Inputs: id');
+      expect(def.description).not.toContain('token');
     });
 
     it('marks user_input params as required', () => {
@@ -161,10 +182,36 @@ describe('tool-registry', () => {
       expect(names).toContain('oneagent_confirm');
     });
 
+    it('includes oneagent_execute meta tool', () => {
+      const names = META_TOOLS.map((t) => t.name);
+      expect(names).toContain('oneagent_execute');
+    });
+
+    it('includes oneagent_doctor meta tool', () => {
+      const names = META_TOOLS.map((t) => t.name);
+      expect(names).toContain('oneagent_doctor');
+    });
+
+    it('includes oneagent_export_cookies meta tool', () => {
+      const names = META_TOOLS.map((t) => t.name);
+      expect(names).toContain('oneagent_export_cookies');
+    });
+
     it('all meta tools have valid inputSchema', () => {
       for (const tool of META_TOOLS) {
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.description).toBeTruthy();
+      }
+    });
+  });
+
+  describe('getBrowserToolDefinitions - browser_close', () => {
+    it('browser_close has clarified description', () => {
+      const defs = getBrowserToolDefinitions();
+      const closeDef = defs.find(d => d.name === 'browser_close');
+      if (closeDef) {
+        expect(closeDef.description).toContain('NOT the session');
+        expect(closeDef.description).toContain('oneagent_close_session');
       }
     });
   });
