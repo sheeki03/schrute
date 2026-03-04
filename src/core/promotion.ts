@@ -111,6 +111,25 @@ export function promoteSkill(skill: SkillSpec, config?: OneAgentConfig): Promoti
 }
 
 /**
+ * Manually force-promote a DRAFT skill to ACTIVE.
+ * Bypasses auto-promotion gates (sample count, validations, side-effect class).
+ * The first execution will still require confirmation.
+ */
+export function forcePromote(skill: SkillSpec): PromotionResult {
+  if (skill.status !== SkillStatus.DRAFT) {
+    throw new Error(`Cannot activate skill '${skill.id}': status is '${skill.status}', must be 'draft'`);
+  }
+  const now = Date.now();
+  log.info({ skillId: skill.id }, 'Skill manually activated');
+  return {
+    skillId: skill.id,
+    previousStatus: skill.status,
+    newStatus: SkillStatus.ACTIVE as SkillStatusName,
+    timestamp: now,
+  };
+}
+
+/**
  * Demote a skill to stale or broken.
  * Returns a new SkillSpec with updated status.
  */

@@ -296,6 +296,37 @@ export function generateOpenApiFragment(spec: SkillSpec): Record<string, unknown
   };
 }
 
+// ─── Action Name Generation ─────────────────────────────────────
+
+export function generateActionName(method: string, pathTemplate: string): string {
+  // Strip /api/ and /v{N}/ prefixes
+  let path = pathTemplate.replace(/^\/api\//, '/').replace(/^\/v\d+\//, '/');
+
+  // Remove path params like {id}
+  path = path.replace(/\{[^}]+\}/g, '');
+
+  // Get last meaningful segment
+  const segments = path.split('/').filter(Boolean);
+  const lastSegment = segments[segments.length - 1] || segments[segments.length - 2] || 'action';
+
+  // Clean up
+  const cleanName = lastSegment.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').toLowerCase();
+
+  // Map HTTP methods to verb prefixes
+  const verbMap: Record<string, string> = {
+    'GET': 'get',
+    'POST': 'create',
+    'PUT': 'update',
+    'PATCH': 'update',
+    'DELETE': 'delete',
+    'HEAD': 'get',
+    'OPTIONS': 'get',
+  };
+
+  const prefix = verbMap[method.toUpperCase()] || method.toLowerCase();
+  return `${prefix}_${cleanName}`;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────
 
 function buildSkillId(
@@ -350,8 +381,6 @@ function buildRequiredCapabilities(authRecipe?: AuthRecipe): CapabilityName[] {
   return caps;
 }
 
-// extractPathParams imported from core/utils.ts
-
 // ─── Evidence Report Generation ─────────────────────────────────
 
 /**
@@ -359,6 +388,145 @@ function buildRequiredCapabilities(authRecipe?: AuthRecipe): CapabilityName[] {
  * from the skill's redaction metadata and an optional list of all skills
  * on the same site for cross-skill aggregation.
  */
+// ─── Skill References & Templates ───────────────────────────────
+
+export function generateSkillReferences(
+  spec: SkillSpec,
+  sampleRequests?: Array<{ status: number; method: string; url: string }>,
+): Map<string, string> {
+  const refs = new Map<string, string>();
+
+  // api-reference.md
+  const apiRef: string[] = [];
+  apiRef.push(`# API Reference: ${spec.name}\n`);
+  apiRef.push(`## Endpoint\n`);
+  apiRef.push(`- **Method**: \`${spec.method}\``);
+  apiRef.push(`- **Path**: \`${spec.pathTemplate}\``);
+  apiRef.push(`- **Site**: \`${spec.siteId}\``);
+  if (spec.authType) apiRef.push(`- **Auth**: \`${spec.authType}\``);
+  apiRef.push('');
+
+  if (spec.parameters.length > 0) {
+    apiRef.push('## Parameters\n');
+    apiRef.push('| Name | Type | Source |');
+    apiRef.push('|------|------|--------|');
+    for (const p of spec.parameters) {
+      apiRef.push(`| ${p.name} | ${p.type} | ${p.source} |`);
+    }
+    apiRef.push('');
+  }
+
+  if (spec.inputSchema && Object.keys(spec.inputSchema).length > 0) {
+    apiRef.push('## Input Schema\n');
+    apiRef.push('```json');
+    apiRef.push(JSON.stringify(spec.inputSchema, null, 2));
+    apiRef.push('```\n');
+  }
+
+  if (spec.outputSchema && Object.keys(spec.outputSchema).length > 0) {
+    apiRef.push('## Output Schema\n');
+    apiRef.push('```json');
+    apiRef.push(JSON.stringify(spec.outputSchema, null, 2));
+    apiRef.push('```\n');
+  }
+  refs.set('api-reference.md', apiRef.join('\n'));
+
+  // task-patterns.md
+  const patterns: string[] = [];
+  patterns.push(`# Task Patterns: ${spec.name}\n`);
+  if (sampleRequests && sampleRequests.length > 0) {
+    patterns.push('## Response Status Distribution\n');
+    const statusCounts = new Map<number, number>();
+    for (const r of sampleRequests) {
+      statusCounts.set(r.status, (statusCounts.get(r.status) ?? 0) + 1);
+    }
+    for (const [status, count] of statusCounts) {
+      patterns.push(`- HTTP ${status}: ${count} request(s)`);
+    }
+    patterns.push('');
+  }
+  patterns.push('## Usage Patterns\n');
+  patterns.push(`- Side Effect: \`${spec.sideEffectClass}\``);
+  patterns.push(`- Replay Strategy: \`${spec.replayStrategy}\``);
+  patterns.push(`- Confidence: ${spec.confidence}`);
+  refs.set('task-patterns.md', patterns.join('\n'));
+
+  // error-handling.md
+  const errors: string[] = [];
+  errors.push(`# Error Handling: ${spec.name}\n`);
+  if (spec.authType) {
+    errors.push(`## Auth Type: \`${spec.authType}\`\n`);
+    switch (spec.authType) {
+      case 'bearer':
+        errors.push('- On 401: Token may be expired. Check for token refresh flow.');
+        errors.push('- On 403: Insufficient permissions for this endpoint.');
+        break;
+      case 'cookie':
+        errors.push('- On 401/403: Session cookie may be expired. Re-login via browser.');
+        break;
+      case 'api_key':
+        errors.push('- On 401: API key may be invalid or revoked.');
+        break;
+      case 'oauth2':
+        errors.push('- On 401: Access token expired. Use refresh token flow.');
+        break;
+    }
+  } else {
+    errors.push('No authentication configured for this skill.');
+  }
+  refs.set('error-handling.md', errors.join('\n'));
+
+  return refs;
+}
+
+export function generateSkillTemplates(spec: SkillSpec): Map<string, string> {
+  const templates = new Map<string, string>();
+
+  // request.json
+  const requestTemplate: Record<string, unknown> = {};
+  if (spec.inputSchema) {
+    const props = (spec.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>> | undefined;
+    if (props) {
+      for (const [name, schema] of Object.entries(props)) {
+        const type = schema.type as string;
+        switch (type) {
+          case 'string': requestTemplate[name] = ''; break;
+          case 'number': requestTemplate[name] = 0; break;
+          case 'boolean': requestTemplate[name] = false; break;
+          case 'array': requestTemplate[name] = []; break;
+          case 'object': requestTemplate[name] = {}; break;
+          default: requestTemplate[name] = null;
+        }
+      }
+    }
+  }
+  templates.set('request.json', JSON.stringify(requestTemplate, null, 2));
+
+  // curl.sh
+  const curlLines: string[] = ['#!/bin/bash'];
+  const method = spec.method.toUpperCase();
+  curlLines.push(`curl -X ${method} \\`);
+
+  if (spec.requiredHeaders) {
+    for (const [key, value] of Object.entries(spec.requiredHeaders)) {
+      curlLines.push(`  -H '${key}: ${value}' \\`);
+    }
+  }
+  if (spec.authType === 'bearer') {
+    curlLines.push(`  -H 'Authorization: Bearer YOUR_TOKEN' \\`);
+  }
+
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    curlLines.push(`  -H 'Content-Type: application/json' \\`);
+    curlLines.push(`  -d '${JSON.stringify(requestTemplate)}' \\`);
+  }
+
+  curlLines.push(`  'https://${spec.siteId}${spec.pathTemplate}'`);
+  templates.set('curl.sh', curlLines.join('\n'));
+
+  return templates;
+}
+
 export function generateEvidenceReport(
   skill: SkillSpec,
   validationHistory: EvidenceReport['validationHistory'],

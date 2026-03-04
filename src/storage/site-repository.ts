@@ -47,7 +47,7 @@ export class SiteRepository {
 
   create(site: SiteManifest): void {
     this.db.run(
-      `INSERT INTO sites (id, display_name, first_seen, last_visited, mastery_level, recommended_tier, total_requests, successful_requests)
+      `INSERT OR IGNORE INTO sites (id, display_name, first_seen, last_visited, mastery_level, recommended_tier, total_requests, successful_requests)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       site.id,
       site.displayName ?? null,

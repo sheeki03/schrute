@@ -41,6 +41,10 @@ async function getSalt(): Promise<string> {
   return newSalt;
 }
 
+export function getCachedSalt(): string | null {
+  return cachedSalt;
+}
+
 // ─── PII Detection Patterns ──────────────────────────────────────────
 
 const PII_PATTERNS: { name: string; pattern: RegExp }[] = [
@@ -86,12 +90,6 @@ function maskValue(value: string): string {
   if (value.length <= 4) return '***';
   return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
-
-// ─── Timeout Helper ──────────────────────────────────────────────────
-// withTimeout imported from core/utils.ts
-// Note: The original local version accepted a thunk () => Promise<T>.
-// The canonical version accepts a Promise<T> directly. Callers now
-// pass fn() instead of fn.
 
 // ─── Public API ──────────────────────────────────────────────────────
 

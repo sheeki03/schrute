@@ -192,7 +192,19 @@ export class AgentDatabase {
     const dir = path.dirname(this.dbPath);
     fs.mkdirSync(dir, { recursive: true });
 
-    this.db = new Database(this.dbPath);
+    const dbOptions: Record<string, unknown> = {};
+    if ((process as any).pkg) {
+      const addonPath = path.join(path.dirname(process.execPath), 'addons', 'better_sqlite3.node');
+      if (!fs.existsSync(addonPath)) {
+        throw new Error(
+          `Native addon not found at ${addonPath}. ` +
+          'Ensure the addons/ directory is shipped alongside the binary.',
+        );
+      }
+      dbOptions.nativeBinding = addonPath;
+    }
+
+    this.db = new Database(this.dbPath, dbOptions);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');

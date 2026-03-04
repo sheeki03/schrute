@@ -287,37 +287,51 @@ export class SkillRepository {
     const fields: string[] = [];
     const values: unknown[] = [];
 
-    if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
-    if (updates.version !== undefined) { fields.push('version = ?'); values.push(updates.version); }
-    if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
-    if (updates.description !== undefined) { fields.push('description = ?'); values.push(updates.description); }
-    if (updates.method !== undefined) { fields.push('method = ?'); values.push(updates.method); }
-    if (updates.pathTemplate !== undefined) { fields.push('path_template = ?'); values.push(updates.pathTemplate); }
-    if (updates.inputSchema !== undefined) { fields.push('input_schema = ?'); values.push(JSON.stringify(updates.inputSchema)); }
-    if (updates.outputSchema !== undefined) { fields.push('output_schema = ?'); values.push(JSON.stringify(updates.outputSchema)); }
-    if (updates.authType !== undefined) { fields.push('auth_type = ?'); values.push(updates.authType); }
-    if (updates.requiredHeaders !== undefined) { fields.push('required_headers = ?'); values.push(JSON.stringify(updates.requiredHeaders)); }
-    if (updates.dynamicHeaders !== undefined) { fields.push('dynamic_headers = ?'); values.push(JSON.stringify(updates.dynamicHeaders)); }
-    if (updates.sideEffectClass !== undefined) { fields.push('side_effect_class = ?'); values.push(updates.sideEffectClass); }
-    if (updates.isComposite !== undefined) { fields.push('is_composite = ?'); values.push(updates.isComposite ? 1 : 0); }
-    if (updates.chainSpec !== undefined) { fields.push('chain_spec = ?'); values.push(JSON.stringify(updates.chainSpec)); }
-    if (updates.currentTier !== undefined) { fields.push('current_tier = ?'); values.push(updates.currentTier); }
-    if (updates.tierLock !== undefined) { fields.push('tier_lock = ?'); values.push(updates.tierLock ? JSON.stringify(updates.tierLock) : null); }
-    if (updates.confidence !== undefined) { fields.push('confidence = ?'); values.push(updates.confidence); }
-    if (updates.consecutiveValidations !== undefined) { fields.push('consecutive_validations = ?'); values.push(updates.consecutiveValidations); }
-    if (updates.sampleCount !== undefined) { fields.push('sample_count = ?'); values.push(updates.sampleCount); }
-    if (updates.parameterEvidence !== undefined) { fields.push('parameter_evidence = ?'); values.push(JSON.stringify(updates.parameterEvidence)); }
-    if (updates.lastVerified !== undefined) { fields.push('last_verified = ?'); values.push(updates.lastVerified); }
-    if (updates.lastUsed !== undefined) { fields.push('last_used = ?'); values.push(updates.lastUsed); }
-    if (updates.successRate !== undefined) { fields.push('success_rate = ?'); values.push(updates.successRate); }
-    if (updates.skillMd !== undefined) { fields.push('skill_md = ?'); values.push(updates.skillMd); }
-    if (updates.openApiFragment !== undefined) { fields.push('openapi_fragment = ?'); values.push(updates.openApiFragment); }
-    if (updates.allowedDomains !== undefined) { fields.push('allowed_domains = ?'); values.push(JSON.stringify(updates.allowedDomains)); }
-    if (updates.requiredCapabilities !== undefined) { fields.push('required_capabilities = ?'); values.push(JSON.stringify(updates.requiredCapabilities)); }
-    if (updates.parameters !== undefined) { fields.push('parameters = ?'); values.push(JSON.stringify(updates.parameters)); }
-    if (updates.validation !== undefined) { fields.push('validation = ?'); values.push(JSON.stringify(updates.validation)); }
-    if (updates.redaction !== undefined) { fields.push('redaction = ?'); values.push(JSON.stringify(updates.redaction)); }
-    if (updates.replayStrategy !== undefined) { fields.push('replay_strategy = ?'); values.push(updates.replayStrategy); }
+    // Direct-value columns: property name -> DB column name
+    const directColumns: Array<[keyof typeof updates, string]> = [
+      ['name', 'name'], ['version', 'version'], ['status', 'status'],
+      ['description', 'description'], ['method', 'method'],
+      ['pathTemplate', 'path_template'], ['authType', 'auth_type'],
+      ['sideEffectClass', 'side_effect_class'], ['currentTier', 'current_tier'],
+      ['confidence', 'confidence'], ['consecutiveValidations', 'consecutive_validations'],
+      ['sampleCount', 'sample_count'], ['lastVerified', 'last_verified'],
+      ['lastUsed', 'last_used'], ['successRate', 'success_rate'],
+      ['skillMd', 'skill_md'], ['openApiFragment', 'openapi_fragment'],
+      ['replayStrategy', 'replay_strategy'],
+    ];
+
+    // JSON-serialized columns
+    const jsonColumns: Array<[keyof typeof updates, string]> = [
+      ['inputSchema', 'input_schema'], ['outputSchema', 'output_schema'],
+      ['requiredHeaders', 'required_headers'], ['dynamicHeaders', 'dynamic_headers'],
+      ['chainSpec', 'chain_spec'], ['parameterEvidence', 'parameter_evidence'],
+      ['allowedDomains', 'allowed_domains'], ['requiredCapabilities', 'required_capabilities'],
+      ['parameters', 'parameters'], ['validation', 'validation'], ['redaction', 'redaction'],
+    ];
+
+    for (const [prop, col] of directColumns) {
+      if (updates[prop] !== undefined) {
+        fields.push(`${col} = ?`);
+        values.push(updates[prop]);
+      }
+    }
+
+    for (const [prop, col] of jsonColumns) {
+      if (updates[prop] !== undefined) {
+        fields.push(`${col} = ?`);
+        values.push(JSON.stringify(updates[prop]));
+      }
+    }
+
+    // Special cases with custom serialization
+    if (updates.isComposite !== undefined) {
+      fields.push('is_composite = ?');
+      values.push(updates.isComposite ? 1 : 0);
+    }
+    if (updates.tierLock !== undefined) {
+      fields.push('tier_lock = ?');
+      values.push(updates.tierLock ? JSON.stringify(updates.tierLock) : null);
+    }
 
     if (fields.length === 0) return;
 
