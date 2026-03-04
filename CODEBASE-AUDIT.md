@@ -1,557 +1,425 @@
 # OneAgent Codebase Audit Report
 
-**Date:** 2026-02-16
-**Scope:** Full codebase scan (~97 source files, ~108 test files)
-**Agents:** Code Reviewer, Silent Failure Hunter, Code Simplifier, Comment Analyzer, Test Coverage Analyzer, Type Design Analyzer
-**Verification:** All 96 numbered findings verified against source code by 4 parallel agents (2026-02-16)
-**Remediation:** 72 findings fixed by 6 parallel fix agents (2026-02-17). Build clean: 0 type errors, 1364 tests passing.
+**Date:** 2026-02-17 (Session 2)
+**Scope:** Full codebase review across `src/` (~95 TypeScript files)
+**Tests:** 1,460 tests across 114 files — all passing
+**Agents:** 6 review agents + 5 verification agents (all parallel)
+**Verification:** Every finding checked line-by-line against actual source code
+
+---
+
+## Verification Summary
+
+| Verdict | Count | Meaning |
+|---------|-------|---------|
+| **VALID** | 19 | Real issue that should be fixed |
+| **FALSE POSITIVE** | 10 | Finding was wrong; code is correct |
+| **ACCEPTABLE** | 12 | Minor issue / not worth fixing |
+| **DESIGN DECISION** | 9 | Intentional behavior, documented |
+| **Total** | **50** | |
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary](#executive-summary)
-2. [Code Review — Bugs, Security & Logic Errors](#code-review--bugs-security--logic-errors)
-3. [Silent Failures & Error Handling](#silent-failures--error-handling)
-4. [Code Simplification Opportunities](#code-simplification-opportunities)
-5. [Comment Accuracy & Quality](#comment-accuracy--quality)
-6. [Test Coverage Gaps](#test-coverage-gaps)
-7. [Type Design Issues](#type-design-issues)
-8. [Summary Tables](#summary-tables)
+1. [Code Review — Bugs, Security, Quality](#1-code-review)
+2. [Silent Failure Hunting — Error Handling](#2-silent-failure-hunting)
+3. [Code Simplification — Changes Applied](#3-code-simplification)
+4. [Comment Analysis — Accuracy & Maintainability](#4-comment-analysis)
+5. [Test Coverage Analysis](#5-test-coverage-analysis)
+6. [Type Design Analysis](#6-type-design-analysis)
+7. [Consolidated Priority Matrix](#7-consolidated-priority-matrix)
 
 ---
 
-## Executive Summary
+## 1. Code Review
 
-### Verification Summary
+### ~~CR-01: TOCTOU Race in `ToolBudgetTracker`~~ — FALSE POSITIVE
+**Files:** `src/replay/tool-budget.ts:59-84`, `src/replay/executor.ts:107-118`
 
-Every numbered finding was verified by reading the actual source code at the referenced lines.
+~~`checkBudget()` and `recordCall()` are separate operations allowing concurrent bypass.~~
 
-| Verdict | Count | Meaning |
-|---------|-------|---------|
-| **VALID** | 63 | Real issue that should be fixed |
-| **ACCEPTABLE** | 19 | Minor issue / acceptable risk / not worth fixing |
-| **DESIGN DECISION** | 6 | Intentional choice, self-documented |
-| **FALSE POSITIVE** | 8 | Finding was wrong; code is correct |
-| **Total verified** | **96** | |
+**Verification:** No `await` between `checkBudget()` and `recordCall()`. Node.js single-threaded event loop means no code can interleave between synchronous calls. TOCTOU is structurally impossible here.
 
-### Remediation Summary (2026-02-17)
+### CR-02: `loadConfig` Untrusted JSON Without Full Schema Validation — ACCEPTABLE
+**File:** `src/core/config.ts:246-258`
 
-All 63 VALID findings fixed + 9 ACCEPTABLE findings also improved = **72 total fixes**.
+Config cast via `as unknown as OneAgentConfig` without full schema validation. Critical fields (server, daemon, payloadLimits, logLevel, httpPort) ARE validated. Non-critical fields silently accept wrong types but `deepMerge` with `DEFAULT_CONFIG` ensures sensible defaults. Input is a local file requiring filesystem access to tamper.
 
-| Category | Must Fix | Optional Fixed | Remaining | Total |
-|----------|----------|----------------|-----------|-------|
-| Code Review | 7/7 | 0 | 0 valid | 12 |
-| Silent Failures | 12/12 | 5 | 0 valid | 24 |
-| Simplification | 20/20 | 0 | 0 valid | 20 |
-| Comments | 7/7 | 1 | 0 valid | 9 |
-| Test Coverage | 10/10 | 1 | 0 valid | 12 |
-| Type Design | 7/7 | 2 | 0 valid | 19 |
-| **Total** | **63/63** | **9** | **0 valid** | **96** |
+### CR-03: Audit Log `loadLastHash` Resets Hash Chain on Corruption — VALID
+**File:** `src/replay/audit-log.ts:284-312`
 
-**New shared modules created:** `src/shared/daemon-types.ts`, `src/shared/auth-utils.ts`, `src/shared/invariant-utils.ts`, `src/shared/schema-validation.ts`, `src/shared/domain-utils.ts`
+When last audit log entry is corrupted, `loadLastHash()` resets `this.lastHash = ''` and logs at `info` level. Chain continuity is silently broken. No strict mode check in `loadLastHash` (contrast with `appendEntry` which does check). This is a real integrity gap for an audit system designed around cryptographic hash chains.
 
-**New test files created:** `tests/unit/tool-dispatch.test.ts` (23 tests), `tests/unit/auth-repository.test.ts` (18 tests), `tests/unit/deduplicator.test.ts` (15 tests)
+**Fix:** In strict mode, throw. Otherwise, log at `error` level minimum.
 
-**Verification:** `npx tsc --noEmit` — 0 errors. `npx vitest run` — 110 files, 1364 tests, all passing.
+### CR-04: Rate Limiter `x-ratelimit-reset` Threshold — VALID
+**File:** `src/automation/rate-limiter.ts:106-113`
 
-### Severity Breakdown (Verified Findings Only)
+Threshold `1e10` never matches Unix timestamps in seconds (~1.7e9, won't exceed `1e10` until year 2286). A standard API returning `x-ratelimit-reset: 1771309200` is treated as "1.77 billion seconds from now" → `1.77e12 ms` (~56 years). Effectively throttles the bucket to near-zero for process lifetime.
 
-| Category | Valid | Acceptable | Design | False Pos | Original |
-|----------|-------|------------|--------|-----------|----------|
-| Code Review | 7 | 1 | 1 | 3 | 12 |
-| Silent Failures | 12 | 6 | 2 | 4 | 24 |
-| Simplification | 20 | 0 | 0 | 0 | 20 |
-| Comments | 7 | 2 | 0 | 0 | 9 |
-| Test Coverage | 10 | 1 | 0 | 1 | 12 |
-| Type Design | 7 | 9 | 3 | 0 | 19 |
-| **Total** | **63** | **19** | **6** | **8** | **96** |
+**Fix:** Change threshold to `~1e9` or compare against `Date.now() / 2000`.
 
----
+### ~~CR-05: `checkPathRisk` Case Mismatch~~ — FALSE POSITIVE
+**File:** `src/core/policy.ts:395-428`
 
-## Code Review — Bugs, Security & Logic Errors
+~~Allowlist uses lowercase but regex tests use original case.~~
 
-### CRITICAL (Confidence 90-95%)
+**Verification:** All regex patterns (`DESTRUCTIVE_GET_PATTERNS`, `DESTRUCTIVE_POST_PATTERNS`) have the `/i` flag. Case-insensitive matching works correctly regardless of input case.
 
-#### CR-01: DNS Rebinding TOCTOU SSRF Bypass — ✅ FIXED
-**Files:** `src/core/policy.ts:341`, `src/replay/executor.ts:264-270`
-**Confidence:** 95%
+### CR-06: `Engine.explore` Domain Check Ignored — DESIGN DECISION
+**File:** `src/core/engine.ts:152-159`
 
-`resolveAndValidate()` resolves DNS to check for private IPs, then returns the hostname. `executor.ts` passes that hostname to `fetch()`, which resolves DNS again independently. Between the two resolutions, an attacker's DNS can rotate from a public IP to `127.0.0.1` (DNS rebinding). Since `executor.ts` forwards auth headers/cookies from the skill recipe, this is a full SSRF with credential forwarding.
+Domain allowlist check runs but result isn't enforced. Log message explicitly states: "Domain not in allowlist, proceeding with exploration (self-domain)." This is intentional — during explore, the user is navigating to a new site for the first time. The capability check (lines 165-168) IS enforced as a hard block.
 
-**Impact:** Attacker-controlled skill can exfiltrate localhost services (cloud metadata, internal APIs) with the user's credentials attached.
+### CR-07: Response Body Size Bypass for Browser Tiers — VALID
+**File:** `src/replay/executor.ts:286-309`
 
-**Resolution:** `directFetch()` now accepts a `pinnedIp` parameter. After `resolveAndValidate()` returns the resolved IP, all fetch calls use the IP directly with the original hostname in the `Host` header. IPv6 addresses are bracket-wrapped for URL compatibility. Redirect hops also pin to their per-hop resolved IP.
+`maxResponseBytes` computed but only passed to `directFetch`. Browser paths (`evaluateFetch`, `fullBrowserExecution`) receive no size limit. `directFetch` carefully enforces with incremental reading and abort. Browser tiers have zero size enforcement — unbounded memory consumption vector.
 
-#### CR-02: `aws_secret` PII Pattern Extreme False Positives — ✅ FIXED
-**File:** `src/storage/redactor.ts:54`
-**Confidence:** 92%
+**Fix:** Apply body size check after receiving response from browser tiers.
 
-Pattern `/[0-9a-zA-Z/+]{40}/g` matches ANY 40-character alphanumeric string. This redacts SHA-1 hashes, git commit SHAs, base64-encoded tokens, UUIDs without dashes, and random IDs throughout HAR recordings and audit logs, making them unreadable.
+### ~~CR-08: `deepMerge` Prototype Pollution~~ — FALSE POSITIVE
+**File:** `src/core/config.ts:409-429`
 
-**Resolution:** Pattern now uses lookbehind assertions requiring AWS-specific context: must follow an `AKIA` access key ID or `aws_secret_access_key` keyword.
+~~`deepMerge` doesn't filter `__proto__` keys.~~
 
-#### ~~CR-03: Unbounded Network Entry Accumulation / Memory Leak~~ FALSE POSITIVE
-**File:** `src/browser/base-browser-adapter.ts:1039-1054`
+**Verification:** `JSON.parse` produces own properties — `result["__proto__"] = ...` sets an own property, NOT the prototype link. `{ ...target }` spread creates a clean object. Input is a local file requiring filesystem compromise. Not practically exploitable.
 
-**Verification:** `AgentBrowserAdapter` (the production subclass) already overrides `setupNetworkCapture()` with a 500-entry cap and `shift()` eviction.
+### CR-09: `isDomainMatch` Subdomain Confusion — ACCEPTABLE
+**File:** `src/shared/domain-utils.ts:9-21`
 
-#### CR-04: `verifySignature()` Misleading Name — Only Checks Format — ✅ FIXED
-**File:** `src/automation/bot-auth.ts:91-122`
-**Confidence:** 90%
-
-**Resolution:** Renamed to `hasValidSignatureFormat()` with clear JSDoc stating it does NOT perform cryptographic verification. All callers updated.
-
-### HIGH (Confidence 80-88%)
-
-#### CR-05: Module-Level Mutable State Without Bounds — ✅ FIXED
-**File:** `src/automation/strategy.ts:24-26`
-**Confidence:** 88%
-
-**Resolution:** Added `MAX_STRATEGY_CACHE_SIZE = 500` with FIFO eviction via `Map.keys().next().value`. Exposed `resetStrategyCache()` for testing.
-
-#### CR-06: YAML Parser Silently Loses Nested OpenAPI Data — DESIGN DECISION
-**File:** `src/discovery/openapi-scanner.ts:93-104`
-
-**Verification:** Code has explicit self-documenting comments. Intentional minimal detector, not a full parser.
-
-#### ~~CR-07: `resolveRefToLocator` Records Success Before Promise Resolves~~ FALSE POSITIVE
-**File:** `src/browser/base-browser-adapter.ts:361-367`
-
-**Verification:** `recordStaleRef(found: boolean)` tracks ref *resolution*, not action success.
-
-#### CR-08: Audit Log Signature Verification Not Timing-Safe — ✅ FIXED
-**File:** `src/replay/audit-log.ts:210-220`
-**Confidence:** 84%
-
-**Resolution:** Replaced `===` with `crypto.timingSafeEqual()` using Buffer conversion. Length check performed first.
-
-#### ~~CR-09: `redactHeaders` Timeout Behavior Confusing~~ FALSE POSITIVE
-**File:** `src/storage/redactor.ts:116-138`
-
-**Verification:** `withTimeout()` throws on timeout — does NOT fail open.
-
-#### CR-10: `loadConfig` Has Partial But Incomplete Schema Validation — ACCEPTABLE
-**File:** `src/core/config.ts:247-257`
-
-**Verification:** Has partial validation. TD-04 fix extended validation further (logLevel, server.network, server.httpPort checks added).
-
-#### CR-11: `cookie-refresh.ts` Singleton BrowserManager Never Closed — ✅ FIXED
-**File:** `src/automation/cookie-refresh.ts:10-17`
-**Confidence:** 80%
-
-**Resolution:** Added `finally` block that calls `sharedBrowserManager.closeAll()` and nulls the reference after each refresh cycle.
-
-#### CR-12: `phone` PII Pattern High False-Positive Rate — ✅ FIXED
-**File:** `src/storage/redactor.ts:48`
-**Confidence:** 80%
-
-**Resolution:** Pattern now requires at least one separator (dash, space, dot, parenthesis) between digit groups. No longer matches bare digit strings like timestamps or port numbers.
+Dot-prefix in `.endsWith('.' + normalizedAllowed)` correctly prevents `evil-example.com` from matching `example.com`. A bare TLD (`com`) would match everything, but allowlists are populated from full hostnames — never bare TLDs. Configuration error, not code vulnerability.
 
 ---
 
-## Silent Failures & Error Handling
+## 2. Silent Failure Hunting
 
-### CRITICAL
+### SF-01: `.catch(() => {})` on 4 Notification Calls — ACCEPTABLE
+**File:** `src/core/engine.ts:421, 681, 697, 700`
 
-#### SF-01: Empty `.catch(() => {})` on Playwright Operations — ✅ FIXED
-**Files:** `src/browser/base-browser-adapter.ts:192,201,204,1096`
+Empty catches exist. However, `notify()` in `notification.ts:140-165` already handles errors internally via `Promise.allSettled` and logs failures per sink at `warn` level. The `notify()` function should only reject on orchestration errors. Notifications are genuinely fire-and-forget — a failed notification should never abort skill promotion/demotion.
 
-**Resolution:** All 4 empty catches replaced with descriptive debug logging (waitForLoadState, response waiting, download handling).
+### SF-02: `parseJson` Returns Defaults on Corrupt DB Data — ACCEPTABLE
+**File:** `src/storage/skill-repository.ts:151-163`
 
-#### SF-02: Systematic Silent Native Module Fallback (14 catch blocks) — ✅ FIXED
-**Files:** All `src/native/*.ts`
+**Not silent** — logs at `warn` level with first 100 chars of corrupt value and error object. Fallback prevents a single corrupt row from breaking all skill retrieval. Alternative (throwing) would make corruption cascade to all skills.
 
-**Resolution:** All 10 native wrapper files now have `getLogger()` + `_nativeFailureLogged` flag. First failure per module logged at `debug` level; subsequent failures silent.
+### SF-03: Shutdown Handler Swallows Close Errors — DESIGN DECISION
+**File:** `src/index.ts:530`
 
-#### SF-03: Silent Browser Cleanup Errors — ✅ FIXED
-**Files:** `src/browser/engine.ts:123-125`, `src/doctor.ts:68`
+Standard shutdown handler pattern for SIGINT/SIGTERM. MCP handles may already be broken (client disconnected). Logging here produces noise on every Ctrl+C. Critical cleanup (engine.close, closeDatabase) runs unconditionally after the loop.
 
-**Resolution:** Both files now log cleanup failures at `debug` level.
+### ~~SF-04: `runCapturePipeline` Silently Returns on Missing HAR~~ — FALSE POSITIVE
+**File:** `src/core/engine.ts:303-305`
 
-#### SF-04: Native Module Loader Silently Swallows Load Errors — ✅ FIXED
-**File:** `src/native/index.ts:34,38`
+~~Returns silently when HAR is missing.~~
 
-**Resolution:** Inner catch logs `debug` with candidate path. Outer catch logs `info` with actual error when native module is unavailable.
+**Verification:** Logs at `warn` with recording ID. Caller (stopRecording) wraps in try-catch and surfaces errors: `"Recording stopped but capture pipeline failed: ..."`. Not silent.
 
-### HIGH
+### SF-05: 52 Empty `catch {}` Blocks — VALID (overstated)
+**Files:** Multiple (actually 58 instances, not 52)
 
-#### SF-05: Double-Silent Dialog Dismiss — ✅ FIXED
-**File:** `src/browser/modal-state.ts:79-82`
+Finding is valid in principle. However, the three specific examples cited are among the most defensible:
+- `daemon.ts:226` — sends 400 response (not truly empty)
+- `router.ts:291` — increments counter and logs warning
+- `browser/engine.ts:131` — best-effort version diagnostic with comment
 
-**Resolution:** Inner `.catch(() => {})` on `dialog.dismiss()` replaced with debug logging.
+Many instances are JSON.parse fallbacks where error detail is irrelevant. A targeted audit of the truly problematic empty catches would be more actionable.
 
-#### SF-06: `verifySignature` Returns `false` on Decode Errors — DESIGN DECISION
+### SF-06: Policy Failures Return `FailureCause.UNKNOWN` — VALID
+**File:** `src/replay/executor.ts:236-303`
 
-**Verification:** Returning `false` for malformed base64 IS correct behavior for a format validator. Function renamed via CR-04.
+10+ policy gates (capability denied, domain blocked, private IP, no browser, redirect violations) all return `FailureCause.UNKNOWN`. Each is logged at `warn` with context, but the cause returned to retry logic is `UNKNOWN`. Retry engine cannot distinguish "policy block" from "transient error" and wastes attempts on non-retryable violations.
 
-#### SF-07: `parseSignatureInput` Returns `null` on Any Error — ✅ FIXED (Optional)
-**File:** `src/automation/bot-auth.ts:236-253`
+**Fix:** Add `POLICY_DENIED` failure cause; treat as non-retryable `abort` in retry logic.
 
-**Resolution:** Removed blanket try/catch. Added explicit input validation. Regex `match()` cannot throw.
+### SF-07: Browser Storage State at `warn` — ACCEPTABLE
+**File:** `src/browser/manager.ts:147-149`
 
-#### SF-08: Schema Match Swallows Code Bugs — ✅ FIXED
-**File:** `src/skill/validator.ts:210-228`
+`warn` is reasonable for degraded-but-functional state. Current session continues. Next session requires re-auth. `error` also defensible but `warn` is a valid choice.
 
-**Resolution:** Catch now re-throws `TypeError` and `ReferenceError` (code bugs). Only validation errors return `false`.
+### SF-08: `dispatchToolCall` Catch-All — ACCEPTABLE
+**File:** `src/server/tool-dispatch.ts:330-337`
 
-#### SF-09: Cookie Refresh Catches All Navigation Errors — DESIGN DECISION
+Standard MCP protocol boundary. Error logged at `error` level with full object (including stack). Error message preserved in response. MCP protocol has no error type/code field. Specific handling happens inside each tool handler.
 
-**Verification:** Code DOES log at debug level. Intentional behavior.
+### SF-09: Audit Log Corruption at `info` Level — VALID
+**File:** `src/replay/audit-log.ts:306-311`
 
-#### SF-10: Audit Log `exportRootHash` Returns Path After Write Failure — ✅ FIXED
-**File:** `src/replay/audit-log.ts:246-254`
+Same code as CR-03. Hash chain break logged at `info`. Should be `warn` or `error` for an audit system. Message text acknowledges severity ("chain continuity is broken") but log level doesn't match.
 
-**Resolution:** Returns `null` on write failure instead of the stale path. Return type updated to `string | null`.
+### Medium Findings
 
-#### SF-11: `loadLastHash` Resets Audit Chain on Corruption — ✅ FIXED (Optional)
-**File:** `src/replay/audit-log.ts:297-305`
-
-**Resolution:** Enriched log with `entryCount` context and clearer message about chain continuity.
-
-#### SF-12: MCP Resource Handlers: Error Not Logged Server-Side — ✅ FIXED
-**File:** `src/server/mcp-handlers.ts:201-212`
-
-**Resolution:** Added `log.error({ err, uri }, 'MCP resource handler error')` before converting to client text.
-
-#### SF-13: `extractJwtTtl` Returns `null` on Any Error — ✅ FIXED
-**File:** `src/capture/auth-detector.ts:261-265`
-
-**Resolution:** Split into narrower catches for base64 and JSON parse errors. Outer catch now logs at debug level.
-
-#### SF-14: `ariaSnapshot` Failure Unlogged — ✅ FIXED
-**File:** `src/browser/base-browser-adapter.ts:278-288`
-
-**Resolution:** Added `log.debug({ err }, 'ariaSnapshot failed, falling back to innerText')` before fallback.
-
-### MEDIUM
-
-| # | File | Issue | Status |
-|---|------|-------|--------|
-| SF-15 | `daemon-client.ts:262-274` | Broad catch masks code bugs as "daemon unavailable" | ✅ FIXED — distinguishes connection errors from code bugs |
-| SF-16 | `deduplicator.ts:85-92` | Empty string on any error in `buildBodyFingerprint` | ✅ FIXED (Optional) — added debug logging |
-| ~~SF-17~~ | ~~`chain-detector.ts:229-235`~~ | ~~Bug in `searchJsonPath` hidden by catch-all~~ | FALSE POSITIVE |
-| SF-18 | `graphql-scanner.ts`, `openapi-scanner.ts` | Silent probe failures (no debug logging) | ✅ FIXED — added debug logging with URL context |
-| SF-19 | Multiple (5 locations) | JSON.parse fallback hides `undefined` body bugs | ✅ FIXED (Optional, partial) — debug logging in deduplicator |
-| SF-20 | `side-effects.ts:20-33` | Silent GraphQL detection failure | ✅ FIXED (Optional) — added debug logging |
-| ~~SF-21~~ | ~~`cookie-jar.ts:49-61`~~ | ~~Silent keychain degradation~~ | FALSE POSITIVE |
-| ~~SF-22~~ | ~~`confirmation.ts:22-34`~~ | ~~Ephemeral HMAC key without notice~~ | FALSE POSITIVE |
-| SF-23 | `base-browser-adapter.ts:227,256` | Detached frame catch too broad | ✅ FIXED (Optional) — added debug logging |
-| ~~SF-24~~ | ~~`core/engine.ts:119-124`~~ | ~~HMAC fallback silently used~~ | FALSE POSITIVE |
+| # | Finding | Verdict | Reason |
+|---|---------|---------|--------|
+| SF-10 | `redactUrl` empty catch | ACCEPTABLE | Falls back to redacting entire string (safer); parent has logging |
+| SF-11 | `extractDomain` returns undefined | ACCEPTABLE | All callers guard with `if (domain)` |
+| SF-12 | `getUrlPath` raw URL fallback | ACCEPTABLE | Malformed URL falls through static asset check harmlessly |
+| SF-13 | Invalid URLs as `ambiguous` | DESIGN DECISION | Safer than `noise`; surfaces for review |
+| SF-14 | `recordFilteredEntries` unguarded DB | **VALID** | No try-catch or transaction; UNIQUE violation crashes mid-loop |
+| SF-15 | `fullBrowserExecution` race | **VALID** | `domcontentloaded` doesn't wait for XHR; API calls may be missed |
+| SF-16 | Unknown semantic checks skipped | DESIGN DECISION | Forward-compatible fail-open; prevents rollback breakage |
+| SF-17 | `resolveUrl` unresolved placeholders | **VALID** | Missing params stay literal in URL; no warning; 404 with unclear cause |
+| SF-18 | Empty update no-op | DESIGN DECISION | Prevents SQL syntax error; standard repo pattern |
+| SF-19 | `updateMetrics` no row check | ACCEPTABLE | Site always exists when called |
+| SF-20 | `consumeToken` silent return | ACCEPTABLE | `verifyToken()` validates first; SQLite serialization prevents race |
+| SF-21 | Session without browser | DESIGN DECISION | Explicitly documented (line 29-31); callers check `hasContext()` |
 
 ---
 
-## Code Simplification Opportunities
+## 3. Code Simplification
 
-### Duplicated Code (12 findings) — ALL FIXED ✅
+All changes verified — 1,460 tests pass, `tsc --noEmit` clean. No verification needed (changes already applied and tested).
 
-#### CS-01: Duplicated `withTimeout` Implementation — ✅ FIXED
-**File:** `src/browser/har-recorder.ts`
-**Resolution:** Replaced local method with import of `withTimeout` from `core/utils.ts`.
+| File | Change | Lines Saved |
+|------|--------|-------------|
+| `src/core/engine.ts` | Extracted `createBrowserProvider()`, consolidated domain allowlist derivation | ~20 |
+| `src/server/tool-dispatch.ts` | Single helper call replacing 8-line adapter construction | ~10 |
+| `src/storage/skill-repository.ts` | Data-driven mapping tables for `update()` | ~20 |
+| `src/replay/retry.ts` | `decision()` helper, pre-computed shared values | ~15 |
+| `src/replay/executor.ts` | `lockCauseMap` lookup table | ~10 |
+| `src/core/policy.ts` | Simplified filter and pattern checking | ~5 |
+| `src/capture/noise-filter.ts` | Simplified classification bucket selection | ~5 |
+| 5 files | Removed dead provenance/migration comments | ~15 |
 
-#### CS-02: Duplicated `VALID_SNAPSHOT_MODES` Set — ✅ FIXED
-**Files:** `src/browser/feature-flags.ts:22`, `src/core/config.ts:110`
-**Resolution:** Exported from `feature-flags.ts`, imported in `config.ts`.
-
-#### CS-03: Duplicated "Get All Skills" Pattern (3 locations) — ✅ FIXED
-**Files:** `src/index.ts`, `src/server/tool-dispatch.ts`, `src/server/mcp-handlers.ts`
-**Resolution:** Added `getAll()` method to `SkillRepository`. All 3 callers refactored.
-
-#### CS-04: Repetitive Modal-Racing Wrapper (7 tool handlers) — ✅ FIXED
-**File:** `src/browser/base-browser-adapter.ts`
-**Resolution:** Extracted `withModalRace(actionFn)` helper. All 7 handlers refactored.
-
-#### CS-05: Duplicated Request-Building Logic (3 files) — ✅ FIXED
-**Files:** `src/replay/request-builder.ts`, `src/skill/compiler.ts`, `src/skill/validator.ts`
-**Resolution:** Extracted `resolveUrl()`, `buildDefaultHeaders()`, `buildBodyOrQuery()` as shared helpers in `request-builder.ts`.
-
-#### CS-06: Duplicated `injectAuth` Function — ✅ FIXED
-**Files:** `src/replay/request-builder.ts`, `src/skill/compiler.ts`
-**Resolution:** Exported from `request-builder.ts`, imported in `compiler.ts`.
-
-#### CS-07: Duplicated Custom Invariant Evaluation — ✅ FIXED
-**Files:** `src/replay/semantic-check.ts`, `src/skill/validator.ts`
-**Resolution:** Created shared `evaluateInvariant()` in `src/shared/invariant-utils.ts`.
-
-#### CS-08: Duplicated `PidFileContent` Interface — ✅ FIXED
-**Files:** `src/client/daemon-client.ts`, `src/server/daemon.ts`
-**Resolution:** Moved to `src/shared/daemon-types.ts`.
-
-#### CS-09: Duplicated `TransportMode`/`TransportConfig` Types — ✅ FIXED
-**Files:** `src/client/daemon-client.ts`, `src/server/daemon.ts`
-**Resolution:** Moved to `src/shared/daemon-types.ts`.
-
-#### CS-10: Duplicated `SERVICE_NAME` Constant — ✅ FIXED
-**Files:** `src/storage/secrets.ts`, `src/browser/cookie-jar.ts`
-**Resolution:** Exported from `secrets.ts`, imported in `cookie-jar.ts`.
-
-#### CS-11: Duplicated Timing-Safe Comparison (3 locations) — ✅ FIXED
-**Files:** `src/server/mcp-http.ts`, `src/server/daemon.ts`, `src/server/rest-server.ts`
-**Resolution:** Created shared `verifyBearerToken()` in `src/shared/auth-utils.ts`.
-
-#### CS-12: Duplicated JSON Schema Validation — ✅ FIXED
-**Files:** `src/replay/response-parser.ts`, `src/replay/semantic-check.ts`
-**Resolution:** Created shared `validateJsonSchema()` in `src/shared/schema-validation.ts`.
-
-### Dead Code (3 findings) — ALL FIXED ✅
-
-#### CS-13: `checkBuildProfile()` Placeholder — ✅ FIXED
-**File:** `src/doctor.ts:330-336`
-**Resolution:** Removed the dead function and its caller.
-
-#### CS-14: Stub LLM Adapters — ✅ FIXED
-**Files:** `src/llm/adapters/anthropic.ts`, `src/llm/adapters/openai.ts`
-**Resolution:** Deleted both unused stub files. Verified no imports reference them.
-
-#### CS-15: `detectEnums` Exported but Never Called — ✅ FIXED
-**File:** `src/capture/schema-inferrer.ts`
-**Resolution:** Removed function, helper, and constant. Updated tests.
-
-### Redundant Conditions (1 finding) — FIXED ✅
-
-#### CS-16: Double `checkInputCorrelation` Call — ✅ FIXED
-**File:** `src/capture/param-discoverer.ts:205,213`
-**Resolution:** Removed the redundant second call.
-
-### Unnecessary Comments (6 files) — FIXED ✅
-
-#### CS-17: Redundant Import Echo Comments — ✅ FIXED
-**Files:** 6 files across replay/, skill/, discovery/
-**Resolution:** Removed 7 redundant comments restating import statements.
-
-### Other — ALL FIXED ✅
-
-#### CS-18: Unused `_config` Parameter — ✅ FIXED
-**File:** `src/healing/relearner.ts:49`
-**Resolution:** Removed parameter and unused import.
-
-#### CS-19: Combinable Tier Lock Conditions — ✅ FIXED
-**File:** `src/core/tiering.ts:216-224`
-**Resolution:** Combined two if-blocks into single `permanent || temporary_demotion` condition.
-
-#### CS-20: Duplicated Domain Matching Logic — ✅ FIXED
-**Files:** `src/replay/tool-budget.ts`, `src/replay/request-builder.ts`
-**Resolution:** Created shared `isDomainMatch()` in `src/shared/domain-utils.ts`.
+**Total: ~100 lines removed across 12 files.**
 
 ---
 
-## Comment Accuracy & Quality
+## 4. Comment Analysis
 
-### Critical Issues — ALL FIXED ✅
+### ~~CA-01: Tier Count Mismatch in `tiering.ts`~~ — FALSE POSITIVE
+**File:** `src/core/tiering.ts:39-45`
 
-#### CA-01: JSDoc Says "Chromium" but Engine May Be Firefox — ✅ FIXED
-**File:** `src/browser/manager.ts:45`
-**Resolution:** Changed to `"Launch the shared browser instance."`
+~~Says "Two tier values" but system has 5 execution tiers.~~
 
-#### CA-02: Console Unavailability Notice Hardcodes "patchright" — ✅ FIXED
-**File:** `src/browser/base-browser-adapter.ts:804`
-**Resolution:** Now uses `this.capabilities?.effectiveEngine` dynamically.
+**Verification:** Comment describes `TierState` (2 values: tier_1, tier_3), NOT `ExecutionTier` (5 values). Comment is scoped to the promotion state machine and is accurate.
 
-#### CA-03: Camoufox Version Pinned in User-Facing Log — ✅ FIXED
-**File:** `src/browser/engine.ts:91`
-**Resolution:** Removed hardcoded version from log message.
+### ~~CA-02: Stale Migration Note in `redactor.ts`~~ — FALSE POSITIVE
+**File:** `src/storage/redactor.ts:94-98`
 
-#### CA-04: JSDoc Says "Encrypted Keychain" but No Encryption — ✅ FIXED
-**File:** `src/browser/cookie-jar.ts:24`
-**Resolution:** Changed to `"Cookie persistence with OS keychain storage."`
+~~Completed migration note about `withTimeout`.~~
 
-### Improvement Opportunities
+**Verification:** No migration note exists at those lines. Line 94 is `// --- Public API ---` section header. Already removed by the code simplifier agent.
 
-#### CA-05: Provider JSDoc References "Future Adapters" That Already Exist — ✅ FIXED
-**File:** `src/browser/provider.ts:28-34`
-**Resolution:** Updated to reflect existing PlaywrightMcpAdapter and AgentBrowserAdapter.
+### CA-03: `nonce` Field Naming in `confirmation.ts` — DESIGN DECISION
+**File:** `src/server/confirmation.ts:87-88`
 
-#### CA-06: "~4x Reduction" Claim Without Evidence — ✅ FIXED (Optional)
-**File:** `src/browser/agent-browser-adapter.ts:15-16`
-**Resolution:** Changed to "approximate ~4x reduction".
+Comment explicitly acknowledges the naming mismatch. Architecture rationale provided at lines 77-81. Developers are clearly aware and have documented it.
 
-#### CA-07: Setup Command Description Engine-Unaware — ✅ FIXED
-**File:** `src/index.ts:330-331`
-**Resolution:** Changed to `'Install browser engine and verify keychain'`.
+### CA-04: C1/A1/B2 Markers Without Legend — VALID
+**File:** `src/core/engine.ts` (lines 333, 350, 379, 412, 427, 443, 486, 649, 696, 753, 764)
 
-#### CA-08: Stale TODO-Like Cleanup Instruction — ✅ FIXED
-**File:** `src/doctor.ts:329`
-**Resolution:** Removed along with `checkBuildProfile()` (CS-13).
+No legend in the file or anywhere visible explaining what C/A/B prefixes mean. New developers cannot trace these to their source.
 
-#### CA-09: Config Double-Cast Comment Could List Validated Sections — ACCEPTABLE
-**File:** `src/core/config.ts:251-253`
-**Verification:** TD-04 fix updated the comment to list all validated sections.
+**Fix:** Add block comment near top explaining the reference system.
 
-### Positive Findings
+### CA-05: "Fix N:" Markers Without Context — VALID
+**File:** `src/replay/executor.ts` (lines 106, 129, 226, 560)
 
-The following comments are exemplary and should serve as models:
-- `src/browser/har-recorder.ts:18-25` -- Pipeline description with FAIL-CLOSED security note
-- `src/browser/base-browser-adapter.ts:46-58` -- SECURITY block documenting allowlist gate
-- `src/browser/base-browser-adapter.ts:834-836` -- "Sealed fetch wrapper. NEVER exposes raw page.evaluate()"
-- `src/core/config.ts:172` -- "Env overrides never persist to disk"
-- `src/browser/manager.ts:157` -- "Preserve HAR path so it survives context close"
-- `src/core/engine.ts:118` -- Fire-and-forget async initialization pattern explanation
+"Fix 1" through "Fix 4" provide no context about what bug was fixed, when, or what the original behavior was. Remnants of a remediation cycle.
 
----
+**Fix:** Replace with "why" comments or remove the prefix.
 
-## Test Coverage Gaps
+### CA-06: "CR-" References — ACCEPTABLE
+**Files:** `executor.ts:261`, `audit-log.ts:210`, `cookie-refresh.ts:35`
 
-### Critical Gaps (Criticality 8-10) — ALL FIXED ✅
+Unlike "Fix N:", these are paired with clear explanatory text describing the security concern. Self-contained and informative even without the external tracker.
 
-#### TC-01: No Tests for `src/server/tool-dispatch.ts` (10/10) — ✅ FIXED
-**Resolution:** Created `tests/unit/tool-dispatch.test.ts` with 23 tests covering blocked tools, confirmation gates, argument validation, buildToolList, unknown tool fallback.
+### ~~CA-07: Retry Comment Inaccurate~~ — FALSE POSITIVE
+**File:** `src/replay/retry.ts:41`
 
-#### TC-02: No Tests for `src/storage/auth-repository.ts` (9/10) — ✅ FIXED
-**Resolution:** Created `tests/unit/auth-repository.test.ts` with 18 tests using real in-memory SQLite. Covers create, update, rowToAuthFlow, getBySiteId, delete.
+~~Says "NEVER retry writes" but also skips idempotent ops.~~
 
-#### TC-03: No Tests for `src/capture/deduplicator.ts` (8/10) — ✅ FIXED
-**Resolution:** Created `tests/unit/deduplicator.test.ts` with 15 tests covering duplicate detection, fingerprinting, edge cases.
+**Verification:** Comment says "Side-effect-free only — NEVER retry writes." This accurately describes the behavior: only `READ_ONLY` is retried, everything else (including idempotent) is not.
 
-#### TC-04: Policy `checkMethodAllowed`, `checkRedirectAllowed`, `resolveAndValidate` Untested (9/10) — ✅ FIXED
-**Resolution:** Added ~14 tests to `tests/unit/policy.test.ts` covering all three functions with positive and negative cases.
+### CA-08: whitelist/blacklist Terminology — ACCEPTABLE
+**File:** `src/core/policy.ts:239-241`
 
-### Important Gaps (Criticality 5-7) — ALL FIXED ✅
+Only 2 uses in an architectural comment explaining allow-by-default vs deny-by-default strategies. Rest of codebase consistently uses "allowlist". Minor consistency issue.
 
-#### TC-05: Engine `executeSkill` Minimal Coverage (7/10) — ✅ FIXED
-**Resolution:** Added 4 tests for policy check failure, path risk detection, rate limiting, successful delegation.
+### CA-09: `yamlToJson` Limitation — DESIGN DECISION
+**File:** `src/discovery/openapi-scanner.ts:90-104`
 
-#### TC-06: Executor Redirect Chain Untested (7/10) — ✅ FIXED
-**Resolution:** Added tests for redirect following, cross-domain blocking, max redirect limit, per-hop SSRF validation.
+Limitations documented with prominent WARNING comment at lines 90-92 AND inline comment at lines 76-77. Intentionally minimal detector, not a full parser.
 
-#### TC-07: Executor Budget/Audit Flow Untested (7/10) — ✅ FIXED
-**Resolution:** Added tests for budget exceeded, record/release on success/failure, intent+outcome writes, strict mode abort.
+### ~~CA-10: Schema Inferrer Comment~~ — FALSE POSITIVE
+**File:** `src/capture/schema-inferrer.ts:145-148`
 
-#### ~~TC-08: MCP Resource/Prompt Handlers Untested~~ FALSE POSITIVE
+~~`// integer + number -> number` should explain "why".~~
 
-**Verification:** `tests/unit/mcp-protocol.test.ts` already tests these handlers.
-
-### Test Quality Issues — ALL FIXED ✅
-
-#### TC-09: Assertion-Free Test in retry.test.ts — ✅ FIXED
-**Resolution:** Replaced empty test with real assertions on `retryDecisions`, escalation count, and `result.success`.
-
-#### TC-10: Weak Assertion for Max Retries — ✅ FIXED
-**Resolution:** Strengthened to `toBeGreaterThan(1)` + `toBeLessThanOrEqual(4)` + `retryDecisions.length` check.
-
-#### TC-11: Engine Tests Over-Mock — ✅ FIXED
-**Resolution:** Added behavioral tests that test real outcomes alongside mocks.
-
-#### TC-12: Weak "Redacts Sensitive URL" Assertion — ✅ FIXED (Optional)
-**Resolution:** Added assertions for `typeof result.url`, `result.url.length`, and full `policyDecision` structure.
-
-### Files With Zero Test Coverage
-
-| File | Purpose | Status |
-|------|---------|--------|
-| ~~`src/server/tool-dispatch.ts`~~ | ~~Central MCP tool routing~~ | ✅ 23 tests added |
-| ~~`src/server/mcp-handlers.ts`~~ | ~~MCP resources/prompts~~ | FALSE POSITIVE — already tested |
-| ~~`src/storage/auth-repository.ts`~~ | ~~Auth flow CRUD~~ | ✅ 18 tests added |
-| ~~`src/capture/deduplicator.ts`~~ | ~~Request deduplication~~ | ✅ 15 tests added |
-| ~~`src/llm/adapters/*.ts`~~ | ~~LLM stubs~~ | ✅ Deleted (CS-14) |
+**Verification:** Comment accurately describes the behavior. The "why" (integer is a subset of number in JSON Schema) is domain knowledge, not a code-specific insight.
 
 ---
 
-## Type Design Issues
+## 5. Test Coverage Analysis
 
-### Critical
+### ~~TC-01: SkillRepository Lacks Unit Tests~~ — FALSE POSITIVE
+**File:** `src/storage/skill-repository.ts`
 
-#### TD-01: `any` in Native Module Loader — ✅ FIXED (Optional)
-**File:** `src/native/index.ts:15`
-**Resolution:** Replaced `Record<string, (...args: any[]) => any>` with typed `NativeBindings` interface listing all 16 known functions.
+~~No direct unit tests exist.~~
 
-#### TD-02: `as any` Casts for Browser Roles — DESIGN DECISION
-**File:** `src/browser/base-browser-adapter.ts:326,331,333,342`
-**Verification:** Intentional bridge between dynamic ARIA role strings and Playwright's nominal `AriaRole` type.
+**Verification:** Tests exist in `tests/unit/storage.test.ts` which directly imports and tests `SkillRepository` with a real in-memory database. Named differently but tests are present.
 
-### High
+### TC-02: `schema-validation.ts` Has Zero Tests — VALID
+**File:** `src/shared/schema-validation.ts`
 
-#### TD-03: Pervasive Unsafe `as` Casts from Database Rows — ✅ FIXED
-**Files:** All `src/storage/*-repository.ts`
-**Resolution:** Added validator functions for every union type: `validateSkillStatus()`, `validateTierState()`, `validateSideEffectClass()`, `validateAuthType()`, `validateMasteryLevel()`, `validateExecutionTier()`. All `as` casts in `rowTo*()` functions replaced.
+Confirmed: no test file references this module anywhere in `tests/`. `validateJsonSchema()` is a recursive validation function controlling drift detection and skill demotion. No edge case coverage.
 
-#### TD-04: Config Loading Double-Cast Bypasses Type Safety — ✅ FIXED
-**File:** `src/core/config.ts:254-257`
-**Resolution:** Extended runtime validation: logLevel (string check + known value warning), server.network (boolean check), server.httpPort (integer range check). Comment updated to list all validated sections.
+**Fix:** Add unit tests for nested objects, array items, type mismatches, missing required fields.
 
-#### TD-05: `parseJson<T>` Uses Unchecked Generic Cast — ✅ FIXED
-**File:** `src/storage/skill-repository.ts:59-67`
-**Resolution:** Added optional `shapeValidator` parameter. Created shape assertion helpers for `TierLock`, `ParameterEvidence[]`, and `RequestChain`.
+### TC-03: `isDomainMatch` Untested — VALID
+**File:** `src/shared/domain-utils.ts`
 
-### Medium
+Confirmed: no test file references `domain-utils` or `isDomainMatch`. Security-relevant function controlling domain allowlist matching with zero test coverage.
 
-| # | File | Issue | Status |
-|---|------|-------|--------|
-| TD-06 | `engine.ts:57,95` | `as any`/`as unknown as Browser` for third-party interop | DESIGN DECISION |
-| TD-07 | `base-browser-adapter.ts:1146` | `children: any[]` should use `SnapshotNode` | ✅ FIXED |
-| TD-08 | `tool-dispatch.ts:43-47` | `ToolResult` index signature destroys type safety | ACCEPTABLE |
-| TD-09 | `executor.ts:43-55` | `ExecutionResult` should be discriminated union | ACCEPTABLE |
-| TD-10 | `router.ts:22-27` | `RouterResult.data?: unknown` -- make generic | ACCEPTABLE |
-| TD-11 | `skill/types.ts:372-373` | JSON Schema as `Record<string, unknown>` | ACCEPTABLE |
-| TD-12 | `skill/types.ts:607-643` | Zod schema duplicates interface | ✅ FIXED — derived types via `z.infer` |
+**Fix:** Add unit tests including subdomain matching, case sensitivity, empty allowlist.
 
-### Low
+### TC-04: Engine `close()` Timeout Untested — VALID
+**File:** `src/core/engine.ts:777-816`
 
-| # | File | Issue | Status |
-|---|------|-------|--------|
-| TD-13 | `skill/types.ts:504` | `ConfirmationToken.tier` is `string` | ACCEPTABLE |
-| TD-14 | `skill/types.ts:332-337` | `SkillParameter.type` is `string` | ACCEPTABLE |
-| TD-15 | `skill/types.ts:137-142` | `SealedFetchRequest.method` is `string` | ACCEPTABLE |
-| TD-16 | `discovery/types.ts:11` | `trustLevel: number` has no range constraint | ✅ FIXED — now `1 \| 2 \| 3 \| 4 \| 5` |
-| TD-17 | `skill/types.ts:366,390` | `confidence`/`successRate` range not enforced | DESIGN DECISION |
-| TD-18 | `executor.ts:112` | `'unknown' as FailureCauseName` | ✅ FIXED — uses `FailureCause.UNKNOWN` |
-| TD-19 | `skill/types.ts:351-393` | `SkillSpec` 35+ fields god object | ACCEPTABLE |
+Three existing `close()` tests only verify happy-path mode transitions. The 8-second `Promise.race` timeout, `stopRecording` throwing during close, and forced cleanup path are all untested.
 
-### Positive
+**Fix:** Add tests for timeout scenario and error during close.
 
-- Consistent `const object + derived union type` pattern (no TypeScript `enum`)
-- `ToolBudgetConfig.secretsToNonAllowlisted: false` -- excellent type-level invariant
-- `AgentDatabase` generics with `unknown` default force callers to specify types
-- Module-level singletons have reset functions for testing
+### TC-11: Engine Test Mock Duplication — VALID
+**Files:** `tests/unit/engine.test.ts`, `tests/unit/engine-capture.test.ts`
 
-### Overall Type Ratings (Post-Fix)
+Comment in `engine-capture.test.ts` line 4: `"(Copied from engine.test.ts — must be in sync)"`. Confirmed copy-pasted identical mock setup (~80 lines) that must be manually synchronized.
 
-| Dimension | Before | After |
-|-----------|--------|-------|
-| Type Safety | 6/10 | 8/10 |
-| Interface Design | 7/10 | 8/10 |
-| Invariant Enforcement | 6/10 | 8/10 |
-| Encapsulation | 7/10 | 7/10 |
+**Fix:** Extract shared mock setup to `tests/helpers/engine-mocks.ts`.
+
+### TC-12: Executor Mocks Request-Builder Entirely — VALID
+**File:** `tests/unit/executor.test.ts:3-13`
+
+Comment: "Mock request-builder to work around upperMethod bug in source." Entire `buildRequest` replaced with mock. Real request-building logic (URL resolution, header filtering, body construction) never exercised in executor context. References a possibly-still-existing bug.
+
+**Fix:** Investigate and fix the "upperMethod bug", then remove the mock.
+
+### TC-13: Missing `daemon` Field in Test Config — VALID
+**File:** `tests/e2e/security-invariants.test.ts:12-43`
+
+`daemon` is required in `OneAgentConfig` (no `?` marker) but `makeTestConfig` omits it. Violates CLAUDE.md convention: "Config objects in tests must include `daemon: { port: 19420, autoStart: false }`."
+
+**Fix:** Add `daemon: { port: 19420, autoStart: false }` to the test config.
 
 ---
 
-## Summary Tables
+## 6. Type Design Analysis
 
-### Top 10 Highest-Impact Fixes — ALL RESOLVED ✅
+### TD-01: `RouterResult` Success/Error Co-dependency — VALID
+**File:** `src/server/router.ts:22-27`
 
-| # | Finding | Resolution |
-|---|---------|------------|
-| 1 | **CR-01: DNS Rebinding TOCTOU SSRF** | `directFetch()` pins to resolved IP with `Host` header |
-| 2 | **CR-02+CR-12: PII redactor false positives** | Tightened regex patterns (AWS context lookbehind, phone separators required) |
-| 3 | SF-02: Native module fallback logging | 10 files now log first failure with `_nativeFailureLogged` flag |
-| 4 | TC-01: tool-dispatch.ts tests | 23 new tests covering all dispatch paths |
-| 5 | **CR-08: Timing-unsafe signature** | `crypto.timingSafeEqual()` with Buffer conversion |
-| 6 | TD-03: Database row validation | Validator functions for 6 union types across 3 repositories |
-| 7 | SF-01: Playwright operation logging | 4 empty catches replaced with debug logging |
-| 8 | TC-02: auth-repository.ts tests | 18 new tests with real SQLite |
-| 9 | **CR-05: Unbounded strategy Map** | 500-entry cap with FIFO eviction |
-| 10 | SF-10: exportRootHash write failure | Returns `null` instead of stale path |
+Flat interface permits `{ success: true, error: "oops" }`. All callers (~2) are currently correct by convention. Discriminated union would provide type-level enforcement.
 
-### Files Most Frequently Cited
+### TD-02: `TransportConfig` Mode/Port Co-dependency — VALID
+**File:** `src/shared/daemon-types.ts:12-18`
 
-| File | Fixed Findings | Dismissed |
-|------|---------------|-----------|
-| `src/browser/base-browser-adapter.ts` | ✅ SF-01, SF-14, CA-02, TD-07, CS-04, SF-23 | ~~CR-03~~, ~~CR-07~~, TD-02 |
-| `src/storage/redactor.ts` | ✅ CR-02, CR-12 | ~~CR-09~~ |
-| `src/core/policy.ts` | ✅ CR-01, TC-04 | |
-| `src/replay/executor.ts` | ✅ CR-01, TC-06, TC-07, TD-18 | TD-09 |
-| `src/automation/bot-auth.ts` | ✅ CR-04, SF-07 | SF-06 |
-| `src/replay/audit-log.ts` | ✅ CR-08, SF-10, SF-11 | |
-| `src/skill/types.ts` | ✅ TD-12, TD-16 | TD-11, TD-13–15, TD-17, TD-19 |
-| `src/core/config.ts` | ✅ TD-04, CS-02 | CR-10, CA-09 |
-| `src/server/tool-dispatch.ts` | ✅ TC-01, CS-03 | TD-08 |
-| `src/storage/skill-repository.ts` | ✅ TD-03, TD-05, CS-03 | |
-| `src/browser/engine.ts` | ✅ SF-03, CA-03 | TD-06 |
-| `src/native/*.ts` (12 files) | ✅ SF-02, SF-04, TD-01 | |
-| `src/automation/strategy.ts` | ✅ CR-05 | |
-| `src/automation/cookie-refresh.ts` | ✅ CR-11 | SF-09 |
+Flat interface permits `{ mode: 'tcp' }` without port. All construction sites (2-3) are correct by convention. Clean discriminated union fix.
+
+### TD-03: `ToolResult` Index Signature — DESIGN DECISION
+**File:** `src/server/tool-dispatch.ts:41-45`
+
+Comment explicitly states: "Compatible with the MCP SDK's CallToolResult (which uses an index signature)." Required for SDK interop. Intentional.
+
+### TD-04: `SkillSpec` Flat Interface — DESIGN DECISION
+**File:** `src/skill/types.ts:351-393`
+
+Line 330: "Flat interface by design — factory construction and Zod validation are applied at creation boundaries." Line 366: "Typed as number without range constraint — TypeScript lacks built-in ranged numeric types." Explicitly documented design choice.
+
+### TD-05: `logLevel: string` Not Narrowed — ACCEPTABLE
+**File:** `src/skill/types.ts:525`
+
+Runtime validation warns on unknown levels and falls back to `'info'`. `string` deliberately chosen for forward-compatibility. System is safe at runtime.
+
+### TD-06: `ConfirmationToken` consumed/consumedAt — ACCEPTABLE
+**File:** `src/skill/types.ts:469-478`
+
+All mutation paths atomically set both `consumed` and `consumed_at` via SQL. Single-writer pattern through `ConfirmationManager`. Essentially zero risk.
+
+### Cross-cutting: Branded Types for Identifiers — ACCEPTABLE
+
+IDs are plain `string` but named params (`skillId`, `siteId`, `sessionId`) and distinct formats (UUIDs vs `site.action.v1` vs nonces) provide adequate protection. Retrofit cost outweighs marginal benefit.
+
+### Cross-cutting: Zod Enum Duplication — VALID
+**File:** `src/skill/types.ts:588-615`
+
+All three Zod enums (`executionTier`, `errorType`, `capabilityUsed`) are hardcoded inline strings duplicating values from existing `as const` objects (`ExecutionTier`, `FailureCause`, `Capability`). Not derived. Real drift risk since they're in the same file but not connected.
+
+**Fix:** `z.enum(Object.values(ExecutionTier) as [string, ...string[]])`.
 
 ---
 
-*Generated by 6 parallel PR review agents scanning the full OneAgent codebase (~97 source files). All 96 numbered findings verified against source code by 4 parallel verification agents. 8 false positives removed, 6 design decisions annotated, 19 acceptable-risk findings downgraded. 63 valid findings confirmed.*
+## 7. Consolidated Priority Matrix (Verified Findings Only)
 
-*Remediated by 6 parallel fix agents (2026-02-17): 72 findings fixed (63 must-fix + 9 optional). 5 new shared utility modules created, 3 new test files (56 tests), ~50 source files modified. Final state: `npx tsc --noEmit` 0 errors, `npx vitest run` 110 files / 1364 tests all passing.*
+### P0 — Fix Now (3 issues)
+
+| # | Issue | Source | File(s) |
+|---|-------|--------|---------|
+| 1 | Rate limiter `x-ratelimit-reset` threshold (56-year delay) | CR-04 | `rate-limiter.ts:106-113` |
+| 2 | Policy failures return `FailureCause.UNKNOWN` — retry wastes attempts | SF-06 | `executor.ts:236-303` |
+| 3 | Audit hash chain corruption at `info` level / no strict mode check | CR-03 + SF-09 | `audit-log.ts:284-312` |
+
+### P1 — Fix This Sprint (6 issues)
+
+| # | Issue | Source | File(s) |
+|---|-------|--------|---------|
+| 4 | Response body size bypass for browser tiers | CR-07 | `executor.ts:286-309` |
+| 5 | `schema-validation.ts` zero tests | TC-02 | `shared/schema-validation.ts` |
+| 6 | `isDomainMatch` untested (security-relevant) | TC-03 | `shared/domain-utils.ts` |
+| 7 | `recordFilteredEntries` unguarded DB writes — crash mid-loop | SF-14 | `noise-filter.ts:144-152` |
+| 8 | `fullBrowserExecution` race — `domcontentloaded` misses XHR | SF-15 | `executor.ts:611-644` |
+| 9 | Zod enum duplication — drift risk | TD (Zod) | `skill/types.ts:588-615` |
+
+### P2 — Fix This Quarter (10 issues)
+
+| # | Issue | Source | File(s) |
+|---|-------|--------|---------|
+| 10 | `resolveUrl` leaves `{paramName}` unresolved without warning | SF-17 | `request-builder.ts:189-213` |
+| 11 | `RouterResult` permits impossible states | TD-01 | `router.ts:22-27` |
+| 12 | `TransportConfig` permits impossible states | TD-02 | `daemon-types.ts:12-18` |
+| 13 | Engine `close()` timeout/error paths untested | TC-04 | `engine.ts:777-816` |
+| 14 | Engine test mock duplication ("must be in sync") | TC-11 | `engine*.test.ts` |
+| 15 | Executor mocks request-builder hiding bug | TC-12 | `executor.test.ts:3-13` |
+| 16 | Missing `daemon` in test config | TC-13 | `security-invariants.test.ts` |
+| 17 | C1/A1/B2 markers without legend | CA-04 | `engine.ts` |
+| 18 | "Fix N:" markers without context | CA-05 | `executor.ts` |
+| 19 | Empty `catch {}` blocks (58 instances, many defensible) | SF-05 | Multiple |
+
+### Dismissed Findings (not actionable)
+
+| # | Finding | Verdict | Reason |
+|---|---------|---------|--------|
+| CR-01 | TOCTOU race in budget tracker | FALSE POSITIVE | Single-threaded; no async yield |
+| CR-05 | Path risk case mismatch | FALSE POSITIVE | Regex patterns have `/i` flag |
+| CR-08 | deepMerge prototype pollution | FALSE POSITIVE | JSON.parse own-property semantics |
+| SF-04 | Missing HAR silent return | FALSE POSITIVE | Logs at warn; caller surfaces error |
+| CA-01 | Tier count mismatch | FALSE POSITIVE | Comment describes TierState, not ExecutionTier |
+| CA-02 | Stale migration note | FALSE POSITIVE | Already removed by simplifier |
+| CA-07 | Retry comment inaccurate | FALSE POSITIVE | Comment is accurate |
+| CA-10 | Schema inferrer comment | FALSE POSITIVE | Comment is accurate |
+| TC-01 | SkillRepository untested | FALSE POSITIVE | Tests in storage.test.ts |
+| CR-02 | Config validation gap | ACCEPTABLE | Critical fields validated; local file |
+| CR-09 | isDomainMatch subdomain | ACCEPTABLE | Dot-prefix correct; bare TLD is config error |
+| SF-01 | .catch(() => {}) notifications | ACCEPTABLE | notify() logs internally |
+| SF-02 | parseJson defaults | ACCEPTABLE | Logs at warn; prevents cascade |
+| SF-07 | Storage state at warn | ACCEPTABLE | Degraded-but-functional |
+| SF-08 | dispatchToolCall catch-all | ACCEPTABLE | Standard MCP boundary |
+| TD-05 | logLevel: string | ACCEPTABLE | Runtime validation + fallback |
+| TD-06 | ConfirmationToken | ACCEPTABLE | SQL paths atomic |
+| Branded types | ID safety | ACCEPTABLE | Named params + distinct formats |
+| CR-06 | Domain check in explore | DESIGN DECISION | Self-domain allowed; documented |
+| SF-03 | Shutdown close errors | DESIGN DECISION | Standard SIGINT pattern |
+| SF-13 | Invalid URLs as ambiguous | DESIGN DECISION | Safer than dropping |
+| SF-16 | Unknown semantic checks | DESIGN DECISION | Forward-compatible |
+| SF-18 | Empty update no-op | DESIGN DECISION | Standard repo pattern |
+| SF-21 | Session without browser | DESIGN DECISION | Documented degraded mode |
+| TD-03 | ToolResult index signature | DESIGN DECISION | MCP SDK compat |
+| TD-04 | SkillSpec flat interface | DESIGN DECISION | Documented at line 330 |
+| CA-03 | nonce naming | DESIGN DECISION | Documented at lines 77-81, 87-88 |
+| CA-09 | yamlToJson limitation | DESIGN DECISION | WARNING comment present |
+
+---
+
+*Generated by 6 parallel review agents + 5 parallel verification agents. Original 50 findings verified line-by-line: 19 valid, 10 false positive, 12 acceptable, 9 design decisions. 19 actionable items in the priority matrix.*

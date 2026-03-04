@@ -2,7 +2,7 @@
   "mcpServers": {
     "oneagent": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js", "serve"]
+      "args": ["./dist/index.js", "serve"]
     }
   }
 }

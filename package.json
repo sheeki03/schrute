@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "description": "Universal Self-Learning Browser Agent — UI automation for the first run, API-level replay for the 100th run",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "exports": {
+    ".": { "import": "./dist/lib.js", "types": "./dist/lib.d.ts" },
+    "./cli": { "import": "./dist/index.js" }
+  },
   "bin": {
     "oneagent": "dist/index.js"
   },
@@ -21,7 +26,10 @@
     "serve": "node dist/index.js serve",
     "setup": "node dist/index.js setup",
     "doctor": "node dist/index.js doctor",
-    "rebuild:native": "bash scripts/rebuild-native.sh"
+    "rebuild:native": "bash scripts/rebuild-native.sh",
+    "build:binary": "npm run build && pkg dist/index.js --config pkg.config.json",
+    "build:binary:macos": "npm run build:binary -- --target node22-macos-arm64",
+    "build:binary:linux": "npm run build:binary -- --target node22-linux-x64"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -30,16 +38,16 @@
     "fastify": "^5.2.1",
     "ipaddr.js": "^2.2.0",
     "keytar": "^7.9.0",
+    "patchright": "^1.57.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
-    "patchright": "1.50.1",
-    "playwright": "1.50.1",
-    "playwright-core": "1.50.1",
+    "playwright": "^1.58.2",
+    "playwright-core": "^1.58.2",
     "pngjs": "^7.0.0",
     "zod": "^3.24.2"
   },
   "optionalDependencies": {
-    "camoufox-js": "^0.9.0"
+    "camoufox-js": "^0.8.5"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
@@ -47,6 +55,7 @@
     "@types/node": "^22.13.4",
     "@types/pngjs": "^6.0.0",
     "typescript": "^5.7.3",
+    "@yao-pkg/pkg": "^6.0.0",
     "vitest": "^3.0.5"
   },
   "engines": {

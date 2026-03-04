@@ -444,7 +444,8 @@ program
   .description('Start the MCP server (stdio by default, or HTTP with --http)')
   .option('--http', 'Enable HTTP transport (REST + MCP HTTP)')
   .option('--port <port>', 'Port number for HTTP server', '3000')
-  .action(async (options: { http?: boolean; port?: string }) => {
+  .option('--no-daemon', 'Skip starting the daemon control socket')
+  .action(async (options: { http?: boolean; port?: string; daemon?: boolean }) => {
     const config = getConfig();
     createLogger(config.logLevel);
     const log = getLogger();
@@ -480,13 +481,17 @@ program
     // Clean up stale session.json from pre-daemon versions
     removeStaleSessionJson(config);
 
-    // Start daemon control socket (always) — handles populated below
+    // Daemon is optional — only needed for CLI control of a running server
+    let daemon: Awaited<ReturnType<typeof startDaemonServer>> | null = null;
     const closeHandles: DaemonCloseHandles = { mcpCloseHandles: [] };
-    const daemon = await startDaemonServer(engine, config, closeHandles);
+
+    if (options.daemon !== false) {
+      daemon = await startDaemonServer(engine, config, closeHandles);
+    }
 
     if (options.http || config.server.network) {
       const port = parseInt(options.port ?? String(config.server.httpPort ?? 3000), 10);
-      const host = '127.0.0.1';
+      const host = config.server.network ? '0.0.0.0' : '127.0.0.1';
 
       console.log(`Starting HTTP server on ${host}:${port}...`);
 
@@ -499,8 +504,8 @@ program
 
       // Start MCP HTTP on port+1
       const { startMcpHttpServer } = await import('./server/mcp-http.js');
-      config.server.network = true;
-      const mcpHttp = await startMcpHttpServer(deps, { host, port: port + 1 });
+      const mcpHttpDeps = { ...deps, config: { ...config, server: { ...config.server, network: true } } };
+      const mcpHttp = await startMcpHttpServer(mcpHttpDeps, { host, port: port + 1 });
       console.log(`  MCP HTTP:     http://${host}:${port + 1}/mcp`);
 
       // Register close handles so daemon's graceful shutdown closes MCP/REST servers
@@ -517,7 +522,15 @@ program
     {
       const shutdown = async () => {
         console.log('\nShutting down...');
-        await daemon.gracefulShutdown();
+        if (daemon) {
+          await daemon.gracefulShutdown();
+        } else {
+          // No daemon — close MCP handles directly
+          for (const handle of closeHandles.mcpCloseHandles ?? []) {
+            try { await handle.close(); } catch (err) { console.warn('MCP close error:', err); }
+          }
+          await engine.close();
+        }
         closeDatabase();
         process.exit(0);
       };

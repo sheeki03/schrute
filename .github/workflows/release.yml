@@ -1,0 +1,35 @@
+name: Release Binary
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: node22-linux-x64
+            artifact: oneagent-linux-x64
+          - os: macos-latest
+            target: node22-macos-arm64
+            artifact: oneagent-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npx pkg dist/index.js --target ${{ matrix.target }} --output build/bin/oneagent --config pkg.config.json
+      - run: bash scripts/package-binary.sh
+      - run: tar -czf ${{ matrix.artifact }}.tar.gz -C build/bin .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
