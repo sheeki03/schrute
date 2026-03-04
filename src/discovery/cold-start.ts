@@ -40,6 +40,7 @@ export async function discoverSite(
   config: OneAgentConfig,
   browser?: BrowserProvider,
   db?: AgentDatabase,
+  origin?: string,
 ): Promise<DiscoveryResult> {
   const siteId = extractSiteId(url);
   log.info({ siteId, url }, 'Starting cold-start discovery');
@@ -53,7 +54,7 @@ export async function discoverSite(
 
   // WebMCP is feature-flagged
   if (config.features.webmcp && browser && db) {
-    tasks.push(runWebMcpScanner(siteId, browser, db));
+    tasks.push(runWebMcpScanner(siteId, browser, db, origin));
   }
 
   // Run all scanners in parallel — failures don't block others
@@ -180,8 +181,9 @@ async function runWebMcpScanner(
   siteId: string,
   browser: BrowserProvider,
   db: AgentDatabase,
+  origin?: string,
 ): Promise<ScannerOutput> {
-  const result = await scanWebMcp(siteId, browser, db);
+  const result = await scanWebMcp(siteId, browser, db, origin);
   const endpoints: DiscoveredEndpoint[] = result.tools.map(tool => ({
     method: 'WEBMCP',
     path: tool.name,

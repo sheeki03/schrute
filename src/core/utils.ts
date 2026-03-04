@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { getLogger } from './logger.js';
 import type { SealedFetchRequest, SealedFetchResponse } from '../skill/types.js';
 
@@ -117,3 +118,33 @@ export const ERROR_SIGNATURE_PATTERNS: ReadonlyArray<{ name: string; check: (bod
     },
   },
 ];
+
+// ─── sanitizeSiteId ──────────────────────────────────────────────
+// Sanitize user-provided siteId values for safe filesystem usage.
+
+const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+export function sanitizeSiteId(input: string): string {
+  const lowered = input.toLowerCase();
+  let s = lowered
+    .replace(/[\x00-\x1f\x7f]/g, '')       // strip control chars
+    .replace(/[/\\:*?"<>|]/g, '-')           // replace path-unsafe chars
+    .replace(/\.{2,}/g, '.')                 // collapse consecutive dots
+    .replace(/^\.+|\.+$/g, '')               // strip leading/trailing dots
+    .trim();
+
+  if (s.length === 0) throw new Error('siteId cannot be empty after sanitization');
+
+  const hadUnsafeChars = s !== lowered;
+  const needsTruncation = s.length > 93;
+  if (needsTruncation) s = s.slice(0, 93);
+
+  if (hadUnsafeChars || needsTruncation) {
+    const hash = createHash('sha256').update(lowered).digest('hex').slice(0, 6);
+    s = `${s}-${hash}`;
+  }
+
+  if (WINDOWS_RESERVED.test(s)) s = `_${s}`;
+
+  return s;
+}

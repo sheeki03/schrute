@@ -31,6 +31,7 @@ export const DISABLED_BY_DEFAULT_CAPABILITIES: CapabilityName[] = [
 export const FailureCause = {
   RATE_LIMITED: 'rate_limited',
   ENDPOINT_REMOVED: 'endpoint_removed',
+  POLICY_DENIED: 'policy_denied',
   JS_COMPUTED_FIELD: 'js_computed_field',
   PROTOCOL_SENSITIVITY: 'protocol_sensitivity',
   SIGNED_PAYLOAD: 'signed_payload',
@@ -45,6 +46,7 @@ export type FailureCauseName = (typeof FailureCause)[keyof typeof FailureCause];
 export const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
   FailureCause.RATE_LIMITED,
   FailureCause.ENDPOINT_REMOVED,
+  FailureCause.POLICY_DENIED,
   FailureCause.JS_COMPUTED_FIELD,
   FailureCause.PROTOCOL_SENSITIVITY,
   FailureCause.SIGNED_PAYLOAD,
@@ -173,6 +175,10 @@ export interface PageSnapshot {
   incremental?: boolean;
   mode?: 'annotated' | 'full' | 'none';
   recentEvents?: SnapshotEvent[];
+  screenshot?: string | null; // base64 PNG or JPEG, null when screenshot fails but snapshot succeeds
+  screenshotMimeType?: string; // 'image/jpeg' or 'image/png'
+  screenshotError?: string; // error message when screenshot fails
+  pagination?: { totalChars: number; offset: number; hasMore: boolean };
 }
 
 export interface NetworkEntry {
@@ -200,6 +206,7 @@ export interface BrowserProvider {
   screenshot(): Promise<Buffer>;
   networkRequests(): Promise<NetworkEntry[]>;
   evaluateModelContext?(req: SealedModelContextRequest): Promise<SealedModelContextResponse>;
+  getCurrentUrl(): string;
 }
 
 // ─── Allowed Playwright MCP Tools (strict allowlist) ───────────────
@@ -224,6 +231,7 @@ export const ALLOWED_BROWSER_TOOLS = [
   'browser_console_messages',
   'browser_network_requests',
   'browser_batch_actions',
+  'browser_snapshot_with_screenshot',
 ] as const;
 
 export const BLOCKED_BROWSER_TOOLS = [
@@ -402,6 +410,7 @@ export interface SiteManifest {
   recommendedTier: ExecutionTierName;
   totalRequests: number;
   successfulRequests: number;
+  defaultOverrides?: { proxy?: { server: string }; geo?: GeoEmulationConfig };
 }
 
 // ─── Policy ────────────────────────────────────────────────────────
@@ -517,6 +526,22 @@ export interface BrowserFeatureFlagsConfig {
   modalTracking?: boolean;
   screenshotResize?: boolean;
   batchActions?: boolean;
+  screenshotFormat?: 'jpeg' | 'png';
+  screenshotQuality?: number;
+}
+
+// ─── Proxy & Geo Emulation ──────────────────────────────────────────
+export interface ProxyConfig {
+  server: string;
+  bypass?: string;
+  username?: string;
+  password?: string;
+}
+
+export interface GeoEmulationConfig {
+  geolocation?: { latitude: number; longitude: number; accuracy?: number };
+  timezoneId?: string;
+  locale?: string;
 }
 
 // ─── Config ────────────────────────────────────────────────────────
@@ -530,6 +555,13 @@ export interface OneAgentConfig {
   browser?: {
     engine?: BrowserEngine;
     features?: BrowserFeatureFlagsConfig;
+    idleTimeoutMs?: number;
+    handlerTimeoutMs?: number;
+    proxy?: ProxyConfig;
+    geo?: GeoEmulationConfig;
+  };
+  capabilities?: {
+    enabled?: CapabilityName[];
   };
   toolBudget: ToolBudgetConfig;
   payloadLimits: PayloadLimits;
@@ -573,6 +605,14 @@ export interface LockedModeStatus {
 }
 
 // ─── Zod Schemas for Validation ────────────────────────────────────
+
+// Derive Zod enum value tuples from the `as const` objects to prevent
+// hardcoded inline arrays from drifting out of sync with the source-of-truth
+// const objects above.
+const executionTierValues = Object.values(ExecutionTier) as [string, ...string[]];
+const failureCauseValues = Object.values(FailureCause) as [string, ...string[]];
+const capabilityValues = Object.values(Capability) as [string, ...string[]];
+
 export const PolicyDecisionSchema = z.object({
   proposed: z.string(),
   policyResult: z.enum(['allowed', 'blocked', 'confirmed']),
@@ -589,17 +629,11 @@ export const AuditEntrySchema = z.object({
   id: z.string(),
   timestamp: z.number(),
   skillId: z.string(),
-  executionTier: z.enum(['signed_agent', 'direct', 'cookie_refresh', 'browser_proxied', 'full_browser']),
+  executionTier: z.enum(executionTierValues),
   success: z.boolean(),
   latencyMs: z.number(),
-  errorType: z.enum([
-    'rate_limited', 'endpoint_removed', 'js_computed_field', 'protocol_sensitivity',
-    'signed_payload', 'schema_drift', 'auth_expired', 'cookie_refresh', 'unknown',
-  ]).optional(),
-  capabilityUsed: z.enum([
-    'net.fetch.direct', 'net.fetch.browserProxied', 'browser.automation',
-    'browser.modelContext', 'storage.write', 'export.skills', 'secrets.use',
-  ]),
+  errorType: z.enum(failureCauseValues).optional(),
+  capabilityUsed: z.enum(capabilityValues),
   policyDecision: PolicyDecisionSchema,
   previousHash: z.string(),
   entryHash: z.string(),

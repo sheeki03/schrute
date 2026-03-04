@@ -16,7 +16,20 @@ export async function scanWebMcp(
   siteId: string,
   browser: BrowserProvider,
   db: AgentDatabase,
+  origin?: string,
 ): Promise<WebMcpScanResult> {
+  // If no explicit origin, derive from browser's current URL (post-navigation)
+  let cacheKey = origin ?? siteId;
+  if (!origin) {
+    try {
+      const derived = new URL(browser.getCurrentUrl()).origin;
+      // 'null' is returned for about:blank, data:, and other non-HTTP URLs
+      if (derived && derived !== 'null') {
+        cacheKey = derived;
+      }
+    } catch { /* fall back to siteId */ }
+  }
+
   // Check if browser supports evaluateModelContext
   if (!browser.evaluateModelContext) {
     log.debug('Browser does not support evaluateModelContext');
@@ -38,14 +51,20 @@ export async function scanWebMcp(
 
     const toolsData = probeResult.result as WebMcpToolRaw[] | undefined;
     if (!Array.isArray(toolsData) || toolsData.length === 0) {
+      // Authoritative scan returned 0 tools — site no longer has WebMCP tools
+      db.run('DELETE FROM webmcp_tools WHERE site_id = ?', cacheKey);
       return { available: true, tools: [] };
     }
 
-    const tools: WebMcpTool[] = toolsData.map(t => ({
+    const rawTools: WebMcpTool[] = toolsData.map(t => ({
       name: String(t.name ?? ''),
       description: t.description ? String(t.description) : undefined,
       inputSchema: t.inputSchema as Record<string, unknown> | undefined,
     }));
+
+    // Sort and cap at 20
+    const sorted = [...rawTools].sort((a, b) => a.name.localeCompare(b.name));
+    const tools = sorted.slice(0, 20);
 
     // Store in database
     const now = Date.now();
@@ -57,12 +76,23 @@ export async function scanWebMcp(
            description = excluded.description,
            input_schema = excluded.input_schema,
            last_verified = excluded.last_verified`,
-        siteId,
+        cacheKey,
         tool.name,
         tool.description ?? null,
         tool.inputSchema ? JSON.stringify(tool.inputSchema) : null,
         now,
         now,
+      );
+    }
+
+    // Prune tools no longer present in authoritative scan
+    if (tools.length > 0) {
+      const discoveredNames = tools.map(t => t.name);
+      const placeholders = discoveredNames.map(() => '?').join(',');
+      db.run(
+        `DELETE FROM webmcp_tools WHERE site_id = ? AND tool_name NOT IN (${placeholders})`,
+        cacheKey,
+        ...discoveredNames,
       );
     }
 
@@ -75,12 +105,13 @@ export async function scanWebMcp(
 }
 
 /**
- * Load cached WebMCP tools from database.
+ * Load cached WebMCP tools from database, ordered and capped at 20.
  */
-export function loadCachedTools(siteId: string, db: AgentDatabase): WebMcpTool[] {
+export function loadCachedTools(siteId: string, db: AgentDatabase, origin?: string): WebMcpTool[] {
+  const cacheKey = origin ?? siteId;
   const rows = db.all<WebMcpToolRow>(
-    'SELECT tool_name, description, input_schema FROM webmcp_tools WHERE site_id = ?',
-    siteId,
+    'SELECT tool_name, description, input_schema FROM webmcp_tools WHERE site_id = ? ORDER BY last_verified DESC, tool_name ASC LIMIT 20',
+    cacheKey,
   );
 
   return rows.map(row => ({
@@ -102,4 +133,5 @@ interface WebMcpToolRow {
   tool_name: string;
   description: string | null;
   input_schema: string | null;
+  last_verified?: number;
 }

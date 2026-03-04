@@ -96,8 +96,9 @@ export class RateLimiter {
     }
 
     // Rate limit header parsing: supports X-RateLimit-Remaining, X-RateLimit-Reset,
-    // Retry-After. Reset values >1e10 are treated as Unix timestamps (seconds),
-    // smaller values as seconds-from-now.
+    // Retry-After. Reset values > 1_000_000_000 are treated as Unix timestamps in
+    // seconds (epoch exceeded 1 billion in Sep 2001), smaller values as relative
+    // seconds-from-now.
     const remaining = this.parseHeader(headers, 'x-ratelimit-remaining');
     const limit = this.parseHeader(headers, 'x-ratelimit-limit');
     const reset = this.parseHeader(headers, 'x-ratelimit-reset');
@@ -105,7 +106,7 @@ export class RateLimiter {
     if (remaining !== null && limit !== null) {
       // Calibrate refill rate based on server limits
       if (reset !== null) {
-        const resetMs = reset > 1e10 ? reset - now : reset * 1000;
+        const resetMs = reset > 1_000_000_000 ? (reset * 1000) - now : reset * 1000;
         if (resetMs > 0 && limit > 0) {
           bucket.refillRate = limit / (resetMs / 1000);
           bucket.maxTokens = limit;

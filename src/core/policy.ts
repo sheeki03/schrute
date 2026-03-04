@@ -1,5 +1,5 @@
 import * as dns from 'node:dns/promises';
-import * as ipaddr from 'ipaddr.js';
+import ipaddr from 'ipaddr.js';
 import { getLogger } from './logger.js';
 import { getConfig } from './config.js';
 import { getDatabase } from '../storage/database.js';
@@ -10,6 +10,7 @@ import type {
   OneAgentConfig,
 } from '../skill/types.js';
 import {
+  Capability,
   V01_DEFAULT_CAPABILITIES,
   DISABLED_BY_DEFAULT_CAPABILITIES,
   TIER1_ALLOWED_HEADERS,
@@ -121,6 +122,31 @@ export function getSitePolicy(siteId: string, config?: OneAgentConfig): SitePoli
 export function setSitePolicy(policy: SitePolicy, config?: OneAgentConfig): void {
   const key = policyCacheKey(policy.siteId, config);
   sitePolicies.set(key, { policy, cachedAt: Date.now() });
+
+  try {
+    const db = getDatabase(config);
+    // Ensure site row exists for FK constraint
+    // INSERT OR IGNORE: ensure site row exists for FK constraint.
+    // Cannot use ON CONFLICT(id) DO UPDATE because it may conflict with
+    // better-sqlite3 in some test environments. OR IGNORE is safe since
+    // we only need the row to exist, not to update it.
+    db.run(
+      `INSERT OR IGNORE INTO sites (id, first_seen, last_visited) VALUES (?, ?, ?)`,
+      policy.siteId, Date.now(), Date.now(),
+    );
+    db.run(
+      `INSERT OR REPLACE INTO policies (site_id, allowed_methods, max_qps, max_concurrent, read_only_default,
+         require_confirmation, domain_allowlist, redaction_rules, capabilities)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      policy.siteId, JSON.stringify(policy.allowedMethods), policy.maxQps, policy.maxConcurrent,
+      policy.readOnlyDefault ? 1 : 0, JSON.stringify(policy.requireConfirmation),
+      JSON.stringify(policy.domainAllowlist), JSON.stringify(policy.redactionRules),
+      JSON.stringify(policy.capabilities),
+    );
+  } catch (err) {
+    const log = getLogger();
+    log.warn({ siteId: policy.siteId, err }, 'Failed to persist site policy to database');
+  }
 }
 
 export function invalidatePolicyCache(siteId?: string, config?: OneAgentConfig): void {
@@ -133,12 +159,15 @@ export function invalidatePolicyCache(siteId?: string, config?: OneAgentConfig):
 
 // ─── Capabilities ─────────────────────────────────────────────────
 
+// Capabilities that can be enabled via config.capabilities.enabled
+const OPT_IN_ALLOWED: readonly string[] = [Capability.BROWSER_MODEL_CONTEXT];
+
 /**
  * Check if a capability is allowed for a site.
  *
- * Note: Capabilities in DISABLED_BY_DEFAULT_CAPABILITIES are always blocked
- * regardless of site policy. Site policy can only further restrict capabilities,
- * never enable disabled-by-default ones.
+ * Capabilities in DISABLED_BY_DEFAULT_CAPABILITIES are blocked unless they
+ * appear in OPT_IN_ALLOWED AND the user has enabled them via
+ * config.capabilities.enabled AND the site policy grants them.
  */
 export function checkCapability(
   siteId: string,
@@ -146,10 +175,21 @@ export function checkCapability(
   config?: OneAgentConfig,
 ): PolicyResult {
   if ((DISABLED_BY_DEFAULT_CAPABILITIES as readonly string[]).includes(capability)) {
+    if (OPT_IN_ALLOWED.includes(capability) && config?.capabilities?.enabled?.includes(capability)) {
+      const policy = getSitePolicy(siteId, config);
+      if (policy.capabilities.includes(capability)) {
+        return { allowed: true, rule: 'capability.opted_in' };
+      }
+      return {
+        allowed: false,
+        rule: 'capability.not_granted',
+        reason: `Capability '${capability}' is opted-in but not granted for site '${siteId}'`,
+      };
+    }
     return {
       allowed: false,
       rule: 'capability.disabled_by_default',
-      reason: `Capability '${capability}' is disabled by default`,
+      reason: `Capability '${capability}' is disabled by default. Enable via config: capabilities.enabled=['${capability}']`,
     };
   }
 
@@ -172,6 +212,10 @@ export function normalizeDomain(domain: string): string {
   // Strip trailing dots
   while (d.endsWith('.')) {
     d = d.slice(0, -1);
+  }
+  // Detect bare IPv6 literals (contain 2+ colons, not already bracketed)
+  if ((d.match(/:/g) || []).length >= 2 && !d.startsWith('[')) {
+    d = `[${d}]`;
   }
   // IDN/punycode: convert to ASCII form if needed
   try {
@@ -231,12 +275,8 @@ export function matchesDomainAllowlist(
 
 export function sanitizeImplicitAllowlist(domains: string[]): string[] {
   return domains
-    .filter(d => {
-      if (!d || typeof d !== 'string') return false;
-      if (d.includes('*')) return false;
-      return true;
-    })
-    .map(d => normalizeDomain(d));
+    .filter(d => d && typeof d === 'string' && !d.includes('*'))
+    .map(normalizeDomain);
 }
 
 // ─── Private Network Egress Blocking ──────────────────────────────
@@ -402,25 +442,17 @@ export function checkPathRisk(method: string, path: string): PathRiskResult {
 
   const upperMethod = method.toUpperCase();
 
-  if (upperMethod === 'GET' || upperMethod === 'HEAD') {
-    for (const pattern of DESTRUCTIVE_GET_PATTERNS) {
-      if (pattern.test(path)) {
-        return {
-          blocked: true,
-          reason: `Destructive GET pattern detected: ${pattern.source} on path '${path}'`,
-        };
-      }
-    }
-  }
+  const patterns =
+    (upperMethod === 'GET' || upperMethod === 'HEAD') ? DESTRUCTIVE_GET_PATTERNS :
+    upperMethod === 'POST' ? DESTRUCTIVE_POST_PATTERNS :
+    [];
 
-  if (upperMethod === 'POST') {
-    for (const pattern of DESTRUCTIVE_POST_PATTERNS) {
-      if (pattern.test(path)) {
-        return {
-          blocked: true,
-          reason: `Destructive POST pattern detected: ${pattern.source} on path '${path}'`,
-        };
-      }
+  for (const pattern of patterns) {
+    if (pattern.test(path)) {
+      return {
+        blocked: true,
+        reason: `Destructive ${upperMethod} pattern detected: ${pattern.source} on path '${path}'`,
+      };
     }
   }
 

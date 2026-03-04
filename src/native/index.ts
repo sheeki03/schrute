@@ -61,6 +61,10 @@ export function getNativeModule(): typeof nativeModule {
     const require = createRequire(import.meta.url);
     // napi-rs produces index.node in the native/ build dir
     const candidates = [
+      // Standalone binary: side-car addon directory
+      ...((process as any).pkg
+        ? [join(dirname(process.execPath), 'addons', 'oneagent_native.node')]
+        : []),
       join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'native', 'index.node'),
       join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'native', 'oneagent-native.node'),
     ];

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getLogger } from './logger.js';
-import { BrowserManager } from '../browser/manager.js';
+import { BrowserManager, ContextOverrideMismatchError } from '../browser/manager.js';
+import type { ContextOverrides } from '../browser/manager.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -23,16 +24,21 @@ export class SessionManager {
     this.browserManager = browserManager ?? new BrowserManager();
   }
 
-  async create(siteId: string, url: string): Promise<SessionInfo> {
+  remove(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
+  async create(siteId: string, url: string, overrides?: ContextOverrides): Promise<SessionInfo> {
     const contextId = randomUUID();
 
     // Design choice: session continues without browser context because some operations
     // (e.g., direct fetch skill execution) don't require a browser. Callers that need
     // a browser context should check getBrowserManager().hasContext() before proceeding.
     try {
-      await this.browserManager.getOrCreateContext(siteId);
+      await this.browserManager.getOrCreateContext(siteId, overrides);
       this.log.info({ siteId }, 'Browser context created');
     } catch (err) {
+      if (err instanceof ContextOverrideMismatchError) throw err;
       this.log.warn(
         { siteId, err },
         'Could not create browser context — session created without browser',
@@ -103,6 +109,11 @@ export class SessionManager {
     }
     this.sessions.set(session.id, session);
     this.log.debug({ sessionId: session.id, siteId: session.siteId }, 'Session rehydrated from persisted state');
+  }
+
+  updateUrl(sessionId: string, url: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.url = url;
   }
 
   getSession(id: string): SessionInfo | undefined {

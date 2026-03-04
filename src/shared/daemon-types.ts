@@ -10,9 +10,6 @@ export interface PidFileContent {
 
 export type TransportMode = 'uds' | 'tcp';
 
-export interface TransportConfig {
-  mode: TransportMode;
-  socketPath?: string;
-  port?: number;
-  token?: string;
-}
+export type TransportConfig =
+  | { mode: 'uds'; socketPath: string; token?: string }
+  | { mode: 'tcp'; port: number; token?: string };
