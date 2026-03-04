@@ -79,7 +79,7 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
 async function validateAndCleanSocket(socketPath: string, config: OneAgentConfig): Promise<void> {
   // Verify socket path is under dataDir (canonical path containment)
   const realDataDir = fs.realpathSync(config.dataDir);
-  const resolvedSocket = path.resolve(socketPath);
+  const resolvedSocket = fs.existsSync(socketPath) ? fs.realpathSync(socketPath) : path.resolve(socketPath);
   if (!resolvedSocket.startsWith(realDataDir + path.sep) && resolvedSocket !== path.join(realDataDir, path.basename(resolvedSocket))) {
     throw new Error(`Socket path ${resolvedSocket} is not under dataDir ${realDataDir}`);
   }
@@ -426,20 +426,22 @@ export async function startDaemonServer(
   await new Promise<void>((resolve, reject) => {
     server.on('error', reject);
     if (transport.mode === 'uds') {
-      server.listen(transport.socketPath, () => {
+      const udsTransport = transport;
+      server.listen(udsTransport.socketPath, () => {
         // Set socket file permissions (owner-only) — fail-closed
         try {
-          fs.chmodSync(transport.socketPath!, 0o600);
+          fs.chmodSync(udsTransport.socketPath, 0o600);
         } catch (err) {
-          log.error({ err, socketPath: transport.socketPath }, 'Failed to set socket permissions — aborting (fail-closed)');
+          log.error({ err, socketPath: udsTransport.socketPath }, 'Failed to set socket permissions — aborting (fail-closed)');
           server.close();
-          reject(new Error(`Failed to set socket permissions on ${transport.socketPath}: ${err instanceof Error ? err.message : String(err)}`));
+          reject(new Error(`Failed to set socket permissions on ${udsTransport.socketPath}: ${err instanceof Error ? err.message : String(err)}`));
           return;
         }
         resolve();
       });
     } else {
-      server.listen(transport.port, '127.0.0.1', () => resolve());
+      const tcpTransport = transport;
+      server.listen(tcpTransport.port, '127.0.0.1', () => resolve());
     }
   });
 

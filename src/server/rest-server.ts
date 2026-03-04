@@ -9,6 +9,8 @@ import { SiteRepository } from '../storage/site-repository.js';
 import { ConfirmationManager } from './confirmation.js';
 import { createRouter, type RouterDeps, type RouterResult } from './router.js';
 import { buildOpenApiSpec } from './openapi-server.js';
+import { sanitizeSiteId } from '../core/utils.js';
+import { setupCdpSitePolicy, validateProxyConfig, validateGeoConfig } from './shared-validation.js';
 
 const log = getLogger();
 
@@ -28,6 +30,8 @@ const exploreBody = {
   required: ['url'],
   properties: {
     url: { type: 'string' },
+    proxy: { type: 'object' },
+    geo: { type: 'object' },
   },
 } as const;
 
@@ -70,11 +74,15 @@ function routerResultToReply(
   result: RouterResult,
   reply: { code: (c: number) => { send: (body: unknown) => void } },
 ): void {
-  const statusCode = result.statusCode ?? (result.success ? 200 : 500);
-  if (result.success || result.data) {
-    reply.code(statusCode).send(result.data);
+  if (result.success) {
+    reply.code(200).send(result.data);
   } else {
-    reply.code(statusCode).send({ error: result.error });
+    const statusCode = result.statusCode ?? 500;
+    if (result.data) {
+      reply.code(statusCode).send(result.data);
+    } else {
+      reply.code(statusCode).send({ error: result.error });
+    }
   }
 }
 
@@ -223,12 +231,26 @@ export async function createRestServer(options?: {
   );
 
   // ─── Explore / Record / Stop ─────────────────────────────
-  app.post<{ Body: { url: string } }>(
+  app.post<{ Body: { url: string; proxy?: Record<string, unknown>; geo?: Record<string, unknown> } }>(
     '/api/explore',
     { schema: { body: exploreBody } },
     async (request, reply) => {
-      const result = await router.explore(request.body.url);
-      routerResultToReply(result, reply);
+      try {
+        let proxy;
+        if (request.body.proxy) {
+          proxy = validateProxyConfig(request.body.proxy);
+        }
+        let geo;
+        if (request.body.geo) {
+          geo = validateGeoConfig(request.body.geo);
+        }
+        const overrides = proxy || geo ? { proxy, geo } : undefined;
+        const result = await router.explore(request.body.url, overrides);
+        routerResultToReply(result, reply);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send({ error: message });
+      }
     },
   );
 
@@ -245,6 +267,187 @@ export async function createRestServer(options?: {
     const result = await router.stopRecording();
     routerResultToReply(result, reply);
   });
+
+  // ─── Sessions ──────────────────────────────────────────
+  app.get('/api/sessions', async (_request, reply) => {
+    const multiSession = engine.getMultiSessionManager();
+    const sessions = multiSession.list().map(s => ({
+      name: s.name,
+      siteId: s.siteId,
+      isCdp: s.isCdp,
+      active: s.name === multiSession.getActive(),
+    }));
+    reply.code(200).send(sessions);
+  });
+
+  app.delete<{ Params: { name: string } }>(
+    '/api/sessions/:name',
+    async (request, reply) => {
+      const { name } = request.params;
+      const force = (request.query as Record<string, string>)?.force === 'true';
+      const multiSession = engine.getMultiSessionManager();
+      try {
+        const expectedId = name === 'default' && force
+          ? engine.getActiveSessionId()
+          : null;
+        await multiSession.close(name, { engineMode: engine.getStatus().mode, force });
+        if (name === 'default' && force) {
+          engine.resetExploreState(expectedId);
+        }
+        reply.code(200).send({ closed: name });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send({ error: message });
+      }
+    },
+  );
+
+  app.post<{ Params: { name: string } }>(
+    '/api/sessions/:name/switch',
+    async (request, reply) => {
+      const { name } = request.params;
+      const multiSession = engine.getMultiSessionManager();
+      try {
+        multiSession.setActive(name);
+        reply.code(200).send({ active: name });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send({ error: message });
+      }
+    },
+  );
+
+  // ─── CDP Connect ──────────────────────────────────────
+  app.post<{ Body: { name: string; port?: number; wsEndpoint?: string; host?: string; siteId?: string; domains?: string[]; autoDiscover?: boolean } }>(
+    '/api/cdp/connect',
+    async (request, reply) => {
+      const { name, port, wsEndpoint, host, siteId: userSiteId, domains: userDomains, autoDiscover } = request.body ?? {};
+      if (!name) {
+        reply.code(400).send({ error: 'name is required' });
+        return;
+      }
+      if (name === 'default') {
+        reply.code(400).send({ error: 'Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.' });
+        return;
+      }
+      // Validate domains before policy setup
+      if (userDomains !== undefined) {
+        if (!Array.isArray(userDomains)) {
+          reply.code(400).send({ error: 'domains must be an array' });
+          return;
+        }
+        if (!userDomains.every((d: unknown) => typeof d === 'string')) {
+          reply.code(400).send({ error: 'domains must be an array of strings' });
+          return;
+        }
+      }
+      try {
+        const siteId = sanitizeSiteId(userSiteId ?? `cdp-${name}`);
+        setupCdpSitePolicy(siteId, userDomains, config);
+
+        const multiSession = engine.getMultiSessionManager();
+        const session = await multiSession.connectCDP(
+          name, { port, wsEndpoint, host, autoDiscover: autoDiscover === true }, siteId,
+        );
+
+        const { getSitePolicy } = await import('../core/policy.js');
+        const policy = getSitePolicy(siteId, config);
+
+        reply.code(200).send({
+          session: name,
+          siteId: session.siteId,
+          status: 'connected',
+          domains: policy.domainAllowlist,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send({ error: message });
+      }
+    },
+  );
+
+  // ─── Confirm ──────────────────────────────────────────
+  app.post<{ Body: { confirmationToken: string; approve: boolean } }>(
+    '/api/confirm',
+    async (request, reply) => {
+      const { confirmationToken, approve } = request.body ?? {};
+      if (!confirmationToken || typeof approve !== 'boolean') {
+        reply.code(400).send({ error: 'confirmationToken and approve (boolean) are required' });
+        return;
+      }
+      const result = router.confirm(confirmationToken, approve);
+      routerResultToReply(result, reply);
+    },
+  );
+
+  // ─── Import Cookies ───────────────────────────────────
+  app.post<{ Body: { siteId: string; cookieFile: string } }>(
+    '/api/import-cookies',
+    async (request, reply) => {
+      const { siteId, cookieFile } = request.body ?? {};
+      if (!siteId || !cookieFile) {
+        reply.code(400).send({ error: 'siteId and cookieFile are required' });
+        return;
+      }
+      try {
+        const safeSiteId = sanitizeSiteId(siteId);
+        const browserManager = engine.getSessionManager().getBrowserManager();
+        const count = await browserManager.importCookies(safeSiteId, cookieFile);
+        reply.code(200).send({ imported: count, siteId: safeSiteId });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send({ error: message });
+      }
+    },
+  );
+
+  // ─── Skills (all) ─────────────────────────────────────
+  app.get<{ Querystring: { status?: string } }>(
+    '/api/skills',
+    async (request, reply) => {
+      const status = request.query.status;
+      let skills;
+      if (status) {
+        skills = skillRepo.getByStatus(status as import('../skill/types.js').SkillStatusName);
+      } else {
+        skills = skillRepo.getAll();
+      }
+      const summary = skills.map(s => ({
+        id: s.id,
+        name: s.name,
+        status: s.status,
+        siteId: s.siteId,
+        method: s.method,
+        pathTemplate: s.pathTemplate,
+        successRate: s.successRate,
+        currentTier: s.currentTier,
+      }));
+      reply.code(200).send(summary);
+    },
+  );
+
+  // ─── Execute by ID ────────────────────────────────────
+  app.post<{ Body: { skillId: string; params?: Record<string, unknown> } }>(
+    '/api/execute',
+    async (request, reply) => {
+      const { skillId, params } = request.body ?? {};
+      if (!skillId) {
+        reply.code(400).send({ error: 'skillId is required' });
+        return;
+      }
+      try {
+        const result = await engine.executeSkill(skillId, params ?? {});
+        if (result.success) {
+          reply.code(200).send(result);
+        } else {
+          reply.code(422).send(result);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(500).send({ error: message });
+      }
+    },
+  );
 
   // ─── OpenAPI Spec ────────────────────────────────────────
   app.get('/api/openapi.json', async (_request, reply) => {

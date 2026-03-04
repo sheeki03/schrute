@@ -14,17 +14,15 @@ import type {
   AuditEntry,
 } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
+import type { ContextOverrides } from '../browser/manager.js';
 
 const log = getLogger();
 
 // ─── Router Result Types ─────────────────────────────────────────
 
-export interface RouterResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
-  statusCode?: number;
-}
+export type RouterResult =
+  | { success: true; data: unknown }
+  | { success: false; error: string; statusCode?: number; data?: unknown };
 
 // ─── Router Dependencies ─────────────────────────────────────────
 
@@ -110,6 +108,7 @@ export function createRouter(deps: RouterDeps) {
 
         return {
           success: false,
+          error: 'Confirmation required',
           statusCode: 202,
           data: {
             status: 'confirmation_required',
@@ -125,11 +124,10 @@ export function createRouter(deps: RouterDeps) {
       }
 
       const result = await engine.executeSkill(skill.id, params);
-      return {
-        success: result.success,
-        data: result,
-        error: result.error,
-      };
+      if (result.success) {
+        return { success: true, data: result };
+      }
+      return { success: false, error: result.error ?? 'Skill execution failed', data: result };
     },
 
     // ─── Dry Run ───────────────────────────────────────────
@@ -178,13 +176,16 @@ export function createRouter(deps: RouterDeps) {
       }
 
       const result = await validateSkill(skill, params);
-      return { success: result.success, data: result };
+      if (result.success) {
+        return { success: true, data: result };
+      }
+      return { success: false, error: 'Validation failed', data: result };
     },
 
     // ─── Explore / Record / Stop ───────────────────────────
-    async explore(url: string): Promise<RouterResult> {
+    async explore(url: string, overrides?: ContextOverrides): Promise<RouterResult> {
       try {
-        const result = await engine.explore(url);
+        const result = await engine.explore(url, overrides);
         return { success: true, data: result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

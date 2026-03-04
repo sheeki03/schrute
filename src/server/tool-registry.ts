@@ -69,10 +69,26 @@ export function skillToToolName(skill: SkillSpec): string {
   return name;
 }
 
+function buildAutoDescription(skill: SkillSpec): string {
+  const parts: string[] = [];
+  parts.push(`${skill.method} ${skill.pathTemplate}`);
+  if (skill.authType) parts.push(`(auth: ${skill.authType})`);
+  parts.push(`[${skill.sideEffectClass}]`);
+
+  const userInputParams = skill.parameters
+    .filter(p => p.source === 'user_input')
+    .map(p => p.name);
+  if (userInputParams.length > 0) {
+    parts.push(`Inputs: ${userInputParams.join(', ')}`);
+  }
+
+  return parts.join(' — ');
+}
+
 export function skillToToolDefinition(skill: SkillSpec) {
   return {
     name: skillToToolName(skill),
-    description: skill.description ?? `${skill.method} ${skill.pathTemplate}`,
+    description: skill.description ?? buildAutoDescription(skill),
     inputSchema: {
       type: 'object' as const,
       properties: Object.fromEntries(
@@ -98,6 +114,34 @@ export const META_TOOLS = [
       type: 'object' as const,
       properties: {
         url: { type: 'string', description: 'URL to navigate to' },
+        proxy: {
+          type: 'object',
+          description: 'Proxy for this session (e.g. { "server": "socks5://proxy:1080" })',
+          properties: {
+            server: { type: 'string' },
+            bypass: { type: 'string' },
+            username: { type: 'string' },
+            password: { type: 'string' },
+          },
+          required: ['server'],
+        },
+        geo: {
+          type: 'object',
+          description: 'Geolocation/locale/timezone for this session',
+          properties: {
+            geolocation: {
+              type: 'object',
+              properties: {
+                latitude: { type: 'number' },
+                longitude: { type: 'number' },
+                accuracy: { type: 'number' },
+              },
+              required: ['latitude', 'longitude'],
+            },
+            timezoneId: { type: 'string' },
+            locale: { type: 'string' },
+          },
+        },
       },
       required: ['url'],
     },
@@ -186,6 +230,127 @@ export const META_TOOLS = [
       required: ['confirmationToken', 'approve'],
     },
   },
+  {
+    name: 'oneagent_connect_cdp',
+    description: 'Connect to an Electron app or existing browser via Chrome DevTools Protocol. Domains are host-only (port-agnostic).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Session name (cannot be "default")' },
+        port: { type: 'number', description: 'CDP debugging port (1024-65535)' },
+        wsEndpoint: { type: 'string', description: 'WebSocket endpoint URL (alternative to port)' },
+        host: { type: 'string', description: 'Host address (default: 127.0.0.1)' },
+        siteId: { type: 'string', description: 'Optional site ID for policy' },
+        domains: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Additional domains to allowlist',
+        },
+        autoDiscover: {
+          type: 'boolean',
+          description: 'Scan common CDP ports if no port/wsEndpoint given',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'oneagent_sessions',
+    description: 'List all named browser sessions',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  {
+    name: 'oneagent_close_session',
+    description: 'Close a named browser session',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Session name to close' },
+        force: { type: 'boolean', description: 'Force close during exploring mode (blocked during recording to protect HAR capture)' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'oneagent_switch_session',
+    description: 'Switch active browser session for tool routing',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Session name to activate' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'oneagent_import_cookies',
+    description: 'Import cookies from a Netscape/Mozilla cookie file into a browser context',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        siteId: { type: 'string', description: 'Site ID for the browser context' },
+        cookieFile: { type: 'string', description: 'Path to Netscape cookie file' },
+      },
+      required: ['siteId', 'cookieFile'],
+    },
+  },
+  {
+    name: 'oneagent_execute',
+    description: 'Execute any skill by ID (cross-site)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to execute' },
+        params: { type: 'object', description: 'Parameters for the skill', additionalProperties: true },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'oneagent_activate',
+    description: 'Manually activate a DRAFT skill (first execution still requires confirmation)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to activate' },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'oneagent_doctor',
+    description: 'Run diagnostic checks on browser engine, config, database, etc.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  {
+    name: 'oneagent_export_cookies',
+    description: 'Export cookies from a browser context',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        siteId: { type: 'string', description: 'Site ID for the browser context' },
+      },
+      required: ['siteId'],
+    },
+  },
+  {
+    name: 'oneagent_webmcp_call',
+    description: 'Call a WebMCP tool discovered on the current site. Use oneagent_status to see available tools.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        toolName: { type: 'string', description: 'Name of the WebMCP tool to call' },
+        args: { type: 'object', description: 'Arguments to pass to the tool', default: {} },
+      },
+      required: ['toolName'],
+    },
+  },
 ] as const;
 
 // ─── Browser Tool Proxy Definition ───────────────────────────────
@@ -236,6 +401,69 @@ export function getBrowserToolDefinitions() {
             },
           },
           required: ['actions'] as const,
+        },
+      };
+    }
+
+    // Special-case: explicit schema for browser_snapshot
+    if (name === 'browser_snapshot') {
+      return {
+        name,
+        description:
+          'Capture accessibility snapshot of the page. Use maxChars/offset for large page pagination.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            selector: { type: 'string' as const, description: 'CSS selector to scope snapshot' },
+            interactiveOnly: { type: 'boolean' as const, description: 'Only return interactive elements' },
+            maxChars: { type: 'number' as const, minimum: 0, description: 'Max characters to return (0 = no pagination)' },
+            offset: { type: 'number' as const, minimum: 0, description: 'Character offset for pagination' },
+          },
+        },
+      };
+    }
+
+    // Special-case: explicit schema for browser_snapshot_with_screenshot
+    if (name === 'browser_snapshot_with_screenshot') {
+      return {
+        name,
+        description:
+          'Capture accessibility snapshot + screenshot in one call. Returns snapshot content and screenshot (base64 PNG string or null on failure). ' +
+          'Output fields: screenshot (string|null), screenshotError (string, present when screenshot fails).',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            selector: { type: 'string' as const, description: 'CSS selector to scope snapshot' },
+            interactiveOnly: { type: 'boolean' as const, description: 'Only return interactive elements' },
+          },
+        },
+      };
+    }
+
+    // Special-case: explicit schema for browser_take_screenshot
+    if (name === 'browser_take_screenshot') {
+      return {
+        name,
+        description: 'Take a screenshot of the current page or a specific element',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            ref: { type: 'string' as const, description: 'Element ref to screenshot (optional, screenshots full page if omitted)' },
+            format: { type: 'string' as const, enum: ['jpeg', 'png'], description: 'Image format (default: jpeg)' },
+            quality: { type: 'number' as const, minimum: 1, maximum: 100, description: 'JPEG quality 1-100 (default: 80, ignored for PNG)' },
+          },
+        },
+      };
+    }
+
+    // Special-case: clarify browser_close description
+    if (name === 'browser_close') {
+      return {
+        name,
+        description: 'Close the current browser page (NOT the session — use oneagent_close_session for that)',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {},
         },
       };
     }

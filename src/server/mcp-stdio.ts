@@ -14,6 +14,7 @@ import type { OneAgentConfig } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
 import { buildToolList, dispatchToolCall } from './tool-dispatch.js';
 import { registerResourceHandlers, registerPromptHandlers } from './mcp-handlers.js';
+import { drainMcpNotifications } from '../healing/notification.js';
 
 const log = getLogger();
 
@@ -102,6 +103,12 @@ export async function startMcpServer(deps: McpStdioDeps): Promise<{ close: () =>
         log.info('Tool list changed, notified client');
       }
       consecutivePollFailures = 0; // reset on success
+
+      // B4: Drain pending MCP notifications from healing system
+      const pendingNotifications = drainMcpNotifications();
+      for (const notification of pendingNotifications) {
+        await server.notification(notification);
+      }
     } catch (err) {
       consecutivePollFailures++;
       if (consecutivePollFailures >= 3) {

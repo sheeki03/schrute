@@ -34,63 +34,39 @@ export interface McpHttpDeps {
 export async function startMcpHttpServer(
   deps: McpHttpDeps,
   options?: { host?: string; port?: number },
-): Promise<{ close: () => Promise<void> }> {
+): Promise<{ close: () => Promise<void>; address: () => { host: string; port: number } | null }> {
   const { config } = deps;
 
-  // Require explicit opt-in
   if (!config.server.network) {
-    throw new Error(
-      'MCP HTTP transport is disabled. Set config.server.network = true to enable.',
-    );
+    throw new Error('MCP HTTP transport is disabled. Set config.server.network = true to enable.');
   }
-
-  // Require auth token for HTTP transport
   if (!config.server.authToken) {
-    throw new Error(
-      'MCP HTTP transport requires config.server.authToken. ' +
-      'Set it with: oneagent config set server.authToken <your-secret-token>',
-    );
+    throw new Error('MCP HTTP transport requires config.server.authToken.');
   }
 
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3001;
 
-  // Track active transports per session
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  const sessionServers = new Map<string, Server>();
+  let isShuttingDown = false;
 
-  const mcpServer = new Server(
-    {
-      name: 'oneagent',
-      version: VERSION,
-    },
-    {
-      capabilities: {
-        tools: {},
-        resources: {},
-        prompts: {},
-      },
-    },
-  );
+  // Helper: register all MCP handlers on a server instance
+  function registerAllHandlers(server: Server): void {
+    registerResourceHandlers(server, deps);
+    registerPromptHandlers(server, deps);
 
-  // ─── Resource & Prompt Handlers ─────────────────────────
-  // Resource/prompt handlers run within authenticated MCP sessions.
-  // Auth was enforced at the HTTP request level before reaching MCP transport.
-  registerResourceHandlers(mcpServer, deps);
-  registerPromptHandlers(mcpServer, deps);
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools = buildToolList(deps);
+      return { tools };
+    });
 
-  // ─── List Tools Handler ─────────────────────────────────
-  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = buildToolList(deps);
-    return { tools };
-  });
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      return dispatchToolCall(name, args as Record<string, unknown> | undefined, deps);
+    });
+  }
 
-  // ─── Call Tool Handler ──────────────────────────────────
-  mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    return dispatchToolCall(name, args as Record<string, unknown> | undefined, deps);
-  });
-
-  // ─── HTTP Server ────────────────────────────────────────
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     handleMcpRequest(req, res).catch((err) => {
       log.error({ err }, 'Unhandled MCP HTTP request error');
@@ -104,45 +80,43 @@ export async function startMcpHttpServer(
   async function handleMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = req.url ?? '/';
 
-    // Auth policy: /mcp paths require Bearer auth (fail-closed: missing/invalid → 401).
-    // Non-/mcp paths return 404 (no auth check — path doesn't exist, nothing to protect).
-    // This is intentional: 401 on unknown paths leaks server existence.
     if (!url.startsWith('/mcp')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found. MCP endpoint is at /mcp' }));
       return;
     }
 
-    // ─── Authentication ─────────────────────────────────────
+    // Gate 1: Early rejection at request entry
+    if (isShuttingDown) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Server is shutting down' }));
+      return;
+    }
+
+    // Authentication
     const authToken = config.server.authToken;
     if (authToken) {
       if (!verifyBearerToken(req, authToken)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unauthorized. Provide Authorization: Bearer <token>' }));
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
       }
     } else if (config.server.network) {
-      // Network mode without auth token = reject
-      log.error('MCP HTTP server requires config.server.authToken when network=true');
       res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Server misconfigured: auth token required for network mode' }));
+      res.end(JSON.stringify({ error: 'Server misconfigured: auth token required' }));
       return;
     }
-    // ────────────────────────────────────────────────────────
 
-    // Read the body for POST requests (capped at 1MB)
+    // Read body for POST
     let body: string | undefined;
     if (req.method === 'POST') {
-      const MAX_BODY = 1024 * 1024; // 1MB
+      const MAX_BODY = 1024 * 1024;
       const chunks: Buffer[] = [];
       let size = 0;
       let overflow = false;
       for await (const chunk of req) {
         size += (chunk as Buffer).length;
-        if (size > MAX_BODY) {
-          overflow = true;
-          break;
-        }
+        if (size > MAX_BODY) { overflow = true; break; }
         chunks.push(chunk as Buffer);
       }
       if (overflow) {
@@ -153,14 +127,23 @@ export async function startMcpHttpServer(
       body = Buffer.concat(chunks).toString('utf-8');
     }
 
-    // Get or create transport for this session
+    // Get or create transport for session
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId)!;
     } else if (req.method === 'POST' && !sessionId) {
-      // New session - create transport
+      // Gate 2: Before creating new transport/session server
+      // This catches in-flight requests that entered before shutdown
+      // but reach session creation after isShuttingDown is set
+      if (isShuttingDown) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server is shutting down' }));
+        return;
+      }
+
+      // Create new transport
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
       });
@@ -168,22 +151,63 @@ export async function startMcpHttpServer(
       transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid) {
+          if (!isShuttingDown) {
+            // Normal close: this callback owns server cleanup
+            sessionServers.get(sid)?.close().catch(e => log.warn({ e }, 'Session server close error in onclose'));
+            sessionServers.delete(sid);
+          }
+          // During shutdown: leave sessionServers intact (shutdown phase 2 owns server close)
           transports.delete(sid);
           log.debug({ sessionId: sid }, 'MCP HTTP session closed');
         }
       };
 
-      await mcpServer.connect(transport);
+      // Create per-session server
+      const sessionServer = new Server(
+        { name: 'oneagent', version: VERSION },
+        { capabilities: { tools: {}, resources: {}, prompts: {} } },
+      );
+      registerAllHandlers(sessionServer);
+      await sessionServer.connect(transport);
 
-      if (transport.sessionId) {
-        transports.set(transport.sessionId, transport);
+      // Gate 3: Re-check after connect() — close() may have snapshotted serversToClose
+      // between Gate 2 and here, so this late session would be outside the shutdown snapshot.
+      if (isShuttingDown) {
+        await sessionServer.close().catch(e => log.warn({ e }, 'Late session server close'));
+        await transport.close().catch(e => log.warn({ e }, 'Late transport close'));
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Server is shutting down' }));
+        return;
       }
 
-      log.info({ sessionId: transport.sessionId }, 'New MCP HTTP session');
+      // Note: transport.sessionId is NOT set yet — it gets set during handleRequest()
+      // when the initialize request is processed. We register after handleRequest() below.
+
+      log.info('New MCP HTTP session (pending initialization)');
+
+      // Parse body before handleRequest
+      let parsedBody: unknown;
+      if (body) {
+        try { parsedBody = JSON.parse(body); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          return;
+        }
+      }
+
+      await transport.handleRequest(req, res, parsedBody);
+
+      // NOW sessionId is set — register the transport and server
+      if (transport.sessionId) {
+        transports.set(transport.sessionId, transport);
+        sessionServers.set(transport.sessionId, sessionServer);
+        log.info({ sessionId: transport.sessionId }, 'MCP HTTP session registered');
+      }
+      return;
     } else if (sessionId && !transports.has(sessionId)) {
-      // Client provided an unknown session ID — reject
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session not found. Start a new session with a POST without session ID.' }));
+      res.end(JSON.stringify({ error: 'Session not found' }));
       return;
     } else {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -191,14 +215,13 @@ export async function startMcpHttpServer(
       return;
     }
 
-    // Delegate to the transport
+    // Parse and delegate (for existing sessions)
     let parsedBody: unknown;
     if (body) {
-      try {
-        parsedBody = JSON.parse(body);
-      } catch {
+      try { parsedBody = JSON.parse(body); }
+      catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON in request body' }));
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
         return;
       }
     }
@@ -210,17 +233,32 @@ export async function startMcpHttpServer(
       log.info({ host, port }, 'MCP HTTP server listening');
 
       resolve({
+        address() {
+          const addr = httpServer.address();
+          if (addr && typeof addr === 'object') return { host: addr.address, port: addr.port };
+          return null;
+        },
         async close() {
-          // Close all transports
-          for (const [, transport] of transports) {
-            await transport.close();
-          }
+          isShuttingDown = true;
+
+          // Phase 1: Close transports (frees active connections)
+          const serversToClose = [...sessionServers.values()];
+          await Promise.allSettled(
+            [...transports.values()].map(t => t.close().catch(e => log.warn({ e }, 'Transport close error')))
+          );
           transports.clear();
-          await mcpServer.close();
-          await new Promise<void>((resolveClose) => {
-            httpServer.close(() => resolveClose());
+
+          // Phase 2: Close all session servers (sole owner — onclose skipped during shutdown)
+          await Promise.allSettled(
+            serversToClose.map(s => s.close().catch(e => log.warn({ e }, 'Session server close error')))
+          );
+          sessionServers.clear();
+
+          // Phase 3: Close HTTP server last
+          await new Promise<void>((resolveClose, reject) => {
+            httpServer.close((err) => (err ? reject(err) : resolveClose()));
           });
-          // Engine is shared — caller manages its lifecycle
+
           log.info('MCP HTTP server closed');
         },
       });

@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -6,6 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { getLogger } from '../core/logger.js';
+import { getSkillsDir } from '../core/config.js';
 import type { ToolDispatchDeps } from './tool-dispatch.js';
 import type { SkillSpec } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
@@ -101,6 +104,46 @@ function truncateList<T>(items: T[]): TruncatedList<T> {
   };
 }
 
+// ─── Skill Doc Resource Discovery ────────────────────────────────────
+
+function listSkillDocResources(deps: ToolDispatchDeps): Array<{
+  uri: string;
+  name: string;
+  mimeType: string;
+  description: string;
+}> {
+  const resources: Array<{ uri: string; name: string; mimeType: string; description: string }> = [];
+  try {
+    const skillsDir = getSkillsDir(deps.config);
+    if (!fs.existsSync(skillsDir)) return resources;
+
+    for (const siteId of fs.readdirSync(skillsDir)) {
+      const siteDir = path.join(skillsDir, siteId);
+      if (!fs.statSync(siteDir).isDirectory()) continue;
+
+      for (const skillId of fs.readdirSync(siteDir)) {
+        const skillDir = path.join(siteDir, skillId);
+        if (!fs.statSync(skillDir).isDirectory()) continue;
+
+        // Only list if references or templates exist
+        const hasRefs = fs.existsSync(path.join(skillDir, 'references'));
+        const hasTmpls = fs.existsSync(path.join(skillDir, 'templates'));
+        if (hasRefs || hasTmpls) {
+          resources.push({
+            uri: `oneagent://sites/${siteId}/skills/${skillId}/docs`,
+            name: `Skill Docs: ${skillId}`,
+            mimeType: 'application/json',
+            description: `API references and templates for skill ${skillId} on site ${siteId}`,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    log.warn({ err }, 'Failed to list skill doc resources');
+  }
+  return resources;
+}
+
 // ─── Resources ──────────────────────────────────────────────────────
 
 export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps): void {
@@ -125,6 +168,8 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
           mimeType: 'application/json',
           description: 'Sites with visit history',
         },
+        // Dynamic skill doc resources are listed per-skill below
+        ...listSkillDocResources(deps),
       ],
     };
   });
@@ -192,7 +237,56 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
           };
         }
 
-        default:
+        default: {
+          // Check for skill docs URI: oneagent://sites/{siteId}/skills/{skillId}/docs
+          const docsMatch = uri.match(/^oneagent:\/\/sites\/([^/]+)\/skills\/([^/]+)\/docs$/);
+          if (docsMatch) {
+            const [, siteId, skillId] = docsMatch;
+
+            // Prevent path traversal
+            if (/[/\\]|\.\./.test(siteId) || /[/\\]|\.\./.test(skillId)) {
+              return { contents: [{ uri, text: 'Invalid siteId or skillId', mimeType: 'text/plain' }] };
+            }
+            const skillDir = path.join(getSkillsDir(deps.config), siteId, skillId);
+            const resolved = path.resolve(skillDir);
+            const skillsRoot = path.resolve(getSkillsDir(deps.config));
+            if (!resolved.startsWith(skillsRoot + path.sep)) {
+              return { contents: [{ uri, text: 'Invalid path', mimeType: 'text/plain' }] };
+            }
+
+            if (!fs.existsSync(skillDir)) {
+              return {
+                contents: [{
+                  uri,
+                  mimeType: 'text/plain',
+                  text: `Error: Skill docs not found for site '${siteId}', skill '${skillId}'`,
+                }],
+              };
+            }
+
+            const result: Record<string, Record<string, string>> = { references: {}, templates: {} };
+
+            for (const subdir of ['references', 'templates'] as const) {
+              const dirPath = path.join(skillDir, subdir);
+              if (fs.existsSync(dirPath)) {
+                for (const file of fs.readdirSync(dirPath)) {
+                  const filePath = path.join(dirPath, file);
+                  if (fs.statSync(filePath).isFile()) {
+                    result[subdir][file] = fs.readFileSync(filePath, 'utf-8');
+                  }
+                }
+              }
+            }
+
+            return {
+              contents: [{
+                uri,
+                mimeType: 'application/json',
+                text: JSON.stringify(result, null, 2),
+              }],
+            };
+          }
+
           return {
             contents: [
               {
@@ -202,6 +296,7 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
               },
             ],
           };
+        }
       }
     } catch (err) {
       // Log server-side for diagnostics before converting to client-safe text
