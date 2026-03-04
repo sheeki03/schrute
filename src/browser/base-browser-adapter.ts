@@ -1,10 +1,12 @@
-import type { Page, Request, Response as PwResponse, Dialog, FileChooser, Frame } from 'playwright';
+import type { Page, Request, Response as PwResponse, Dialog, FileChooser, Frame, Locator } from 'playwright';
 import type {
   BrowserProvider,
   PageSnapshot,
   NetworkEntry,
   SealedFetchRequest,
   SealedFetchResponse,
+  SealedModelContextRequest,
+  SealedModelContextResponse,
   SnapshotEvent,
 } from '../skill/types.js';
 import {
@@ -24,6 +26,7 @@ import {
   renderDiff,
   resolveRef,
   buildCssFallback,
+  cssEscapeAttr,
   jaccardSimilarity,
   filterTree,
   StaleRefError,
@@ -34,10 +37,71 @@ import {
   MODAL_CLEARING_TOOLS,
   raceAgainstModals,
 } from './modal-state.js';
-import { resizeScreenshotBuffer } from './screenshot-resize.js';
+import { resizeScreenshotBuffer, estimateScale, DEFAULT_MAX_DIMENSION, DEFAULT_MAX_PIXELS } from './screenshot-resize.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
+
+// Browser-context globals used in page.evaluate/waitForFunction callbacks.
+// These run in the browser, not Node — declared here to satisfy TypeScript.
+declare const document: { querySelector(sel: string): unknown; title: string };
+
+/**
+ * Detect Cloudflare challenge pages (JS challenges, Turnstile, interstitials)
+ * and wait for them to resolve. Returns true if a challenge was detected.
+ */
+export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): Promise<boolean> {
+  const indicators = [
+    '#challenge-running',
+    '#challenge-spinner',
+    '#cf-please-wait',
+    '#turnstile-wrapper',
+    '#cf-challenge-running',
+  ];
+
+  let challengeElements: boolean;
+  let title: string;
+  try {
+    [challengeElements, title] = await Promise.all([
+      page.evaluate((selectors: string[]) => {
+        return selectors.some(sel => document.querySelector(sel) !== null);
+      }, indicators),
+      page.title(),
+    ]);
+  } catch {
+    // Page context destroyed or closed — safe to return false
+    return false;
+  }
+
+  const titleMatch = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
+
+  if (!challengeElements && !titleMatch) return false;
+
+  log.info('Cloudflare challenge detected, waiting for resolution...');
+  const deadline = Date.now() + timeoutMs;
+  try {
+    await page.waitForFunction(
+      (ctx: { selectors: string[]; origTitle: string; hadSelectors: boolean }) => {
+        const noSelectors = !ctx.selectors.some(sel => document.querySelector(sel));
+        if (ctx.hadSelectors) {
+          return noSelectors;
+        }
+        return document.title !== ctx.origTitle;
+      },
+      { selectors: indicators, origTitle: title, hadSelectors: challengeElements },
+      { timeout: timeoutMs },
+    );
+    const remaining = deadline - Date.now();
+    if (remaining > 500) {
+      await page.waitForLoadState('domcontentloaded', { timeout: remaining });
+    }
+    log.info('Cloudflare challenge resolved');
+    return true;
+  } catch {
+    log.warn('Cloudflare challenge did not resolve within timeout');
+    return false;
+  }
+}
 
 type AllowedTool = (typeof ALLOWED_BROWSER_TOOLS)[number];
 
@@ -69,6 +133,8 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   // @ref system state
   private refState: RefState;
   private currentSnapshot: AnnotatedSnapshot | null = null;
+  private snapshotStale = false;
+  private navEpoch = 0;
 
   // Modal state tracking
   protected modalTracker: ModalStateTracker;
@@ -82,6 +148,13 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   // Frame map for locator resolution (framePath → Frame)
   private frameMap = new Map<string, Frame>();
 
+  // Persistent console log buffer
+  private consoleLog: Array<{ level: string; text: string; timestamp: number }> = [];
+  private static readonly MAX_CONSOLE_LOG = 100;
+
+  // Configurable handler timeout (applied to individual Playwright actions)
+  protected handlerTimeoutMs: number;
+
   constructor(
     page: Page,
     domainAllowlist: string[],
@@ -89,6 +162,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       flags?: BrowserFeatureFlags;
       benchmark?: BrowserBenchmark;
       capabilities?: EngineCapabilities;
+      handlerTimeoutMs?: number;
     },
   ) {
     this.page = page;
@@ -106,9 +180,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     this.flags = options?.flags ?? DEFAULT_FLAGS;
     this.benchmark = options?.benchmark ?? null;
     this.capabilities = options?.capabilities ?? null;
+    this.handlerTimeoutMs = options?.handlerTimeoutMs ?? 30_000;
     this.refState = createRefState();
     this.modalTracker = new ModalStateTracker();
 
+    // Network capture is set up in constructor — ensures listener is active before first navigation
     this.setupNetworkCapture();
     this.setupRecentEventListeners();
 
@@ -116,11 +192,14 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       this.setupModalListeners();
     }
 
-    // Reset refs on main-frame navigation
+    // Reset refs on main-frame navigation (preserve hashToRef for stale ref recovery)
     this.page.on('framenavigated', (frame: Frame) => {
-      if (frame === this.page.mainFrame()) {
-        this.refState = createRefState();
-        this.currentSnapshot = null;
+      const isMain = frame === this.page.mainFrame();
+      if (isMain) log.debug({ url: frame.url(), navEpoch: this.navEpoch }, 'framenavigated: main frame');
+      if (isMain) {
+        this.refState = createRefState(this.pruneHashToRef());
+        this.snapshotStale = true;
+        this.navEpoch++;
       }
       // Clear dialog modals on any navigation
       if (this.flags.modalTracking) {
@@ -298,7 +377,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     let mainYaml = '';
     try {
       const locator = selector ? this.page.locator(selector) : this.page.locator('body');
-      mainYaml = await locator.ariaSnapshot();
+      mainYaml = await locator.ariaSnapshot({ timeout: this.handlerTimeoutMs });
     } catch (err) {
       log.debug({ err }, 'ariaSnapshot failed, falling back to innerText');
       try {
@@ -377,20 +456,151 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   }
 
   /**
+   * Prune hashToRef map to prevent unbounded growth.
+   * Tier 1: Keep only visible refs if full-page snapshot available.
+   * Tier 2: LRU eviction (keep last 5000 by Map insertion order).
+   */
+  private pruneHashToRef(): Map<string, string> {
+    const map = this.refState.hashToRef;
+    if (map.size <= 5000) return new Map(map);
+
+    // Tier 1: If full-page snapshot available (not filtered/partial), keep only visible refs
+    if (this.currentSnapshot && !this.currentSnapshot.wasFiltered) {
+      const visibleRefs = new Set(this.currentSnapshot.refs.keys());
+      const pruned = new Map<string, string>();
+      for (const [hash, ref] of map) {
+        if (visibleRefs.has(ref)) pruned.set(hash, ref);
+      }
+      if (pruned.size > 5000) {
+        const entries = [...pruned.entries()];
+        return new Map(entries.slice(entries.length - 5000));
+      }
+      return pruned;
+    }
+
+    // Tier 2: No reliable snapshot — LRU eviction (keep last 5000 by Map insertion order)
+    const entries = [...map.entries()];
+    return new Map(entries.slice(entries.length - 5000));
+  }
+
+  /**
    * Resolve a ref string to a Playwright locator.
    * @ref refs use the ref system; legacy refs fall back to data-ref/aria-label.
+   *
+   * Always attempts resolution from current snapshot first.
+   * When stale, verifies identity via fresh snapshot before returning.
    */
   private async resolveRefToLocator(ref: string) {
     if (ref.startsWith('@e')) {
+      // Branch on stale BEFORE buildLocator — stale frame map can throw before recovery
+      if (this.snapshotStale) {
+        return this.resolveStaleRef(ref);
+      }
+
+      // Happy path: not stale, resolve and build directly
       const entry = resolveRef(ref, this.currentSnapshot ?? undefined);
-      const locator = this.buildLocator(entry);
+      const locator = await this.buildLocator(entry);
       this.benchmark?.recordStaleRef(true);
       return locator;
     }
     // Legacy fallback
     return this.page.locator(
-      `[data-ref="${ref}"], [aria-label="${ref}"]`,
+      `[data-ref="${cssEscapeAttr(ref)}"], [aria-label="${cssEscapeAttr(ref)}"]`,
     ).first();
+  }
+
+  /**
+   * Resolve a ref when snapshot is stale.
+   * Takes a fresh snapshot first, then validates identity from old → new,
+   * and builds locator from the NEW snapshot/frame map only.
+   */
+  private async resolveStaleRef(ref: string) {
+    // Grab old entry for identity verification (may be undefined if snapshot was nulled)
+    const oldSnapshot = this.currentSnapshot;
+    const oldEntry = oldSnapshot?.refs.get(ref);
+
+    // Take fresh snapshot — this rebuilds frame map, currentSnapshot, resets snapshotStale
+    const epochBefore = this.navEpoch;
+    await this.snapshot();
+    const newSnapshot = this.currentSnapshot;
+
+    // Navigation happened during fresh snapshot — fail closed
+    if (this.navEpoch !== epochBefore) {
+      throw new StaleRefError(ref, newSnapshot?.version ?? 0);
+    }
+
+    if (!newSnapshot) {
+      throw new StaleRefError(ref, 0);
+    }
+
+    // Filtered snapshots can't be trusted for identity verification
+    if (newSnapshot.wasFiltered) {
+      throw new StaleRefError(ref, newSnapshot.version);
+    }
+
+    const newEntry = newSnapshot.refs.get(ref);
+    if (!newEntry) {
+      throw new StaleRefError(ref, newSnapshot.version);
+    }
+
+    // If old snapshot was filtered, we can't trust old hash counts — fail closed
+    if (oldSnapshot?.wasFiltered) {
+      throw new StaleRefError(ref, newSnapshot.version);
+    }
+
+    // If we had an old entry, verify identity continuity
+    if (oldEntry) {
+      const oldHash = oldEntry.identityHash;
+      const newHash = newEntry.identityHash;
+
+      if (!oldHash || !newHash || oldHash !== newHash) {
+        throw new StaleRefError(ref, newSnapshot.version);
+      }
+
+      // Check ordinal stability for ambiguous (duplicate) elements
+      if (oldSnapshot?.identityHashCounts && newSnapshot.identityHashCounts) {
+        const oldCount = oldSnapshot.identityHashCounts.get(oldHash) ?? 0;
+        const newCount = newSnapshot.identityHashCounts.get(newHash) ?? 0;
+
+        if (oldCount !== newCount) {
+          // Element population changed — ordinals may have shifted
+          throw new StaleRefError(ref, newSnapshot.version);
+        }
+
+        if (oldCount > 1 && oldEntry.ordinal !== newEntry.ordinal) {
+          throw new StaleRefError(ref, newSnapshot.version);
+        }
+      }
+    }
+    // If no old entry (snapshot was nulled), we trust the fresh snapshot —
+    // the ref exists in the new snapshot with a valid frame map.
+
+    // Build locator from NEW entry + NEW frame map
+    const locator = await this.buildLocator(newEntry);
+    const count = await locator.count();
+    if (count !== 1) {
+      throw new StaleRefError(ref, newSnapshot.version);
+    }
+
+    // Final nav guard
+    if (this.navEpoch !== epochBefore) {
+      throw new StaleRefError(ref, newSnapshot.version);
+    }
+
+    this.benchmark?.recordStaleRef(true);
+    return locator;
+  }
+
+  /**
+   * Resolve a ref and execute an action, guarding against navigation between resolve and action.
+   */
+  private async withRefLocator<T>(ref: string, action: (locator: Locator) => Promise<T>): Promise<T> {
+    const epochBefore = this.navEpoch;
+    const locator = await this.resolveRefToLocator(ref);
+    if (this.navEpoch !== epochBefore) {
+      throw new StaleRefError(ref, this.currentSnapshot?.version ?? 0);
+    }
+    return action(locator);
   }
 
   /**
@@ -428,7 +638,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     switch (toolName) {
       case 'browser_navigate':
         if (typeof args.url !== 'string') throw new Error('Expected url to be a string');
-        await this.navigate(args.url);
+        await this.navigate(args.url, { timeout: this.handlerTimeoutMs });
         return { success: true };
       case 'browser_navigate_back':
         return this.withModalRace(async () => { await this.page.goBack(); });
@@ -438,43 +648,78 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
         if (typeof args.interactiveOnly === 'boolean') options.interactiveOnly = args.interactiveOnly;
         if (typeof args.maxDepth === 'number') options.maxDepth = args.maxDepth;
         if (typeof args.compact === 'boolean') options.compact = args.compact;
+        if (typeof args.maxChars === 'number') options.maxChars = args.maxChars;
+        if (typeof args.offset === 'number') options.offset = args.offset;
         return this.snapshot(Object.keys(options).length > 0 ? options : undefined);
+      }
+      case 'browser_snapshot_with_screenshot': {
+        const options: SnapshotOptions = {};
+        if (typeof args.selector === 'string') options.selector = args.selector;
+        if (typeof args.interactiveOnly === 'boolean') options.interactiveOnly = args.interactiveOnly;
+        return this.snapshotWithScreenshot(options);
       }
       case 'browser_click': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
-        const loc = await this.resolveRefToLocator(args.ref);
-        return this.withModalRace(async () => { await loc.click({ timeout: 10000 }); });
+        return this.withRefLocator(args.ref, (loc) =>
+          this.withModalRace(async () => { await loc.click({ timeout: this.handlerTimeoutMs }); }));
       }
       case 'browser_type': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
         if (typeof args.text !== 'string') throw new Error('Expected text to be a string');
-        const loc = await this.resolveRefToLocator(args.ref);
-        return this.withModalRace(async () => { await loc.fill(args.text as string); });
+        return this.withRefLocator(args.ref, (loc) =>
+          this.withModalRace(async () => { await loc.fill(args.text as string, { timeout: this.handlerTimeoutMs }); }));
       }
       case 'browser_take_screenshot': {
-        if (args.ref && typeof args.ref === 'string') {
-          const locator = await this.resolveRefToLocator(args.ref);
-          const buf = await locator.screenshot();
-          if (this.flags.screenshotResize) {
-            return resizeScreenshotBuffer(buf).buffer;
+        const rawFormat = args?.format as string | undefined;
+        const format = rawFormat ? (['jpeg', 'png'].includes(rawFormat) ? rawFormat as 'jpeg' | 'png' : undefined) : undefined;
+        if (rawFormat && !format) throw new Error(`Invalid format '${rawFormat}'. Must be 'jpeg' or 'png'.`);
+
+        let quality: number | undefined;
+        const rawQuality = args?.quality;
+        if (rawQuality !== undefined && rawQuality !== null) {
+          const parsed = typeof rawQuality === 'number' ? rawQuality : Number(rawQuality);
+          if (!Number.isFinite(parsed)) {
+            throw new Error(`Invalid quality '${rawQuality}'. Must be a number 1-100.`);
           }
-          return buf;
+          if ((format ?? this.flags.screenshotFormat) === 'png') {
+            quality = undefined;
+          } else {
+            quality = Math.max(1, Math.min(100, Math.round(parsed)));
+          }
         }
-        return this.screenshot();
+
+        if (args?.ref && typeof args.ref === 'string') {
+          const { buffer } = await this.withRefLocator(args.ref, async (locator) => {
+            return this.captureScreenshot({ format, quality, locator });
+          });
+          return buffer;
+        }
+        const { buffer } = await this.captureScreenshot({ format, quality });
+        return buffer;
       }
       case 'browser_network_requests':
         return this.networkRequests(args.includeStatic as boolean | undefined);
       case 'browser_hover': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
-        const loc = await this.resolveRefToLocator(args.ref);
-        return this.withModalRace(async () => { await loc.hover(); });
+        return this.withRefLocator(args.ref, (loc) =>
+          this.withModalRace(async () => { await loc.hover({ timeout: this.handlerTimeoutMs }); }));
       }
       case 'browser_drag': {
         if (typeof args.startRef !== 'string') throw new Error('Expected startRef to be a string');
         if (typeof args.endRef !== 'string') throw new Error('Expected endRef to be a string');
+        const dragEpoch = this.navEpoch;
         const startLoc = await this.resolveRefToLocator(args.startRef);
         const endLoc = await this.resolveRefToLocator(args.endRef);
-        return this.withModalRace(async () => { await startLoc.dragTo(endLoc); });
+        if (this.navEpoch !== dragEpoch) {
+          throw new StaleRefError(args.startRef, this.currentSnapshot?.version ?? 0);
+        }
+        return this.withModalRace(async () => {
+          // Final epoch check right before action — closes the resolve→action gap
+          if (this.navEpoch !== dragEpoch) {
+            throw new StaleRefError(args.startRef as string, this.currentSnapshot?.version ?? 0);
+          }
+          await startLoc.dragTo(endLoc, { timeout: this.handlerTimeoutMs });
+        });
       }
       case 'browser_press_key':
         if (typeof args.key !== 'string') throw new Error('Expected key to be a string');
@@ -482,8 +727,8 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       case 'browser_select_option': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
         if (typeof args.value !== 'string') throw new Error('Expected value to be a string');
-        const loc = await this.resolveRefToLocator(args.ref);
-        return this.withModalRace(async () => { await loc.selectOption(args.value as string); });
+        return this.withRefLocator(args.ref, (loc) =>
+          this.withModalRace(async () => { await loc.selectOption(args.value as string, { timeout: this.handlerTimeoutMs }); }));
       }
       case 'browser_fill_form': {
         const values = args.values;
@@ -496,14 +741,15 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       case 'browser_file_upload': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
         if (!Array.isArray(args.paths)) throw new Error('Expected paths to be an array');
-        const loc = await this.resolveRefToLocator(args.ref);
-        await loc.setInputFiles(args.paths as string[]);
-        // Clear fileChooser modal state
-        if (this.flags.modalTracking) {
-          this.modalTracker.markHandled('fileChooser');
-          this.modalTracker.clear('fileChooser');
-        }
-        return { success: true };
+        return this.withRefLocator(args.ref, async (loc) => {
+          await loc.setInputFiles(args.paths as string[], { timeout: this.handlerTimeoutMs });
+          // Clear fileChooser modal state
+          if (this.flags.modalTracking) {
+            this.modalTracker.markHandled('fileChooser');
+            this.modalTracker.clear('fileChooser');
+          }
+          return { success: true };
+        });
       }
       case 'browser_handle_dialog': {
         if (this.flags.modalTracking) {
@@ -554,8 +800,16 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
         });
         return { success: true };
       }
-      case 'browser_console_messages':
-        return { note: 'Console messages require prior listener setup' };
+      case 'browser_console_messages': {
+        let messages = [...this.consoleLog];
+        if (args?.pattern) {
+          let re: RegExp;
+          try { re = new RegExp(args.pattern as string, 'i'); }
+          catch { throw new Error(`Invalid regex pattern: ${args.pattern}`); }
+          messages = messages.filter(m => re.test(m.text));
+        }
+        return { messages: messages.map(m => ({ level: m.level, text: m.text })), count: messages.length };
+      }
       case 'browser_batch_actions':
         return this.executeBatch(args);
       default:
@@ -565,11 +819,16 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
 
   // ─── BrowserProvider Interface ─────────────────────────────────────
 
-  async navigate(url: string): Promise<void> {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+  async navigate(url: string, options?: { timeout?: number }): Promise<void> {
+    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: options?.timeout });
+    await detectAndWaitForChallenge(this.page);
   }
 
   async snapshot(options?: SnapshotOptions): Promise<PageSnapshot> {
+    // Note: snapshotStale is reset AFTER currentSnapshot is assigned (line ~935),
+    // not here — framenavigated can fire during async collectFrameSnapshots() and
+    // re-set the flag. The final snapshot reflects actual page state regardless.
+
     // Reconcile stale modals before snapshot
     if (this.flags.modalTracking) {
       this.modalTracker.pruneExpired();
@@ -613,6 +872,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     const allRefs = new Map<string, RefEntry>();
     const contentParts: string[] = [];
     const allTrees = new Map<string, SnapshotNode[]>();
+    const allIdentityHashCounts = new Map<string, number>();
 
     this.refState.version++;
     for (const fs of frameSnapshots) {
@@ -626,10 +886,13 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       }
 
       const trees = parseYamlToTree(fs.yaml, fs.framePath);
-      const { refs, annotatedContent } = annotateSnapshot(trees, fs.framePath, this.refState);
+      const { refs, annotatedContent, identityHashCounts } = annotateSnapshot(trees, fs.framePath, this.refState);
 
       for (const [key, value] of refs) {
         allRefs.set(key, value);
+      }
+      for (const [hash, count] of identityHashCounts) {
+        allIdentityHashCounts.set(hash, (allIdentityHashCounts.get(hash) ?? 0) + count);
       }
 
       if (fs.framePath === 'main') {
@@ -646,11 +909,12 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     if (this.currentSnapshot) {
       const prevHashes = new Set(this.currentSnapshot.refsByHash.keys());
       if (jaccardSimilarity(prevHashes, allCurrentHashes) < 0.5) {
-        this.refState = createRefState();
+        this.refState = createRefState(this.pruneHashToRef());
         this.refState.version++;
         allRefs.clear();
         contentParts.length = 0;
         allTrees.clear();
+        allIdentityHashCounts.clear();
         for (const fs of frameSnapshots) {
           if (!fs.yaml) {
             if (fs.error) {
@@ -661,9 +925,12 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
             continue;
           }
           const trees = parseYamlToTree(fs.yaml, fs.framePath);
-          const { refs, annotatedContent } = annotateSnapshot(trees, fs.framePath, this.refState);
+          const { refs, annotatedContent, identityHashCounts } = annotateSnapshot(trees, fs.framePath, this.refState);
           for (const [key, value] of refs) {
             allRefs.set(key, value);
+          }
+          for (const [hash, count] of identityHashCounts) {
+            allIdentityHashCounts.set(hash, (allIdentityHashCounts.get(hash) ?? 0) + count);
           }
           if (fs.framePath === 'main') {
             contentParts.push(annotatedContent);
@@ -682,7 +949,13 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       refs: allRefs,
       refsByHash: new Map([...allRefs.values()].map(r => [r.identityHash, r.ref])),
       interactiveCount: allRefs.size,
+      wasFiltered: !!(options?.selector),
+      identityHashCounts: allIdentityHashCounts,
     };
+
+    // Reset stale flag AFTER snapshot is built — any framenavigated that fired
+    // during collectFrameSnapshots() is reflected in the snapshot data above.
+    this.snapshotStale = false;
 
     // Incremental diffs — per-frame
     let content = this.currentSnapshot.annotatedContent;
@@ -750,29 +1023,80 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       this._consoleUnavailableNotified = true;
     }
 
+    // Cloudflare challenge page detection
+    const isChallenged = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
+    if (isChallenged) {
+      const currentEngine = this.capabilities?.effectiveEngine ?? 'unknown';
+      const engineHint = currentEngine === 'playwright'
+        ? '- Switch engine: try patchright or camoufox for better stealth\n'
+        : '';
+      const warning = 'CLOUDFLARE CHALLENGE PAGE DETECTED\n' +
+        'This page is showing a Cloudflare security challenge.\n' +
+        'Options:\n' +
+        '- Wait: call browser_snapshot again in 5-10 seconds (challenge may auto-resolve)\n' +
+        '- Import cookies: use oneagent_import_cookies with a cf_clearance cookie file\n' +
+        engineHint +
+        '- Current engine: ' + currentEngine + '\n\n';
+      content = warning + content;
+    }
+
+    // Apply pagination if requested
+    const paginatedResult = this.applyPagination(content, options);
+
     return {
       url,
       title,
-      content,
+      content: paginatedResult.content,
       version: this.currentSnapshot.version,
       interactiveCount: this.currentSnapshot.interactiveCount,
       incremental,
       mode: 'annotated',
       recentEvents: this.drainRecentEvents(),
+      pagination: paginatedResult.pagination,
     };
   }
 
+  /**
+   * Combined snapshot + screenshot with partial failure handling.
+   */
+  async snapshotWithScreenshot(options?: SnapshotOptions): Promise<PageSnapshot> {
+    const [snapshotResult, screenshotResult] = await Promise.allSettled([
+      this.snapshot(options),
+      this.captureScreenshot(),
+    ]);
+
+    if (snapshotResult.status === 'rejected') {
+      throw snapshotResult.reason;
+    }
+
+    const result = snapshotResult.value;
+
+    if (screenshotResult.status === 'rejected') {
+      result.screenshot = null;
+      result.screenshotError = screenshotResult.reason instanceof Error
+        ? screenshotResult.reason.message
+        : String(screenshotResult.reason);
+    } else {
+      result.screenshot = screenshotResult.value.buffer.toString('base64');
+      result.screenshotMimeType = screenshotResult.value.mimeType;
+    }
+
+    return result;
+  }
+
   async click(ref: string): Promise<void> {
-    const locator = await this.resolveRefToLocator(ref);
-    await this.waitForCompletion(async () => {
-      await locator.click({ timeout: 10000 });
+    await this.withRefLocator(ref, async (locator) => {
+      await this.waitForCompletion(async () => {
+        await locator.click({ timeout: this.handlerTimeoutMs });
+      });
     });
   }
 
   async type(ref: string, text: string): Promise<void> {
-    const locator = await this.resolveRefToLocator(ref);
-    await this.waitForCompletion(async () => {
-      await locator.fill(text);
+    await this.withRefLocator(ref, async (locator) => {
+      await this.waitForCompletion(async () => {
+        await locator.fill(text, { timeout: this.handlerTimeoutMs });
+      });
     });
   }
 
@@ -788,6 +1112,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
           method,
           headers,
           body: body ?? undefined,
+          redirect: 'manual',   // Surface redirects to executor for per-hop validation
         });
 
         const responseHeaders: Record<string, string> = {};
@@ -814,15 +1139,84 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     return result;
   }
 
-  async screenshot(): Promise<Buffer> {
-    const raw = await this.page.screenshot({ fullPage: false, scale: 'css' });
-    if (!this.flags.screenshotResize) {
-      this.benchmark?.recordScreenshot(raw.length);
-      return raw;
+  async evaluateModelContext(req: SealedModelContextRequest): Promise<SealedModelContextResponse> {
+    const { toolName, args } = req;
+    const result = await this.page.evaluate(
+      async ({ name, arguments: callArgs }: { name: string; arguments: Record<string, unknown> }) => {
+        const mc = (navigator as any).modelContext;
+        if (!mc || typeof mc.callTool !== 'function') {
+          return { result: null, error: 'WebMCP not available on this page' };
+        }
+        try {
+          const response = await mc.callTool(name, callArgs);
+          return { result: response, error: null };
+        } catch (err: any) {
+          return { result: null, error: err?.message ?? String(err) };
+        }
+      },
+      { name: toolName, arguments: args },
+    );
+    return result as SealedModelContextResponse;
+  }
+
+  getCurrentUrl(): string {
+    return this.page.url();
+  }
+
+  private async captureScreenshot(options?: {
+    format?: 'jpeg' | 'png';
+    quality?: number;
+    locator?: Locator;
+  }): Promise<{ buffer: Buffer; mimeType: string }> {
+    const format = options?.format ?? this.flags.screenshotFormat ?? 'jpeg';
+    const quality = format === 'jpeg' ? (options?.quality ?? this.flags.screenshotQuality ?? 80) : undefined;
+    const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+
+    const target = options?.locator ?? this.page;
+    const raw = await target.screenshot({
+      fullPage: false, scale: 'css', type: format, quality,
+      timeout: this.handlerTimeoutMs,
+    });
+
+    if (this.flags.screenshotResize) {
+      if (format === 'png') {
+        const result = resizeScreenshotBuffer(raw);
+        this.benchmark?.recordScreenshot(result.buffer.length);
+        return { buffer: result.buffer, mimeType };
+      }
+      // JPEG: check dimensions and fall back to PNG resize if oversized
+      let width: number, height: number;
+      if (options?.locator) {
+        const box = await options.locator.boundingBox();
+        width = box ? Math.ceil(box.width) : 0;
+        height = box ? Math.ceil(box.height) : 0;
+      } else {
+        const viewport = this.page.viewportSize();
+        width = viewport?.width ?? 1280;
+        height = viewport?.height ?? 720;
+      }
+      const scale = estimateScale(width, height, DEFAULT_MAX_DIMENSION, DEFAULT_MAX_PIXELS);
+      if (scale < 1) {
+        const pngRaw = await target.screenshot({
+          fullPage: false, scale: 'css', type: 'png', timeout: this.handlerTimeoutMs,
+        });
+        const result = resizeScreenshotBuffer(pngRaw);
+        this.benchmark?.recordScreenshot(result.buffer.length);
+        return { buffer: result.buffer, mimeType: 'image/png' };
+      }
     }
-    const result = resizeScreenshotBuffer(raw);
-    this.benchmark?.recordScreenshot(result.buffer.length);
-    return result.buffer;
+
+    this.benchmark?.recordScreenshot(raw.length);
+    return { buffer: raw, mimeType };
+  }
+
+  async screenshot(): Promise<Buffer> {
+    const { buffer } = await this.captureScreenshot();
+    return buffer;
+  }
+
+  getNetworkEntryCount(): number {
+    return this.networkEntries.length;
   }
 
   async networkRequests(includeStatic?: boolean): Promise<NetworkEntry[]> {
@@ -916,6 +1310,33 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   }
 
   // ─── Internal Helpers ──────────────────────────────────────────────
+
+  private applyPagination(
+    content: string,
+    options?: SnapshotOptions,
+  ): { content: string; pagination?: { totalChars: number; offset: number; hasMore: boolean } } {
+    if (!options?.maxChars || options.maxChars <= 0) {
+      return { content };
+    }
+
+    const maxChars = Math.max(0, Math.floor(options.maxChars));
+    const offset = Math.max(0, Math.min(options.offset ?? 0, content.length));
+
+    if (offset >= content.length) {
+      return {
+        content: '',
+        pagination: { totalChars: content.length, offset, hasMore: false },
+      };
+    }
+
+    const sliced = content.slice(offset, offset + maxChars);
+    const hasMore = offset + maxChars < content.length;
+
+    return {
+      content: sliced,
+      pagination: { totalChars: content.length, offset, hasMore },
+    };
+  }
 
   protected assertDomainAllowed(url: string): void {
     let hostname: string;
@@ -1016,6 +1437,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
           level: mappedLevel as SnapshotEvent & { type: 'console' } extends { level: infer L } ? L : never,
           text: msg.text(),
         });
+        // Persistent console log buffer
+        this.consoleLog.push({ level: mappedLevel, text: msg.text(), timestamp: Date.now() });
+        if (this.consoleLog.length > BaseBrowserAdapter.MAX_CONSOLE_LOG) {
+          this.consoleLog.shift();
+        }
       });
     }
 
@@ -1082,8 +1508,26 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   }
 
   protected async fillForm(values: Record<string, string>): Promise<void> {
-    for (const [ref, value] of Object.entries(values)) {
-      await this.type(ref, value);
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith('@e')) {
+        // Existing ref path
+        await this.type(key, value);
+      } else {
+        // Label-based lookup with name fallback
+        let locator = this.page.getByLabel(key);
+        const count = await locator.count();
+        if (count > 1) {
+          log.warn({ key, count }, 'fillForm: multiple elements match label — using first');
+        }
+        if (count === 0) {
+          locator = this.page.locator(`input[name="${key}"]`);
+          const nameCount = await locator.count();
+          if (nameCount === 0) {
+            throw new Error(`No form field found for label or name: "${key}"`);
+          }
+        }
+        await locator.first().fill(value, { timeout: this.handlerTimeoutMs });
+      }
     }
   }
 }
