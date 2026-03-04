@@ -22,7 +22,7 @@ export class PlaywrightMcpAdapter extends BaseBrowserAdapter {
   constructor(
     page: Page,
     domainAllowlist: string[],
-    options?: { flags?: BrowserFeatureFlags; benchmark?: BrowserBenchmark; capabilities?: EngineCapabilities },
+    options?: { flags?: BrowserFeatureFlags; benchmark?: BrowserBenchmark; capabilities?: EngineCapabilities; handlerTimeoutMs?: number },
   ) {
     super(page, domainAllowlist, options);
   }

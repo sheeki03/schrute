@@ -162,3 +162,29 @@ export async function launchBrowserEngine(
 export function _resetCamoufoxProbe(): void {
   camoufoxProbePass = false;
 }
+
+// ─── CDP Connection ──────────────────────────────────────────────
+
+export interface ConnectOptions {
+  wsEndpoint?: string;
+  port?: number;
+  host?: string;
+}
+
+/**
+ * Connect to an existing browser via CDP.
+ * Returns LaunchResult with playwright capabilities.
+ */
+export async function connectBrowserEngine(options: ConnectOptions): Promise<LaunchResult> {
+  const { connectViaCDP } = await import('./cdp-connector.js');
+  const browser = await connectViaCDP(options);
+  return {
+    browser,
+    capabilities: {
+      supportsConsoleEvents: true,
+      supportsCDP: true,
+      configuredEngine: 'playwright',
+      effectiveEngine: 'playwright',
+    },
+  };
+}

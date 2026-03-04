@@ -9,6 +9,8 @@ export interface BrowserFeatureFlags {
   modalTracking: boolean;
   screenshotResize: boolean;
   batchActions: boolean;
+  screenshotFormat: 'jpeg' | 'png';
+  screenshotQuality: number;
 }
 
 export const DEFAULT_FLAGS: BrowserFeatureFlags = {
@@ -17,6 +19,8 @@ export const DEFAULT_FLAGS: BrowserFeatureFlags = {
   modalTracking: true,
   screenshotResize: true,
   batchActions: true,
+  screenshotFormat: 'jpeg',
+  screenshotQuality: 80,
 };
 
 export const VALID_SNAPSHOT_MODES = new Set<string>(['annotated', 'full', 'none']);
@@ -48,6 +52,26 @@ export function getFlags(config: OneAgentConfig): BrowserFeatureFlags {
         `browser.features.${key} must be a boolean, got ${typeof merged[key]}.`,
       );
     }
+  }
+
+  // Validate screenshotFormat
+  const validFormats = new Set(['jpeg', 'png']);
+  if (!validFormats.has(merged.screenshotFormat)) {
+    throw new Error(
+      `Invalid browser.features.screenshotFormat: "${merged.screenshotFormat}". Must be 'jpeg' or 'png'.`,
+    );
+  }
+
+  // Validate screenshotQuality
+  if (typeof merged.screenshotQuality !== 'number' || !Number.isFinite(merged.screenshotQuality)) {
+    throw new Error(
+      `browser.features.screenshotQuality must be a finite number, got ${typeof merged.screenshotQuality}.`,
+    );
+  }
+  if (merged.screenshotQuality < 1 || merged.screenshotQuality > 100) {
+    throw new Error(
+      `browser.features.screenshotQuality must be a number between 1 and 100, got ${merged.screenshotQuality}.`,
+    );
   }
 
   return merged;

@@ -46,6 +46,8 @@ export interface AnnotatedSnapshot {
   refs: Map<string, RefEntry>;
   refsByHash: Map<string, string>;
   interactiveCount: number;
+  wasFiltered?: boolean;
+  identityHashCounts?: Map<string, number>;
 }
 
 export interface SnapshotNode {
@@ -71,6 +73,8 @@ export interface SnapshotOptions {
   maxDepth?: number;
   selector?: string;
   compact?: boolean;
+  maxChars?: number;
+  offset?: number;
 }
 
 export interface FrameSnapshot {
@@ -230,10 +234,21 @@ export interface RefState {
   version: number;
 }
 
-export function createRefState(): RefState {
+export function createRefState(preserveHashMap?: Map<string, string>): RefState {
+  const hashToRef = preserveHashMap ? new Map(preserveHashMap) : new Map();
+  let nextRef = 1;
+  if (preserveHashMap && preserveHashMap.size > 0) {
+    for (const ref of preserveHashMap.values()) {
+      const match = ref.match(/^@e(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (n >= nextRef) nextRef = n + 1;
+      }
+    }
+  }
   return {
-    hashToRef: new Map(),
-    nextRef: 1,
+    hashToRef,
+    nextRef,
     previousTrees: new Map(),
     version: 0,
   };
@@ -247,7 +262,7 @@ export function annotateSnapshot(
   trees: SnapshotNode[],
   framePath: string,
   state: RefState,
-): { refs: Map<string, RefEntry>; annotatedContent: string } {
+): { refs: Map<string, RefEntry>; annotatedContent: string; identityHashCounts: Map<string, number> } {
   const refs = new Map<string, RefEntry>();
 
   // First pass: collect all interactive elements with their identity info
@@ -300,7 +315,11 @@ export function annotateSnapshot(
     // Stable ref ID via identity hash lookup
     const hashKey = `${identityHash}:${ordinal}`;
     let refId = state.hashToRef.get(hashKey);
-    if (!refId) {
+    if (refId) {
+      // LRU touch: refresh insertion order for pruning
+      state.hashToRef.delete(hashKey);
+      state.hashToRef.set(hashKey, refId);
+    } else {
       refId = `@e${state.nextRef++}`;
       state.hashToRef.set(hashKey, refId);
     }
@@ -333,7 +352,7 @@ export function annotateSnapshot(
   // Render annotated content
   const annotatedContent = renderAnnotatedTree(trees);
 
-  return { refs, annotatedContent };
+  return { refs, annotatedContent, identityHashCounts: new Map(hashOccurrences) };
 }
 
 /**
@@ -419,17 +438,30 @@ export function resolveRef(
 }
 
 /**
+ * Full CSS string escape for values inside [attr="value"] selectors.
+ * Escapes: null → U+FFFD, control chars → \HEX , structural chars (" \ ]) → backslash-escaped.
+ * Order matters: null bytes first, then control chars (hex escape with trailing space per CSS spec),
+ * then structural chars (simple backslash escape).
+ */
+export function cssEscapeAttr(value: string): string {
+  return value
+    .replace(/\0/g, '\uFFFD')
+    .replace(/[\x01-\x1f\x7f]/g, ch => '\\' + ch.charCodeAt(0).toString(16) + ' ')
+    .replace(/["\\\]]/g, '\\$&');
+}
+
+/**
  * Build a CSS selector as last-resort fallback.
  * Avoids :has-text() as primary — uses role attribute selectors only.
  * Throws StaleRefError on ambiguity rather than guessing.
  */
 export function buildCssFallback(entry: RefEntry): string {
   // Use role attribute selector — most reliable CSS path
-  let selector = `[role="${entry.role}"]`;
+  let selector = `[role="${cssEscapeAttr(entry.role)}"]`;
 
   // Add aria-label for disambiguation when name is present
   if (entry.name) {
-    selector += `[aria-label="${entry.name}"]`;
+    selector += `[aria-label="${cssEscapeAttr(entry.name)}"]`;
   }
 
   // Note: :has-text() is NOT used here — it's unreliable and can match

@@ -19,8 +19,8 @@ export interface ResizeResult {
   scaled: boolean;
 }
 
-const DEFAULT_MAX_DIMENSION = 1568;
-const DEFAULT_MAX_PIXELS = 1_150_000;
+export const DEFAULT_MAX_DIMENSION = 1568;
+export const DEFAULT_MAX_PIXELS = 1_150_000;
 
 /**
  * Compute the scale factor needed to fit within limits.
