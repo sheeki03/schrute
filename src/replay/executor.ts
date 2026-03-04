@@ -1,5 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { getLogger } from '../core/logger.js';
 import { withTimeout } from '../core/utils.js';
+import { getEffectiveTier } from '../core/tiering.js';
+import { redactNative } from '../native/redactor.js';
+import { getCachedSalt } from '../storage/redactor.js';
 import type {
   SkillSpec,
   ExecutionTierName,
@@ -100,7 +104,7 @@ export async function executeSkill(
     ? new TextEncoder().encode(preBuiltRequest.body).byteLength
     : 0;
 
-  // Budget check (Fix 3: include targetDomain and requestBodyBytes)
+  // Budget check — include targetDomain and requestBodyBytes for accurate budget tracking
   if (options?.budgetTracker) {
     const budgetCheck = options.budgetTracker.checkBudget(skill.id, skill.siteId, {
       hasSecrets: skill.authType != null,
@@ -123,11 +127,11 @@ export async function executeSkill(
     redactionsApplied: [],
   };
 
-  // Fix 2: Record audit intent BEFORE execution in strict mode
+  // Record audit intent before execution to ensure strict-mode audit trail completeness even on crash
   if (options?.auditLog) {
-    const redactedUrl = await redactString(skill.pathTemplate);
+    const redactedUrl = await redactPathTemplate(skill.pathTemplate);
     const intentAudit = options.auditLog.appendEntry({
-      id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `exec-${Date.now()}-${randomUUID()}`,
       timestamp: Date.now(),
       skillId: skill.id,
       executionTier: startingTier,
@@ -170,9 +174,9 @@ export async function executeSkill(
 
   // Record audit outcome AFTER execution
   if (options?.auditLog) {
-    const redactedOutcomeUrl = await redactString(skill.pathTemplate);
+    const redactedOutcomeUrl = await redactPathTemplate(skill.pathTemplate);
     const outcomeAudit = options.auditLog.appendEntry({
-      id: `exec-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `exec-outcome-${Date.now()}-${randomUUID()}`,
       timestamp: Date.now(),
       skillId: skill.id,
       executionTier: result.tier,
@@ -220,43 +224,37 @@ async function executeTier(
 
   const request = buildRequest(skill, params, tier);
 
-  // ── Fix 1: Policy / security gates before any network call ──
+  // ── Policy and security gates run before any network call to prevent SSRF and unauthorized access ──
 
   // 1a. Capability check
   const capCheck = checkCapability(skill.siteId, tierToCapability(tier), options?.config);
   if (!capCheck.allowed) {
     log.warn({ skillId: skill.id, tier, rule: capCheck.rule }, 'Capability not allowed');
-    return failureResult(startTime, tier, FailureCause.UNKNOWN);
+    return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
   }
 
   // 1b. Domain allowlist check
   const requestDomain = extractDomain(request.url);
   if (requestDomain) {
-    const policy = getSitePolicy(skill.siteId, options?.config);
-    if (policy.domainAllowlist.length === 0) {
-      // No explicit policy — use skill's declared domains + site host
-      const rawDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
-      const implicitAllowlist = sanitizeImplicitAllowlist(rawDomains);
-      if (implicitAllowlist.length === 0) {
-        log.warn({ skillId: skill.id, rule: 'domain.implicit_empty_after_sanitize' },
-          'Implicit allowlist empty after sanitization — blocking');
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
-      }
-      // Persist derived allowlist for audit
-      if (options?.policyDecision) {
-        options.policyDecision.derivedAllowlist = implicitAllowlist;
-      }
-      if (!matchesDomainAllowlist(requestDomain, implicitAllowlist)) {
-        log.warn({ skillId: skill.id, domain: requestDomain, rule: 'domain.implicit_skill_allowlist' },
-          'Domain not in skill allowlist (no explicit policy)');
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
-      }
-    } else {
+    const allowlist = getEffectiveAllowlist(skill, options?.config);
+    if (!allowlist.explicit && allowlist.domains.length === 0) {
+      log.warn({ skillId: skill.id, rule: 'domain.implicit_empty_after_sanitize' },
+        'Implicit allowlist empty after sanitization — blocking');
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+    }
+    if (!allowlist.explicit && options?.policyDecision) {
+      options.policyDecision.derivedAllowlist = allowlist.domains;
+    }
+    if (allowlist.explicit) {
       const domainCheck = enforceDomainAllowlist(skill.siteId, requestDomain, options?.config);
       if (!domainCheck.allowed) {
         log.warn({ skillId: skill.id, domain: requestDomain, rule: domainCheck.rule }, 'Domain not allowlisted');
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
       }
+    } else if (!matchesDomainAllowlist(requestDomain, allowlist.domains)) {
+      log.warn({ skillId: skill.id, domain: requestDomain, rule: 'domain.implicit_skill_allowlist' },
+        'Domain not in skill allowlist (no explicit policy)');
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
     }
   }
 
@@ -270,7 +268,7 @@ async function executeTier(
     const ipCheck = await resolveAndValidate(requestDomain);
     if (!ipCheck.allowed) {
       log.warn({ skillId: skill.id, domain: requestDomain, ip: ipCheck.ip, category: ipCheck.category }, 'Private IP blocked');
-      return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
     }
     resolvedIp = ipCheck.ip;
   }
@@ -282,22 +280,30 @@ async function executeTier(
 
   let response: SealedFetchResponse;
   try {
-    if (tier === ExecutionTier.DIRECT) {
-      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp), timeoutMs);
-    } else if (tier === ExecutionTier.BROWSER_PROXIED) {
+    if (tier === ExecutionTier.BROWSER_PROXIED || tier === ExecutionTier.FULL_BROWSER) {
       if (!options?.browserProvider) {
-        log.warn({ skillId: skill.id, tier }, 'browser_proxied tier requested but no browser provider available');
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
-      } else {
-        response = await withTimeout(options.browserProvider.evaluateFetch(request), timeoutMs);
+        if (tier === ExecutionTier.BROWSER_PROXIED) {
+          log.warn({ skillId: skill.id, tier }, 'browser_proxied tier requested but no browser provider available');
+        }
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
       }
-    } else if (tier === ExecutionTier.FULL_BROWSER) {
-      if (!options?.browserProvider) {
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+      const fetchPromise = tier === ExecutionTier.FULL_BROWSER
+        ? fullBrowserExecution(skill, options.browserProvider)
+        : options.browserProvider.evaluateFetch(request);
+      response = await withTimeout(fetchPromise, timeoutMs);
+
+    // Post-fetch DNS re-check for browser-proxied tier (defense-in-depth).
+    // Catches sustained DNS rebinding (not single-TTL attacks — accepted limitation).
+    if (tier === ExecutionTier.BROWSER_PROXIED && requestDomain) {
+      const postCheck = await resolveAndValidate(requestDomain);
+      if (!postCheck.allowed) {
+        log.warn({ skillId: skill.id, domain: requestDomain, ip: postCheck.ip },
+          'DNS rebinding detected — domain resolved to private IP after browser fetch');
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
       }
-      // Full browser automation: navigate + extract
-      response = await withTimeout(fullBrowserExecution(skill, options.browserProvider), timeoutMs);
+    }
     } else {
+      // ExecutionTier.DIRECT or unknown — use direct fetch
       response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp), timeoutMs);
     }
   } catch (err) {
@@ -317,6 +323,19 @@ async function executeTier(
     };
   }
 
+  // Enforce body size limit for browser tiers (directFetch enforces its own limit
+  // via incremental reading, but browser tiers bypass that path)
+  if (
+    (tier === ExecutionTier.BROWSER_PROXIED || tier === ExecutionTier.FULL_BROWSER) &&
+    response.body && maxResponseBytes > 0
+  ) {
+    const bodyBytes = Buffer.from(response.body, 'utf-8');
+    if (bodyBytes.length > maxResponseBytes) {
+      response = { ...response, body: bodyBytes.subarray(0, maxResponseBytes).toString('utf-8') };
+      log.warn({ tier, bodySize: bodyBytes.length, maxResponseBytes }, 'Browser-tier response truncated');
+    }
+  }
+
   // 1d. Manual redirect loop: follow safe redirects, block disallowed domains/IPs
   //
   // Redirect chain handling:
@@ -334,6 +353,9 @@ async function executeTier(
   //   which are all security-critical. We use `redirect: 'manual'` in directFetch
   //   and implement the redirect loop here with full policy enforcement per hop.
   let finalResponse = response;
+  // FULL_BROWSER tier: browser handles navigation; domain allowlist + page sandbox provides security boundary.
+  // For DIRECT and BROWSER_PROXIED tiers, we manually follow redirects with per-hop validation.
+  if (tier !== ExecutionTier.FULL_BROWSER) {
   let redirectCount = 0;
   const MAX_REDIRECTS = 5;
   let currentUrl = request.url;  // Track current URL through redirect chain
@@ -350,43 +372,59 @@ async function executeTier(
     // Domain check: use implicit allowlist if no explicit policy
     const redirectDomain = extractDomain(resolvedUrl);
     if (redirectDomain) {
-      const redirectPolicy = getSitePolicy(skill.siteId, options?.config);
-      if (redirectPolicy.domainAllowlist.length === 0) {
-        const rawDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
-        const implicitAllowlist = sanitizeImplicitAllowlist(rawDomains);
-        if (!matchesDomainAllowlist(redirectDomain, implicitAllowlist)) {
-          log.warn({ skillId: skill.id, location: resolvedUrl, rule: 'redirect.implicit_skill_allowlist' },
-            'Redirect to domain not in skill allowlist');
-          return failureResult(startTime, tier, FailureCause.UNKNOWN);
-        }
-      } else {
+      const allowlist = getEffectiveAllowlist(skill, options?.config);
+      if (allowlist.explicit) {
         const redirectCheck = checkRedirectAllowed(skill.siteId, resolvedUrl, currentUrl, options?.config);
         if (!redirectCheck.allowed) {
           log.warn({ skillId: skill.id, location: resolvedUrl, rule: redirectCheck.rule },
             'Redirect to disallowed domain blocked');
-          return failureResult(startTime, tier, FailureCause.UNKNOWN);
+          return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
         }
+      } else if (!matchesDomainAllowlist(redirectDomain, allowlist.domains)) {
+        log.warn({ skillId: skill.id, location: resolvedUrl, rule: 'redirect.implicit_skill_allowlist' },
+          'Redirect to domain not in skill allowlist');
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
       }
 
       // IP check — also pin the resolved IP for the redirect fetch
       const ipCheck = await resolveAndValidate(redirectDomain);
       if (!ipCheck.allowed) {
         log.warn({ skillId: skill.id, domain: redirectDomain, ip: ipCheck.ip }, 'Redirect to private IP blocked');
-        return failureResult(startTime, tier, FailureCause.UNKNOWN);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
       }
       resolvedIp = ipCheck.ip;
     }
 
-    const redirectResp = await directFetch(
-      { ...request, url: resolvedUrl },
-      maxResponseBytes,
-      options?.fetchFn,
-      resolvedIp,
-    );
+    let redirectResp: SealedFetchResponse;
+    if ((tier === ExecutionTier.BROWSER_PROXIED) && options?.browserProvider) {
+      // Follow redirect through browser context (preserves cookies, TLS, CORS)
+      redirectResp = await options.browserProvider.evaluateFetch({ ...request, url: resolvedUrl });
+    } else {
+      redirectResp = await directFetch(
+        { ...request, url: resolvedUrl },
+        maxResponseBytes,
+        options?.fetchFn,
+        resolvedIp,
+      );
+    }
     finalResponse = redirectResp;
     currentUrl = resolvedUrl;  // Update for next hop
     redirectCount++;
   }
+
+  // Fail-closed: if a browser-proxied response is still 3xx but has no Location,
+  // it means the redirect couldn't be followed (opaque redirect, CORS restriction).
+  // Treat as failure rather than silently returning the 3xx.
+  if (
+    tier === ExecutionTier.BROWSER_PROXIED &&
+    finalResponse.status >= 300 && finalResponse.status < 400 &&
+    !finalResponse.headers['location']
+  ) {
+    log.warn({ skillId: skill.id, tier, status: finalResponse.status },
+      'Browser-proxied fetch returned redirect without readable Location header — failing closed');
+    return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+  }
+  } // end if (tier !== ExecutionTier.FULL_BROWSER)
 
   const latencyMs = Date.now() - startTime;
 
@@ -463,14 +501,14 @@ async function classifyFailure(
 
   // 3-5. js_computed_field / protocol_sensitivity / signed_payload
   // First check if already known via permanent tier lock
-  if (skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'js_computed_field') {
-    return FailureCause.JS_COMPUTED_FIELD;
-  }
-  if (skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'protocol_sensitivity') {
-    return FailureCause.PROTOCOL_SENSITIVITY;
-  }
-  if (skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'signed_payload') {
-    return FailureCause.SIGNED_PAYLOAD;
+  if (skill.tierLock?.type === 'permanent') {
+    const lockCauseMap: Record<string, FailureCauseName> = {
+      js_computed_field: FailureCause.JS_COMPUTED_FIELD,
+      protocol_sensitivity: FailureCause.PROTOCOL_SENSITIVITY,
+      signed_payload: FailureCause.SIGNED_PAYLOAD,
+    };
+    const lockCause = lockCauseMap[skill.tierLock.reason];
+    if (lockCause) return lockCause;
   }
 
   // Live tier comparison: if Tier 1 fails, try Tier 3 and compare
@@ -567,7 +605,7 @@ async function directFetch(
     headers[key] = value;
   });
 
-  // Fix 4: Read response body incrementally with size cap enforcement.
+  // Read response body incrementally with size cap to prevent memory exhaustion.
   // If the body exceeds maxResponseBytes, abort reading and throw.
   let body: string;
   if (response.body) {
@@ -609,6 +647,11 @@ async function fullBrowserExecution(
   const domain = skill.allowedDomains[0] ?? skill.siteId;
   await browser.navigate(`https://${domain}`);
 
+  // Wait for in-flight XHR/fetch requests to settle. navigate() resolves on
+  // DOMContentLoaded, which fires before most async API calls complete.
+  // Without this delay, networkRequests() may return an incomplete list.
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
   // Take a snapshot and extract network requests
   const requests = await browser.networkRequests();
 
@@ -640,23 +683,8 @@ async function fullBrowserExecution(
 // ─── Helpers ────────────────────────────────────────────────────
 
 function determineTier(skill: SkillSpec): ExecutionTierName {
-  // If there's a permanent tier lock, respect it
-  if (skill.tierLock?.type === 'permanent') {
-    return ExecutionTier.BROWSER_PROXIED; // locked to Tier 3+
-  }
-
-  // If tier lock is temporary demotion
-  if (skill.tierLock?.type === 'temporary_demotion') {
-    return ExecutionTier.BROWSER_PROXIED;
-  }
-
-  // Use current tier
-  if (skill.currentTier === 'tier_1') {
-    return ExecutionTier.DIRECT;
-  }
-
-  // Default to Tier 3
-  return ExecutionTier.BROWSER_PROXIED;
+  const tierState = getEffectiveTier(skill);
+  return tierState === 'tier_1' ? ExecutionTier.DIRECT : ExecutionTier.BROWSER_PROXIED;
 }
 
 function tierToCapability(tier: ExecutionTierName): CapabilityName {
@@ -670,6 +698,23 @@ function tierToCapability(tier: ExecutionTierName): CapabilityName {
     default:
       return Capability.NET_FETCH_DIRECT;
   }
+}
+
+/**
+ * Derive the effective domain allowlist for a skill: use the explicit
+ * site policy if one exists, otherwise build an implicit list from the
+ * skill's declared domains + siteId.
+ */
+function getEffectiveAllowlist(
+  skill: SkillSpec,
+  config?: import('../skill/types.js').OneAgentConfig,
+): { explicit: boolean; domains: string[] } {
+  const policy = getSitePolicy(skill.siteId, config);
+  if (policy.domainAllowlist.length > 0) {
+    return { explicit: true, domains: policy.domainAllowlist };
+  }
+  const rawDomains = [...new Set([...skill.allowedDomains, skill.siteId])];
+  return { explicit: false, domains: sanitizeImplicitAllowlist(rawDomains) };
 }
 
 function failureResult(startTime: number, tier: ExecutionTierName, cause: FailureCauseName): ExecutionResult {
@@ -687,4 +732,12 @@ function failureResult(startTime: number, tier: ExecutionTierName, cause: Failur
   };
 }
 
-// withTimeout imported from core/utils.ts
+// Shared redaction helper: prefers native (sync) redactor when salt is cached,
+// falls back to async redactString otherwise. Avoids duplicating this
+// salt-check-then-redact pattern at every audit call site.
+async function redactPathTemplate(pathTemplate: string): Promise<string> {
+  const salt = getCachedSalt();
+  const nativeResult = salt ? redactNative(pathTemplate, salt) : null;
+  return nativeResult != null ? String(nativeResult) : redactString(pathTemplate);
+}
+

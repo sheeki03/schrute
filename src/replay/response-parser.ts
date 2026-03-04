@@ -77,5 +77,3 @@ export function parseResponse(
   return { data, schemaMatch, errors };
 }
 
-// validateJsonSchema imported from shared/schema-validation.ts
-

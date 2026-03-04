@@ -303,9 +303,14 @@ export class AuditLog {
       const entry = JSON.parse(lastLine) as AuditEntry;
       this.lastHash = entry.entryHash;
     } catch (err) {
-      log.info(
+      if (this.strictMode) {
+        throw new Error(
+          'Audit log integrity failure: last entry corrupted and strict mode is enabled. Manual inspection required.',
+        );
+      }
+      log.error(
         { err, line: lastLine, entryCount: this.entryCount },
-        'Audit log last entry corrupted — starting fresh hash chain. Previous entries are intact but chain continuity is broken.',
+        'Audit log last entry corrupted — starting fresh hash chain. Chain continuity is broken.',
       );
       this.lastHash = '';
     }

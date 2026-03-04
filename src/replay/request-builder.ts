@@ -201,6 +201,8 @@ export function resolveUrl(
         `{${paramName}}`,
         encodeURIComponent(String(params[paramName])),
       );
+    } else {
+      log.warn({ paramName, pathTemplate }, 'Path parameter not provided — URL will contain unresolved placeholder');
     }
   }
 

@@ -156,5 +156,3 @@ function inferBodyShape(requests: StructuredRequest[]): Record<string, string> |
 
   return shape;
 }
-
-// typeOf imported from core/utils.ts

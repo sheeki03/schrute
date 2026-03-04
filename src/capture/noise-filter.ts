@@ -98,15 +98,9 @@ export function filterRequests(
   const pollingUrls = detectPollingPatterns(entries);
 
   for (const entry of entries) {
-    const { classification, reason } = classifyEntry(entry, overrideMap, pollingUrls);
-
-    if (classification === 'noise') {
-      noise.push(entry);
-    } else if (classification === 'ambiguous') {
-      ambiguous.push(entry);
-    } else {
-      signal.push(entry);
-    }
+    const { classification } = classifyEntry(entry, overrideMap, pollingUrls);
+    const bucket = classification === 'noise' ? noise : classification === 'ambiguous' ? ambiguous : signal;
+    bucket.push(entry);
   }
 
   log.debug(
@@ -141,23 +135,22 @@ export function recordFilteredEntries(
 
     const requestHash = hashEntry(entry);
 
-    db.run(
-      `INSERT INTO action_frame_entries (frame_id, request_hash, classification, noise_reason, redaction_applied)
-       VALUES (?, ?, ?, ?, ?)`,
-      frameId,
-      requestHash,
-      classification,
-      reason ?? null,
-      0,
-    );
-
-    if (classification === 'noise') {
-      noise.push(entry);
-    } else if (classification === 'ambiguous') {
-      ambiguous.push(entry);
-    } else {
-      signal.push(entry);
+    try {
+      db.run(
+        `INSERT OR IGNORE INTO action_frame_entries (frame_id, request_hash, classification, noise_reason, redaction_applied)
+         VALUES (?, ?, ?, ?, ?)`,
+        frameId,
+        requestHash,
+        classification,
+        reason ?? null,
+        0,
+      );
+    } catch (err) {
+      log.warn({ frameId, requestHash, err }, 'Failed to insert action_frame_entry, skipping');
     }
+
+    const bucket = classification === 'noise' ? noise : classification === 'ambiguous' ? ambiguous : signal;
+    bucket.push(entry);
   }
 
   return { signal, noise, ambiguous };

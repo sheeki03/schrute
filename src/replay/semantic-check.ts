@@ -108,6 +108,3 @@ function checkErrorSignatures(body: string): string[] {
 
   return found;
 }
-
-// evaluateInvariant imported from shared/invariant-utils.ts
-// Supports both colon-delimited and natural-language invariant formats.

@@ -1,4 +1,5 @@
 import { getLogger } from '../core/logger.js';
+import { getEffectiveTier } from '../core/tiering.js';
 import type { SkillSpec, ExecutionTierName, FailureCauseName } from '../skill/types.js';
 import { ExecutionTier, FailureCause, SideEffectClass } from '../skill/types.js';
 import { executeSkill, type ExecutionResult, type ExecutorOptions } from './executor.js';
@@ -135,39 +136,34 @@ function decideRetry(
   tierCascade: ExecutionTierName[],
   consecutiveFailuresAtTier: number,
 ): RetryDecision {
+  const currentTier = tierCascade[currentTierIndex];
+  const nextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
+  const canEscalate = nextTierIndex > currentTierIndex;
+
+  function decision(action: RetryDecision['action'], tier: ExecutionTierName, reason: string, backoffMs = 0): RetryDecision {
+    return { attempt, tier, action, reason, backoffMs };
+  }
+
   if (attempt >= maxRetries) {
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'abort',
-      reason: 'Max retries exceeded',
-      backoffMs: 0,
-    };
+    return decision('abort', currentTier, 'Max retries exceeded');
   }
 
   const cause = failureCause ?? FailureCause.UNKNOWN;
 
   // Rate limited: exponential backoff, same tier
   if (cause === FailureCause.RATE_LIMITED) {
-    const backoffMs = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS);
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'retry',
-      reason: 'Rate limited — exponential backoff',
-      backoffMs,
-    };
+    return decision('retry', currentTier, 'Rate limited — exponential backoff',
+      Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS));
   }
 
   // Endpoint removed: no point retrying
   if (cause === FailureCause.ENDPOINT_REMOVED) {
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'abort',
-      reason: 'Endpoint removed — no retry possible',
-      backoffMs: 0,
-    };
+    return decision('abort', currentTier, 'Endpoint removed — no retry possible');
+  }
+
+  // Policy denied: capability blocked, domain not allowlisted, or private IP — non-retryable
+  if (cause === FailureCause.POLICY_DENIED) {
+    return decision('abort', currentTier, 'Policy denied — non-retryable violation');
   }
 
   // JS computed field, protocol sensitivity, signed payload: escalate tier
@@ -176,102 +172,48 @@ function decideRetry(
     cause === FailureCause.PROTOCOL_SENSITIVITY ||
     cause === FailureCause.SIGNED_PAYLOAD
   ) {
-    const nextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
-    if (nextTierIndex === currentTierIndex) {
-      return {
-        attempt,
-        tier: tierCascade[currentTierIndex],
-        action: 'abort',
-        reason: `${cause} — already at highest tier`,
-        backoffMs: 0,
-      };
+    if (!canEscalate) {
+      return decision('abort', currentTier, `${cause} — already at highest tier`);
     }
-    return {
-      attempt,
-      tier: tierCascade[nextTierIndex],
-      action: 'escalate',
-      reason: `${cause} — escalating to ${tierCascade[nextTierIndex]}`,
-      backoffMs: 0, // immediate for tier escalation
-    };
+    return decision('escalate', tierCascade[nextTierIndex], `${cause} — escalating to ${tierCascade[nextTierIndex]}`);
   }
 
   // Schema drift: retry same tier (might be transient)
   if (cause === FailureCause.SCHEMA_DRIFT) {
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'retry',
-      reason: 'Schema drift — retrying same tier',
-      backoffMs: SCHEMA_DRIFT_BACKOFF_MS,
-    };
+    return decision('retry', currentTier, 'Schema drift — retrying same tier', SCHEMA_DRIFT_BACKOFF_MS);
   }
 
   // Auth expired: no point retrying without re-auth
   if (cause === FailureCause.AUTH_EXPIRED) {
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'abort',
-      reason: 'Auth expired — needs re-authentication',
-      backoffMs: 0,
-    };
+    return decision('abort', currentTier, 'Auth expired — needs re-authentication');
   }
 
   // Cookie refresh: escalate to browser tier for cookie refresh
   if (cause === FailureCause.COOKIE_REFRESH) {
-    const nextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
-    return {
-      attempt,
-      tier: tierCascade[nextTierIndex],
-      action: 'escalate',
-      reason: 'Cookie refresh needed — escalating tier',
-      backoffMs: 0,
-    };
+    return decision('escalate', tierCascade[nextTierIndex], 'Cookie refresh needed — escalating tier');
   }
 
   // UNKNOWN: backoff-then-escalate with per-tier cap
   if (consecutiveFailuresAtTier < MAX_RETRIES_PER_TIER) {
-    return {
-      attempt,
-      tier: tierCascade[currentTierIndex],
-      action: 'retry',
-      reason: 'Unknown failure — retrying same tier with backoff',
-      backoffMs: BASE_BACKOFF_MS * Math.pow(2, attempt),
-    };
+    return decision('retry', currentTier, 'Unknown failure — retrying same tier with backoff',
+      BASE_BACKOFF_MS * Math.pow(2, attempt));
   }
-  const unknownNextTierIndex = Math.min(currentTierIndex + 1, tierCascade.length - 1);
-  if (unknownNextTierIndex > currentTierIndex) {
-    return {
-      attempt,
-      tier: tierCascade[unknownNextTierIndex],
-      action: 'escalate',
-      reason: 'Unknown failure — escalating after same-tier retry',
-      backoffMs: 0,
-    };
+  if (canEscalate) {
+    return decision('escalate', tierCascade[nextTierIndex], 'Unknown failure — escalating after same-tier retry');
   }
-  return {
-    attempt,
-    tier: tierCascade[currentTierIndex],
-    action: 'abort',
-    reason: 'Unknown failure — all tiers exhausted',
-    backoffMs: 0,
-  };
+  return decision('abort', currentTier, 'Unknown failure — all tiers exhausted');
 }
 
 // ─── Tier Cascade ───────────────────────────────────────────────
 
 function buildTierCascade(skill: SkillSpec): ExecutionTierName[] {
-  // If locked to Tier 3+, don't include Tier 1
-  if (skill.tierLock?.type === 'permanent') {
+  const effectiveTier = getEffectiveTier(skill);
+  if (skill.tierLock?.type === 'permanent' || skill.tierLock?.type === 'temporary_demotion') {
     return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
-
-  if (skill.currentTier === 'tier_1') {
-    // Tier 1 -> Tier 3 -> Tier 4
+  if (effectiveTier === 'tier_1') {
     return [ExecutionTier.DIRECT, ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
-
-  // Default: Tier 3 -> Tier 4
   return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
 }
 

@@ -78,7 +78,7 @@ function inferSingle(value: unknown): JsonSchema {
 
 // ─── Schema Merging ──────────────────────────────────────────────────
 
-function mergeSchemas(a: JsonSchema, b: JsonSchema): JsonSchema {
+export function mergeSchemas(a: JsonSchema, b: JsonSchema): JsonSchema {
   const typeA = normalizeType(a.type);
   const typeB = normalizeType(b.type);
 
