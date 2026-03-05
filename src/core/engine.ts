@@ -145,6 +145,10 @@ export class Engine {
   private isClosing = false;
   private multiSessionManager: MultiSessionManager;
   private recordingListenerCleanups: Array<() => void> = [];
+  private providerCache = new WeakMap<
+    BrowserManager,
+    Map<string, { adapter: PlaywrightMcpAdapter; page: unknown; domainsKey: string }>
+  >();
 
   constructor(config: OneAgentConfig) {
     this.config = config;
@@ -176,6 +180,19 @@ export class Engine {
     return this.activeSessionId;
   }
 
+  private getProviderCacheForManager(manager: BrowserManager): Map<string, { adapter: PlaywrightMcpAdapter; page: unknown; domainsKey: string }> {
+    let cache = this.providerCache.get(manager);
+    if (!cache) {
+      cache = new Map();
+      this.providerCache.set(manager, cache);
+    }
+    return cache;
+  }
+
+  private domainsKey(domains: string[]): string {
+    return [...domains].sort().join('\u0000');
+  }
+
   resetExploreState(expectedId: string | null): void {
     if (this.activeSessionId !== expectedId) return;
     if (this.activeSessionId) {
@@ -199,32 +216,58 @@ export class Engine {
     options?: { browserManager?: BrowserManager; lazy?: boolean; overrides?: ContextOverrides },
   ): Promise<PlaywrightMcpAdapter | undefined> {
     const manager = options?.browserManager ?? this.sessionManager.getBrowserManager();
+    const providerCache = this.getProviderCacheForManager(manager);
 
     // Non-lazy path: return existing context atomically (no TOCTOU race).
     // tryGetContext() returns undefined if no context exists, avoiding
     // an unwanted browser launch between hasContext() and getOrCreateContext().
     if (!options?.lazy) {
       const existing = manager.tryGetContext(siteId);
-      if (!existing) return undefined;
+      if (!existing) {
+        providerCache.delete(siteId);
+        return undefined;
+      }
       const pages = existing.pages();
       const page = pages[0] ?? await existing.newPage();
       const effectiveDomains = domains ?? [siteId];
-      return new PlaywrightMcpAdapter(page, effectiveDomains, {
+      const domainsKey = this.domainsKey(effectiveDomains);
+      const cached = providerCache.get(siteId);
+      const pageIsClosed = cached
+        && typeof (cached.page as { isClosed?: () => boolean }).isClosed === 'function'
+        && (cached.page as { isClosed: () => boolean }).isClosed();
+      if (cached && !pageIsClosed && cached.page === page && cached.domainsKey === domainsKey) {
+        return cached.adapter;
+      }
+
+      const adapter = new PlaywrightMcpAdapter(page, effectiveDomains, {
         flags: getFlags(this.config),
         capabilities: manager.getCapabilities() ?? undefined,
         handlerTimeoutMs: manager.getHandlerTimeoutMs(),
       });
+      providerCache.set(siteId, { adapter, page, domainsKey });
+      return adapter;
     }
 
     const context = await manager.getOrCreateContext(siteId, options?.overrides);
     const pages = context.pages();
     const page = pages[0] ?? await context.newPage();
     const effectiveDomains = domains ?? [siteId];
-    return new PlaywrightMcpAdapter(page, effectiveDomains, {
+    const domainsKey = this.domainsKey(effectiveDomains);
+    const cached = providerCache.get(siteId);
+    const pageIsClosed = cached
+      && typeof (cached.page as { isClosed?: () => boolean }).isClosed === 'function'
+      && (cached.page as { isClosed: () => boolean }).isClosed();
+    if (cached && !pageIsClosed && cached.page === page && cached.domainsKey === domainsKey) {
+      return cached.adapter;
+    }
+
+    const adapter = new PlaywrightMcpAdapter(page, effectiveDomains, {
       flags: getFlags(this.config),
       capabilities: manager.getCapabilities() ?? undefined,
       handlerTimeoutMs: manager.getHandlerTimeoutMs(),
     });
+    providerCache.set(siteId, { adapter, page, domainsKey });
+    return adapter;
   }
 
   private navigateFireAndForget(siteId: string, url: string, overrides?: ContextOverrides, sessionId?: string): void {
@@ -1031,6 +1074,7 @@ export class Engine {
     }
 
     this.mode = 'idle';
+    this.providerCache = new WeakMap();
     this.log.info('Engine closed');
   }
 }

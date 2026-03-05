@@ -41,6 +41,26 @@ export function rankToolsByIntent(
   return scored.slice(0, k).map((s) => s.skill);
 }
 
+// ─── Parameter Key Sanitization ─────────────────────────────────
+
+const PARAM_KEY_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
+
+/**
+ * Sanitize a parameter name to match the API requirement: ^[a-zA-Z0-9_.-]{1,64}$
+ * Replaces invalid characters (colons, brackets, spaces, etc.) with underscores.
+ */
+export function sanitizeParamKey(name: string): string {
+  if (PARAM_KEY_PATTERN.test(name)) return name;
+  const sanitized = name
+    .replace(/[^a-zA-Z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_.-]+/, '')
+    .replace(/[_.-]+$/, '');
+  // Truncate to 64 chars
+  const truncated = sanitized.slice(0, 64);
+  return truncated || 'param';
+}
+
 // ─── Skill → MCP Tool Conversion ────────────────────────────────
 
 let _metaToolNames: Set<string> | null = null;
@@ -93,13 +113,13 @@ export function skillToToolDefinition(skill: SkillSpec) {
       type: 'object' as const,
       properties: Object.fromEntries(
         skill.parameters.map((p) => [
-          p.name,
+          sanitizeParamKey(p.name),
           { type: p.type, description: `Source: ${p.source}` },
         ]),
       ),
       required: skill.parameters
         .filter((p) => p.source === 'user_input')
-        .map((p) => p.name),
+        .map((p) => sanitizeParamKey(p.name)),
     },
   };
 }

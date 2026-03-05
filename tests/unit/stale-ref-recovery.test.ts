@@ -540,7 +540,7 @@ describe('Stale Ref Recovery', () => {
         .resolves.not.toThrow();
     });
 
-    it('navigation during verification (TOCTOU) throws StaleRefError', async () => {
+    it('navigation during snapshot collection is tolerated if final verification is stable', async () => {
       const page = createMockPage('- button "Submit"');
       const adapter = new PlaywrightMcpAdapter(page as any, ['example.com'], {
         flags: { snapshotMode: 'annotated', incrementalDiffs: false, modalTracking: false, screenshotResize: false },
@@ -560,7 +560,7 @@ describe('Stale Ref Recovery', () => {
       });
 
       await expect(adapter.proxyTool('browser_click', { ref: '@e1' }))
-        .rejects.toThrow(StaleRefError);
+        .resolves.not.toThrow();
 
       // Restore
       page._mockLocator.ariaSnapshot = origAriaSnapshot;

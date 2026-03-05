@@ -73,6 +73,19 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
     return false;
   }
 
+  // Cloudflare phishing/safety interstitial — auto-dismiss "Ignore & Proceed"
+  const isPhishingWarning = /Suspected phishing|Suspected Phishing|phishing site.*Cloudflare/i.test(title);
+  if (isPhishingWarning) {
+    log.info('Cloudflare phishing interstitial detected, attempting auto-dismiss...');
+    const dismissed = await dismissCloudflareInterstitial(page, timeoutMs);
+    if (dismissed) {
+      log.info('Cloudflare phishing interstitial dismissed');
+      return true;
+    }
+    log.warn('Could not auto-dismiss Cloudflare phishing interstitial — Turnstile challenge likely failed. Try importing cf_clearance cookies or switching to camoufox/patchright engine.');
+    return false;
+  }
+
   const titleMatch = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
 
   if (!challengeElements && !titleMatch) return false;
@@ -101,6 +114,111 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
     log.warn('Cloudflare challenge did not resolve within timeout');
     return false;
   }
+}
+
+/**
+ * Dismiss Cloudflare safety/phishing interstitial pages.
+ *
+ * These pages have a form posting to `/cdn-cgi/phish-bypass` with a Turnstile
+ * challenge. The "Ignore & Proceed" button (`#bypass-button`) starts disabled
+ * and becomes enabled once Turnstile solves. We wait for that, then submit.
+ * If Turnstile never solves, we attempt a force-bypass as a last resort.
+ */
+async function dismissCloudflareInterstitial(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  // Strategy 1: Wait for #bypass-button to become enabled (Turnstile solved)
+  try {
+    const btn = page.locator('#bypass-button');
+    if (await btn.count() > 0) {
+      // Wait up to 70% of timeout for Turnstile to enable the button
+      const waitMs = Math.min(Math.floor(timeoutMs * 0.7), 20_000);
+      try {
+        await btn.waitFor({ state: 'attached', timeout: 2000 });
+        // Poll for enabled state
+        const enabled = await page.evaluate(`
+          new Promise(resolve => {
+            const el = document.getElementById('bypass-button');
+            if (!el) return resolve(false);
+            if (!el.disabled) return resolve(true);
+            const obs = new MutationObserver(() => {
+              if (!el.disabled) { obs.disconnect(); resolve(true); }
+            });
+            obs.observe(el, { attributes: true, attributeFilter: ['disabled'] });
+            setTimeout(() => { obs.disconnect(); resolve(false); }, ${waitMs});
+          })
+        `);
+        if (enabled) {
+          log.info('Turnstile solved — bypass button enabled, clicking');
+          await btn.click({ timeout: 5000 });
+          await page.waitForLoadState('domcontentloaded', { timeout: deadline - Date.now() });
+          return true;
+        }
+      } catch {
+        // Button wait/click failed
+      }
+
+      // Strategy 2: Force-enable button and submit form (Turnstile may not
+      // have solved, but some CF configurations don't validate the token)
+      log.info('Turnstile did not solve — attempting force-bypass');
+      try {
+        const navigated = await page.evaluate(`
+          (() => {
+            const btn = document.getElementById('bypass-button');
+            if (!btn) return false;
+            btn.disabled = false;
+            btn.removeAttribute('disabled');
+            const form = btn.closest('form');
+            if (form) { form.submit(); return true; }
+            btn.click();
+            return true;
+          })()
+        `);
+        if (navigated) {
+          try {
+            await page.waitForLoadState('domcontentloaded', { timeout: Math.max(deadline - Date.now(), 3000) });
+          } catch { /* navigation may not complete */ }
+          // Verify we reached the target site, not a CF error page
+          const newUrl = page.url();
+          const newTitle = await page.title().catch(() => '');
+          const isBypassError = /\/cdn-cgi\/phish-bypass/i.test(newUrl);
+          if (!isBypassError && !/phishing/i.test(newTitle) && newTitle.length > 0) return true;
+          // Go back if we ended up on the bypass error page
+          if (isBypassError) {
+            try { await page.goBack({ timeout: 5000 }); } catch { /* best effort */ }
+          }
+        }
+      } catch {
+        // Force bypass failed
+      }
+    }
+  } catch {
+    // #bypass-button approach failed entirely
+  }
+
+  // Strategy 3: Generic fallback — try clicking any visible proceed-like button
+  const fallbackSelectors = [
+    'button:has-text("Proceed")',
+    'a:has-text("Proceed")',
+    'button:has-text("Continue")',
+    'a:has-text("Continue")',
+  ];
+  for (const selector of fallbackSelectors) {
+    try {
+      const el = page.locator(selector).first();
+      if (await el.isVisible({ timeout: 1000 })) {
+        await el.click({ timeout: 3000 });
+        await page.waitForLoadState('domcontentloaded', { timeout: Math.max(deadline - Date.now(), 3000) });
+        const newUrl = page.url();
+        const newTitle = await page.title().catch(() => '');
+        if (!/cdn-cgi/i.test(newUrl) && !/phishing/i.test(newTitle) && newTitle.length > 0) return true;
+      }
+    } catch {
+      // Selector not found — try next
+    }
+  }
+
+  return false;
 }
 
 type AllowedTool = (typeof ALLOWED_BROWSER_TOOLS)[number];
@@ -519,76 +637,86 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     const oldSnapshot = this.currentSnapshot;
     const oldEntry = oldSnapshot?.refs.get(ref);
 
-    // Take fresh snapshot — this rebuilds frame map, currentSnapshot, resets snapshotStale
-    const epochBefore = this.navEpoch;
-    await this.snapshot();
-    const newSnapshot = this.currentSnapshot;
+    // A navigation can occur while snapshot is being collected (common on pages
+    // still settling after initial load). Retry a few times before failing closed.
+    const MAX_RECOVERY_ATTEMPTS = 3;
+    let lastVersion = this.currentSnapshot?.version ?? 0;
 
-    // Navigation happened during fresh snapshot — fail closed
-    if (this.navEpoch !== epochBefore) {
-      throw new StaleRefError(ref, newSnapshot?.version ?? 0);
-    }
+    for (let attempt = 1; attempt <= MAX_RECOVERY_ATTEMPTS; attempt++) {
+      await this.snapshot();
+      const newSnapshot = this.currentSnapshot;
 
-    if (!newSnapshot) {
-      throw new StaleRefError(ref, 0);
-    }
+      if (!newSnapshot) {
+        throw new StaleRefError(ref, 0);
+      }
+      lastVersion = newSnapshot.version;
 
-    // Filtered snapshots can't be trusted for identity verification
-    if (newSnapshot.wasFiltered) {
-      throw new StaleRefError(ref, newSnapshot.version);
-    }
+      // Epoch captured AFTER snapshot: allows nav during snapshot collection,
+      // but still detects nav races during verification/action handoff.
+      const verifyEpoch = this.navEpoch;
 
-    const newEntry = newSnapshot.refs.get(ref);
-    if (!newEntry) {
-      throw new StaleRefError(ref, newSnapshot.version);
-    }
-
-    // If old snapshot was filtered, we can't trust old hash counts — fail closed
-    if (oldSnapshot?.wasFiltered) {
-      throw new StaleRefError(ref, newSnapshot.version);
-    }
-
-    // If we had an old entry, verify identity continuity
-    if (oldEntry) {
-      const oldHash = oldEntry.identityHash;
-      const newHash = newEntry.identityHash;
-
-      if (!oldHash || !newHash || oldHash !== newHash) {
+      // Filtered snapshots can't be trusted for identity verification
+      if (newSnapshot.wasFiltered) {
         throw new StaleRefError(ref, newSnapshot.version);
       }
 
-      // Check ordinal stability for ambiguous (duplicate) elements
-      if (oldSnapshot?.identityHashCounts && newSnapshot.identityHashCounts) {
-        const oldCount = oldSnapshot.identityHashCounts.get(oldHash) ?? 0;
-        const newCount = newSnapshot.identityHashCounts.get(newHash) ?? 0;
+      const newEntry = newSnapshot.refs.get(ref);
+      if (!newEntry) {
+        throw new StaleRefError(ref, newSnapshot.version);
+      }
 
-        if (oldCount !== newCount) {
-          // Element population changed — ordinals may have shifted
+      // If old snapshot was filtered, we can't trust old hash counts — fail closed
+      if (oldSnapshot?.wasFiltered) {
+        throw new StaleRefError(ref, newSnapshot.version);
+      }
+
+      // If we had an old entry, verify identity continuity
+      if (oldEntry) {
+        const oldHash = oldEntry.identityHash;
+        const newHash = newEntry.identityHash;
+
+        if (!oldHash || !newHash || oldHash !== newHash) {
           throw new StaleRefError(ref, newSnapshot.version);
         }
 
-        if (oldCount > 1 && oldEntry.ordinal !== newEntry.ordinal) {
-          throw new StaleRefError(ref, newSnapshot.version);
+        // Check ordinal stability for ambiguous (duplicate) elements
+        if (oldSnapshot?.identityHashCounts && newSnapshot.identityHashCounts) {
+          const oldCount = oldSnapshot.identityHashCounts.get(oldHash) ?? 0;
+          const newCount = newSnapshot.identityHashCounts.get(newHash) ?? 0;
+
+          if (oldCount !== newCount) {
+            // Element population changed — ordinals may have shifted
+            throw new StaleRefError(ref, newSnapshot.version);
+          }
+
+          if (oldCount > 1 && oldEntry.ordinal !== newEntry.ordinal) {
+            throw new StaleRefError(ref, newSnapshot.version);
+          }
         }
       }
-    }
-    // If no old entry (snapshot was nulled), we trust the fresh snapshot —
-    // the ref exists in the new snapshot with a valid frame map.
+      // If no old entry (snapshot was nulled), we trust the fresh snapshot —
+      // the ref exists in the new snapshot with a valid frame map.
 
-    // Build locator from NEW entry + NEW frame map
-    const locator = await this.buildLocator(newEntry);
-    const count = await locator.count();
-    if (count !== 1) {
-      throw new StaleRefError(ref, newSnapshot.version);
+      // Build locator from NEW entry + NEW frame map
+      const locator = await this.buildLocator(newEntry);
+      const count = await locator.count();
+      if (count !== 1) {
+        throw new StaleRefError(ref, newSnapshot.version);
+      }
+
+      // Final nav guard: if nav raced during verification, retry (bounded)
+      if (this.navEpoch !== verifyEpoch) {
+        if (attempt < MAX_RECOVERY_ATTEMPTS) {
+          continue;
+        }
+        throw new StaleRefError(ref, newSnapshot.version);
+      }
+
+      this.benchmark?.recordStaleRef(true);
+      return locator;
     }
 
-    // Final nav guard
-    if (this.navEpoch !== epochBefore) {
-      throw new StaleRefError(ref, newSnapshot.version);
-    }
-
-    this.benchmark?.recordStaleRef(true);
-    return locator;
+    throw new StaleRefError(ref, lastVersion);
   }
 
   /**
@@ -598,7 +726,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     const epochBefore = this.navEpoch;
     const locator = await this.resolveRefToLocator(ref);
     if (this.navEpoch !== epochBefore) {
-      throw new StaleRefError(ref, this.currentSnapshot?.version ?? 0);
+      // Epoch changes are expected during stale-recovery snapshot refresh.
+      // Only fail if the page is still marked stale after resolution.
+      if (this.snapshotStale) {
+        throw new StaleRefError(ref, this.currentSnapshot?.version ?? 0);
+      }
     }
     return action(locator);
   }
@@ -1023,17 +1155,22 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       this._consoleUnavailableNotified = true;
     }
 
-    // Cloudflare challenge page detection
+    // Cloudflare challenge / interstitial page detection
     const isChallenged = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
-    if (isChallenged) {
+    const isPhishingPage = /Suspected phishing|phishing site.*Cloudflare/i.test(title);
+    if (isChallenged || isPhishingPage) {
       const currentEngine = this.capabilities?.effectiveEngine ?? 'unknown';
       const engineHint = currentEngine === 'playwright'
         ? '- Switch engine: try patchright or camoufox for better stealth\n'
         : '';
-      const warning = 'CLOUDFLARE CHALLENGE PAGE DETECTED\n' +
-        'This page is showing a Cloudflare security challenge.\n' +
+      const pageType = isPhishingPage ? 'CLOUDFLARE PHISHING INTERSTITIAL' : 'CLOUDFLARE CHALLENGE PAGE';
+      const extra = isPhishingPage
+        ? '- Auto-dismiss was attempted (Turnstile challenge must solve first to enable bypass). Try navigating again or wait.\n'
+        : '- Wait: call browser_snapshot again in 5-10 seconds (challenge may auto-resolve)\n';
+      const warning = `${pageType} DETECTED\n` +
+        'This page is showing a Cloudflare security interstitial.\n' +
         'Options:\n' +
-        '- Wait: call browser_snapshot again in 5-10 seconds (challenge may auto-resolve)\n' +
+        extra +
         '- Import cookies: use oneagent_import_cookies with a cf_clearance cookie file\n' +
         engineHint +
         '- Current engine: ' + currentEngine + '\n\n';

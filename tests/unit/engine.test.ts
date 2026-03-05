@@ -301,6 +301,7 @@ vi.mock('node:fs', async () => {
 
 import { Engine, buildEnforcementSchema } from '../../src/core/engine.js';
 import { ContextOverrideMismatchError } from '../../src/browser/manager.js';
+import { PlaywrightMcpAdapter } from '../../src/browser/playwright-mcp-adapter.js';
 import { checkMethodAllowed, checkPathRisk } from '../../src/core/policy.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
 import { retryWithEscalation } from '../../src/replay/retry.js';
@@ -351,6 +352,56 @@ describe('Engine', () => {
     it('reports uptime >= 0', () => {
       const status = engine.getStatus();
       expect(status.uptime).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('createBrowserProvider()', () => {
+    it('reuses adapter across lazy calls for the same site/page', async () => {
+      const page = { isClosed: vi.fn().mockReturnValue(false) };
+      const context = { pages: () => [page], newPage: vi.fn() };
+      mockBrowserManager.getOrCreateContext.mockResolvedValue(context as any);
+
+      const adapterCtor = PlaywrightMcpAdapter as unknown as ReturnType<typeof vi.fn>;
+      adapterCtor.mockImplementation(() => ({ id: 'adapter-1' } as any));
+
+      const first = await engine.createBrowserProvider('example.com', ['example.com'], {
+        browserManager: mockBrowserManager as any,
+        lazy: true,
+      });
+      const second = await engine.createBrowserProvider('example.com', ['example.com'], {
+        browserManager: mockBrowserManager as any,
+        lazy: true,
+      });
+
+      expect(first).toBe(second);
+      expect(adapterCtor).toHaveBeenCalledTimes(1);
+    });
+
+    it('recreates adapter when active page object changes', async () => {
+      const page1 = { isClosed: vi.fn().mockReturnValue(false) };
+      const page2 = { isClosed: vi.fn().mockReturnValue(false) };
+      const context1 = { pages: () => [page1], newPage: vi.fn() };
+      const context2 = { pages: () => [page2], newPage: vi.fn() };
+      mockBrowserManager.getOrCreateContext
+        .mockResolvedValueOnce(context1 as any)
+        .mockResolvedValueOnce(context2 as any);
+
+      const adapterCtor = PlaywrightMcpAdapter as unknown as ReturnType<typeof vi.fn>;
+      adapterCtor
+        .mockImplementationOnce(() => ({ id: 'adapter-1' } as any))
+        .mockImplementationOnce(() => ({ id: 'adapter-2' } as any));
+
+      const first = await engine.createBrowserProvider('example.com', ['example.com'], {
+        browserManager: mockBrowserManager as any,
+        lazy: true,
+      });
+      const second = await engine.createBrowserProvider('example.com', ['example.com'], {
+        browserManager: mockBrowserManager as any,
+        lazy: true,
+      });
+
+      expect(first).not.toBe(second);
+      expect(adapterCtor).toHaveBeenCalledTimes(2);
     });
   });
 

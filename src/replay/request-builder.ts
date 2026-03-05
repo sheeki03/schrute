@@ -131,6 +131,11 @@ function filterHeadersForTier(
   for (const [key, value] of Object.entries(headers)) {
     const lowerKey = key.toLowerCase();
 
+    // Block HTTP/2 pseudo-headers — transport-level, not valid HTTP/1.1 headers
+    if (lowerKey.startsWith(':')) {
+      continue;
+    }
+
     // Always block hop-by-hop headers
     if ((BLOCKED_HOP_BY_HOP_HEADERS as readonly string[]).includes(lowerKey)) {
       continue;

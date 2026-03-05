@@ -346,13 +346,29 @@ function buildSkillId(
   return `${safeSiteId}.${safeAction}.v${version}`;
 }
 
+// HTTP/2 pseudo-headers are transport details, not API parameters
+const HTTP2_PSEUDO_HEADERS = new Set([
+  'header.:path', 'header.:method', 'header.:authority', 'header.:scheme', 'header.:status',
+]);
+
+// Sanitize a field path to a valid API property key: ^[a-zA-Z0-9_.-]{1,64}$
+function sanitizeFieldPath(fieldPath: string): string {
+  const sanitized = fieldPath
+    .replace(/[^a-zA-Z0-9_.-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_.-]+/, '')
+    .replace(/[_.-]+$/, '');
+  return sanitized.slice(0, 64) || 'param';
+}
+
 function buildParameters(paramEvidence?: ParameterEvidence[]): SkillParameter[] {
   if (!paramEvidence) return [];
 
   return paramEvidence
     .filter((pe) => pe.classification === 'parameter')
+    .filter((pe) => !HTTP2_PSEUDO_HEADERS.has(pe.fieldPath))
     .map((pe) => ({
-      name: pe.fieldPath,
+      name: sanitizeFieldPath(pe.fieldPath),
       type: inferType(pe.observedValues),
       source: pe.correlatesWithInput ? 'user_input' as const : 'extracted' as const,
       evidence: pe.observedValues.slice(0, 3), // keep first 3 as evidence

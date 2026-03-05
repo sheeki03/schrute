@@ -107,7 +107,7 @@ async function executeSkillWithGating(
 
   // Check skill is active
   if (skill.status !== SkillStatus.ACTIVE) {
-    const hint = skill.status === SkillStatus.DRAFT
+    const hint = skill.status === SkillStatus.DRAFT || skill.status === SkillStatus.BROKEN
       ? ' Use oneagent_activate to manually activate it first.'
       : '';
     return {

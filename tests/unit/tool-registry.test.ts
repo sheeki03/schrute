@@ -3,6 +3,7 @@ import {
   rankToolsByIntent,
   skillToToolName,
   skillToToolDefinition,
+  sanitizeParamKey,
   getBrowserToolDefinitions,
   META_TOOLS,
 } from '../../src/server/tool-registry.js';
@@ -107,6 +108,55 @@ describe('tool-registry', () => {
       });
       const def = skillToToolDefinition(skill);
       expect(def.inputSchema.required).toEqual(['id']);
+    });
+
+    it('sanitizes parameter names with invalid characters', () => {
+      const skill = makeSkill({
+        parameters: [
+          { name: 'header.:path', type: 'string', source: 'user_input', evidence: [] },
+          { name: 'header.:method', type: 'string', source: 'extracted', evidence: [] },
+          { name: 'query[search]', type: 'string', source: 'user_input', evidence: [] },
+        ],
+      });
+      const def = skillToToolDefinition(skill);
+      const props = def.inputSchema.properties as Record<string, unknown>;
+      const keys = Object.keys(props);
+      // All keys must match ^[a-zA-Z0-9_.-]{1,64}$
+      for (const key of keys) {
+        expect(key).toMatch(/^[a-zA-Z0-9_.-]{1,64}$/);
+      }
+      // Required array should also be sanitized
+      const required = def.inputSchema.required as string[];
+      for (const r of required) {
+        expect(r).toMatch(/^[a-zA-Z0-9_.-]{1,64}$/);
+      }
+    });
+  });
+
+  describe('sanitizeParamKey', () => {
+    it('passes through valid names', () => {
+      expect(sanitizeParamKey('id')).toBe('id');
+      expect(sanitizeParamKey('user_name')).toBe('user_name');
+      expect(sanitizeParamKey('header.accept')).toBe('header.accept');
+      expect(sanitizeParamKey('x-api-key')).toBe('x-api-key');
+    });
+
+    it('replaces colons with underscores', () => {
+      expect(sanitizeParamKey('header.:path')).toBe('header._path');
+      expect(sanitizeParamKey('header.:method')).toBe('header._method');
+    });
+
+    it('replaces brackets with underscores', () => {
+      expect(sanitizeParamKey('query[search]')).toBe('query_search');
+    });
+
+    it('truncates to 64 characters', () => {
+      const long = 'a'.repeat(100);
+      expect(sanitizeParamKey(long).length).toBeLessThanOrEqual(64);
+    });
+
+    it('returns "param" for empty result', () => {
+      expect(sanitizeParamKey(':::')).toBe('param');
     });
   });
 

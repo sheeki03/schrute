@@ -100,6 +100,8 @@ function extractCommonHeaders(requests: StructuredRequest[]): Record<string, str
 
   for (const [key, value] of Object.entries(firstHeaders)) {
     if (SKIP_HEADERS.has(key.toLowerCase())) continue;
+    // HTTP/2 pseudo-headers are transport-level, not API headers
+    if (key.startsWith(':')) continue;
 
     const allMatch = requests.every(r => r.headers[key] === value);
     if (allMatch) {

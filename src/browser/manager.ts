@@ -337,7 +337,10 @@ export class BrowserManager {
 
       // Launch-based: compare effective overrides
       const config = this.getResolvedConfig();
-      const effectiveProxy = overrides?.proxy ?? config.browser?.proxy;
+      const rawProxy = overrides?.proxy ?? config.browser?.proxy;
+      const effectiveProxy = rawProxy?.server && /example\.com|localhost:0\b|placeholder/i.test(rawProxy.server)
+        ? undefined
+        : rawProxy;
       const effectiveGeo = overrides?.geo ?? config.browser?.geo;
       const effectiveOverrides: ContextOverrides | undefined =
         effectiveProxy || effectiveGeo ? { proxy: effectiveProxy, geo: effectiveGeo } : undefined;
@@ -366,7 +369,11 @@ export class BrowserManager {
 
     const browser = await this.launchBrowser();
     const config = this.getResolvedConfig();
-    const effectiveProxy = overrides?.proxy ?? config.browser?.proxy;
+    const rawProxy = overrides?.proxy ?? config.browser?.proxy;
+    // Skip placeholder/example proxy configs that would always fail
+    const effectiveProxy = rawProxy?.server && /example\.com|localhost:0\b|placeholder/i.test(rawProxy.server)
+      ? undefined
+      : rawProxy;
     const effectiveGeo = overrides?.geo ?? config.browser?.geo;
 
     // Persistent storage directory for this site
