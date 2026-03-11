@@ -11,6 +11,15 @@ import type { CdpConnectionOptions } from './cdp-connector.js';
 
 const log = getLogger();
 
+/** Proxy configs with placeholder/example servers that would always fail */
+const PLACEHOLDER_PROXY_RE = /example\.com|localhost:0\b|placeholder/i;
+
+function resolveProxy(overrides: ContextOverrides | undefined, config: ReturnType<BrowserManager['getResolvedConfig']>): ProxyConfig | undefined {
+  const raw = overrides?.proxy ?? config.browser?.proxy;
+  if (raw?.server && PLACEHOLDER_PROXY_RE.test(raw.server)) return undefined;
+  return raw;
+}
+
 // ─── Context Overrides ─────────────────────────────────────────────
 
 export interface ContextOverrides {
@@ -337,10 +346,7 @@ export class BrowserManager {
 
       // Launch-based: compare effective overrides
       const config = this.getResolvedConfig();
-      const rawProxy = overrides?.proxy ?? config.browser?.proxy;
-      const effectiveProxy = rawProxy?.server && /example\.com|localhost:0\b|placeholder/i.test(rawProxy.server)
-        ? undefined
-        : rawProxy;
+      const effectiveProxy = resolveProxy(overrides, config);
       const effectiveGeo = overrides?.geo ?? config.browser?.geo;
       const effectiveOverrides: ContextOverrides | undefined =
         effectiveProxy || effectiveGeo ? { proxy: effectiveProxy, geo: effectiveGeo } : undefined;
@@ -369,11 +375,7 @@ export class BrowserManager {
 
     const browser = await this.launchBrowser();
     const config = this.getResolvedConfig();
-    const rawProxy = overrides?.proxy ?? config.browser?.proxy;
-    // Skip placeholder/example proxy configs that would always fail
-    const effectiveProxy = rawProxy?.server && /example\.com|localhost:0\b|placeholder/i.test(rawProxy.server)
-      ? undefined
-      : rawProxy;
+    const effectiveProxy = resolveProxy(overrides, config);
     const effectiveGeo = overrides?.geo ?? config.browser?.geo;
 
     // Persistent storage directory for this site

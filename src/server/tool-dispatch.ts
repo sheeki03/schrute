@@ -6,6 +6,7 @@ import type { SiteRepository } from '../storage/site-repository.js';
 import type { ConfirmationManager } from './confirmation.js';
 import type { SkillSpec, OneAgentConfig, ProxyConfig, GeoEmulationConfig } from '../skill/types.js';
 import type { ContextOverrides } from '../browser/manager.js';
+import { DEFAULT_SESSION_NAME } from '../browser/multi-session.js';
 import {
   Capability,
   SkillStatus,
@@ -439,7 +440,7 @@ export async function dispatchToolCall(
           return { content: [{ type: 'text', text: 'Error: name is required and must be a string' }], isError: true };
         }
         const name = rawCdpName;
-        if (name === 'default') {
+        if (name === DEFAULT_SESSION_NAME) {
           return { content: [{ type: 'text', text: 'Error: Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.' }], isError: true };
         }
 
@@ -532,11 +533,11 @@ export async function dispatchToolCall(
         }
         const force = rawForce === true;
         const multiSession = engine.getMultiSessionManager();
-        const expectedId = name === 'default' && force
+        const expectedId = name === DEFAULT_SESSION_NAME && force
           ? engine.getActiveSessionId()
           : null;
         await multiSession.close(name, { engineMode: engine.getStatus().mode, force });
-        if (name === 'default' && force) {
+        if (name === DEFAULT_SESSION_NAME && force) {
           engine.resetExploreState(expectedId);
         }
         return { content: [{ type: 'text', text: JSON.stringify({ closed: name }) }] };
@@ -657,7 +658,7 @@ export async function dispatchToolCall(
 
       // During recording, force default session
       if (engine.getStatus().mode === 'recording') {
-        sessionName = 'default';
+        sessionName = DEFAULT_SESSION_NAME;
       } else if (explicitSession) {
         sessionName = explicitSession;
       } else {
@@ -666,7 +667,7 @@ export async function dispatchToolCall(
 
       // Resolve session
       let session;
-      if (explicitSession && sessionName !== 'default') {
+      if (explicitSession && sessionName !== DEFAULT_SESSION_NAME) {
         session = multiSession.get(sessionName);
         if (!session) {
           return {

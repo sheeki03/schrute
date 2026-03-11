@@ -1,4 +1,5 @@
 import { extractPathParams } from '../core/utils.js';
+import { sanitizeParamKey } from '../server/tool-registry.js';
 import type {
   SkillSpec,
   SkillParameter,
@@ -351,15 +352,8 @@ const HTTP2_PSEUDO_HEADERS = new Set([
   'header.:path', 'header.:method', 'header.:authority', 'header.:scheme', 'header.:status',
 ]);
 
-// Sanitize a field path to a valid API property key: ^[a-zA-Z0-9_.-]{1,64}$
-function sanitizeFieldPath(fieldPath: string): string {
-  const sanitized = fieldPath
-    .replace(/[^a-zA-Z0-9_.-]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^[_.-]+/, '')
-    .replace(/[_.-]+$/, '');
-  return sanitized.slice(0, 64) || 'param';
-}
+// Reuse the canonical sanitizer from tool-registry
+const sanitizeFieldPath = sanitizeParamKey;
 
 function buildParameters(paramEvidence?: ParameterEvidence[]): SkillParameter[] {
   if (!paramEvidence) return [];

@@ -115,8 +115,10 @@ export function promoteSkill(skill: SkillSpec, config?: OneAgentConfig): Promoti
  * Bypasses auto-promotion gates (sample count, validations, side-effect class).
  * The first execution will still require confirmation.
  */
+const FORCE_PROMOTABLE: ReadonlySet<SkillStatusName> = new Set([SkillStatus.DRAFT, SkillStatus.BROKEN]);
+
 export function forcePromote(skill: SkillSpec): PromotionResult {
-  if (skill.status !== SkillStatus.DRAFT && skill.status !== SkillStatus.BROKEN) {
+  if (!FORCE_PROMOTABLE.has(skill.status)) {
     throw new Error(`Cannot activate skill '${skill.id}': status is '${skill.status}', must be 'draft' or 'broken'`);
   }
   const now = Date.now();

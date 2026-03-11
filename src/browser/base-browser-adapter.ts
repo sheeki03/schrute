@@ -42,6 +42,10 @@ import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
 
+// Cloudflare page title patterns — used for both challenge detection and snapshot warnings
+const CF_CHALLENGE_TITLE_RE = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i;
+const CF_PHISHING_TITLE_RE = /Suspected phishing|phishing site.*Cloudflare/i;
+
 // Browser-context globals used in page.evaluate/waitForFunction callbacks.
 // These run in the browser, not Node — declared here to satisfy TypeScript.
 declare const document: { querySelector(sel: string): unknown; title: string };
@@ -74,7 +78,7 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
   }
 
   // Cloudflare phishing/safety interstitial — auto-dismiss "Ignore & Proceed"
-  const isPhishingWarning = /Suspected phishing|Suspected Phishing|phishing site.*Cloudflare/i.test(title);
+  const isPhishingWarning = CF_PHISHING_TITLE_RE.test(title);
   if (isPhishingWarning) {
     log.info('Cloudflare phishing interstitial detected, attempting auto-dismiss...');
     const dismissed = await dismissCloudflareInterstitial(page, timeoutMs);
@@ -86,7 +90,7 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
     return false;
   }
 
-  const titleMatch = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
+  const titleMatch = CF_CHALLENGE_TITLE_RE.test(title);
 
   if (!challengeElements && !titleMatch) return false;
 
@@ -136,16 +140,17 @@ async function dismissCloudflareInterstitial(page: Page, timeoutMs: number): Pro
       try {
         await btn.waitFor({ state: 'attached', timeout: 2000 });
         // Poll for enabled state
+        // waitMs is always a safe integer derived from Math.min(Math.floor(...), 20_000)
         const enabled = await page.evaluate(`
           new Promise(resolve => {
-            const el = document.getElementById('bypass-button');
+            var el = document.getElementById('bypass-button');
             if (!el) return resolve(false);
             if (!el.disabled) return resolve(true);
-            const obs = new MutationObserver(() => {
+            var obs = new MutationObserver(function() {
               if (!el.disabled) { obs.disconnect(); resolve(true); }
             });
             obs.observe(el, { attributes: true, attributeFilter: ['disabled'] });
-            setTimeout(() => { obs.disconnect(); resolve(false); }, ${waitMs});
+            setTimeout(function() { obs.disconnect(); resolve(false); }, ${waitMs});
           })
         `);
         if (enabled) {
@@ -242,6 +247,7 @@ const MAX_RECENT_EVENTS = 20;
 export abstract class BaseBrowserAdapter implements BrowserProvider {
   protected page: Page;
   protected domainAllowlist: string[];
+  protected static readonly MAX_NETWORK_ENTRIES = 500;
   protected networkEntries: NetworkEntry[] = [];
   protected flags: BrowserFeatureFlags;
   protected benchmark: BrowserBenchmark | null;
@@ -1156,8 +1162,8 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     }
 
     // Cloudflare challenge / interstitial page detection
-    const isChallenged = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i.test(title);
-    const isPhishingPage = /Suspected phishing|phishing site.*Cloudflare/i.test(title);
+    const isChallenged = CF_CHALLENGE_TITLE_RE.test(title);
+    const isPhishingPage = CF_PHISHING_TITLE_RE.test(title);
     if (isChallenged || isPhishingPage) {
       const currentEngine = this.capabilities?.effectiveEngine ?? 'unknown';
       const engineHint = currentEngine === 'playwright'
@@ -1554,6 +1560,10 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
             duration: endTime - startTime,
           },
         });
+        // Evict oldest entries to prevent unbounded memory growth
+        if (this.networkEntries.length > BaseBrowserAdapter.MAX_NETWORK_ENTRIES) {
+          this.networkEntries.splice(0, this.networkEntries.length - BaseBrowserAdapter.MAX_NETWORK_ENTRIES);
+        }
         this.benchmark?.recordNetworkEntries(this.networkEntries.length);
       } catch (err) {
         log.debug({ err }, 'Network capture failed for response event');

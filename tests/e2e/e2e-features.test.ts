@@ -236,6 +236,7 @@ vi.mock('../../src/core/session.js', () => ({
 
 // Mock multi-session manager
 vi.mock('../../src/browser/multi-session.js', () => ({
+  DEFAULT_SESSION_NAME: 'default',
   MultiSessionManager: vi.fn().mockImplementation(() => ({
     getOrCreate: vi.fn().mockReturnValue({
       name: 'default',

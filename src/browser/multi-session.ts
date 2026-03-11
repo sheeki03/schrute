@@ -5,6 +5,8 @@ import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
 
+export const DEFAULT_SESSION_NAME = 'default';
+
 export interface NamedSession {
   name: string;
   siteId: string;
@@ -20,14 +22,14 @@ export interface NamedSession {
  */
 export class MultiSessionManager {
   private sessions = new Map<string, NamedSession>();
-  private active: string = 'default';
+  private active: string = DEFAULT_SESSION_NAME;
   private config?: OneAgentConfig;
 
   constructor(defaultBrowserManager: BrowserManager, config?: OneAgentConfig) {
     this.config = config;
     // Create the default session entry
-    this.sessions.set('default', {
-      name: 'default',
+    this.sessions.set(DEFAULT_SESSION_NAME, {
+      name: DEFAULT_SESSION_NAME,
       siteId: '',
       browserManager: defaultBrowserManager,
       isCdp: false,
@@ -38,7 +40,7 @@ export class MultiSessionManager {
   /**
    * Get or create a named session (launch-based).
    */
-  getOrCreate(name: string = 'default'): NamedSession {
+  getOrCreate(name: string = DEFAULT_SESSION_NAME): NamedSession {
     const existing = this.sessions.get(name);
     if (existing) return existing;
 
@@ -62,7 +64,7 @@ export class MultiSessionManager {
     options: import('./cdp-connector.js').CdpConnectionOptions,
     siteId: string,
   ): Promise<NamedSession> {
-    if (name === 'default') {
+    if (name === DEFAULT_SESSION_NAME) {
       throw new Error('Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.');
     }
     if (this.sessions.has(name)) {
@@ -110,7 +112,7 @@ export class MultiSessionManager {
     const session = this.sessions.get(name);
     if (!session) return;
 
-    if (name === 'default') {
+    if (name === DEFAULT_SESSION_NAME) {
       // Guard: block close during exploring/recording unless forced
       if (!options?.force) {
         const mode = options?.engineMode;
@@ -144,7 +146,7 @@ export class MultiSessionManager {
 
     // Auto-fallback to default if closing active session
     if (this.active === name) {
-      this.active = 'default';
+      this.active = DEFAULT_SESSION_NAME;
     }
 
     log.info({ session: name }, 'Closed named browser session');
@@ -155,7 +157,7 @@ export class MultiSessionManager {
    */
   async closeAll(): Promise<void> {
     for (const [name] of this.sessions) {
-      if (name === 'default') {
+      if (name === DEFAULT_SESSION_NAME) {
         await this.sessions.get(name)!.browserManager.closeAll();
       } else {
         await this.close(name, { force: true });

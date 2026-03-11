@@ -7,6 +7,7 @@ import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
 import { ConfirmationManager } from './confirmation.js';
+import { DEFAULT_SESSION_NAME } from '../browser/multi-session.js';
 import { createRouter, type RouterDeps, type RouterResult } from './router.js';
 import { buildOpenApiSpec } from './openapi-server.js';
 import { sanitizeSiteId } from '../core/utils.js';
@@ -287,11 +288,11 @@ export async function createRestServer(options?: {
       const force = (request.query as Record<string, string>)?.force === 'true';
       const multiSession = engine.getMultiSessionManager();
       try {
-        const expectedId = name === 'default' && force
+        const expectedId = name === DEFAULT_SESSION_NAME && force
           ? engine.getActiveSessionId()
           : null;
         await multiSession.close(name, { engineMode: engine.getStatus().mode, force });
-        if (name === 'default' && force) {
+        if (name === DEFAULT_SESSION_NAME && force) {
           engine.resetExploreState(expectedId);
         }
         reply.code(200).send({ closed: name });
@@ -326,7 +327,7 @@ export async function createRestServer(options?: {
         reply.code(400).send({ error: 'name is required' });
         return;
       }
-      if (name === 'default') {
+      if (name === DEFAULT_SESSION_NAME) {
         reply.code(400).send({ error: 'Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.' });
         return;
       }

@@ -28,7 +28,7 @@ import { detectAndWaitForChallenge } from '../browser/base-browser-adapter.js';
 import { getFlags } from '../browser/feature-flags.js';
 import { BrowserManager, ContextOverrideMismatchError } from '../browser/manager.js';
 import type { ContextOverrides } from '../browser/manager.js';
-import { MultiSessionManager } from '../browser/multi-session.js';
+import { MultiSessionManager, DEFAULT_SESSION_NAME } from '../browser/multi-session.js';
 import { detectAuth } from '../capture/auth-detector.js';
 import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
@@ -52,7 +52,8 @@ import { canonicalizeRequest } from '../capture/canonicalizer.js';
 import { recordFilteredEntries } from '../capture/noise-filter.js';
 import { inferSchema, mergeSchemas } from '../capture/schema-inferrer.js';
 import { loadCachedTools } from '../discovery/webmcp-scanner.js';
-import type { SkillStatusName, GeoEmulationConfig } from '../skill/types.js';
+import { SkillStatus } from '../skill/types.js';
+import type { SkillStatusName, GeoEmulationConfig, PermanentTierLock } from '../skill/types.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -126,6 +127,9 @@ export function removeStaleSessionJson(config: OneAgentConfig): void {
  *       B2: Health monitoring (success-rate tracking and degradation alerts)
  */
 
+/** Minimal page interface for provider cache — avoids importing full Playwright types */
+interface CachedPage { isClosed?: () => boolean }
+
 // ─── Engine ───────────────────────────────────────────────────────
 
 export class Engine {
@@ -147,7 +151,7 @@ export class Engine {
   private recordingListenerCleanups: Array<() => void> = [];
   private providerCache = new WeakMap<
     BrowserManager,
-    Map<string, { adapter: PlaywrightMcpAdapter; page: unknown; domainsKey: string }>
+    Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }>
   >();
 
   constructor(config: OneAgentConfig) {
@@ -180,7 +184,7 @@ export class Engine {
     return this.activeSessionId;
   }
 
-  private getProviderCacheForManager(manager: BrowserManager): Map<string, { adapter: PlaywrightMcpAdapter; page: unknown; domainsKey: string }> {
+  private getProviderCacheForManager(manager: BrowserManager): Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }> {
     let cache = this.providerCache.get(manager);
     if (!cache) {
       cache = new Map();
@@ -193,6 +197,31 @@ export class Engine {
     return [...domains].sort().join('\u0000');
   }
 
+  /** Resolve adapter from cache or create a new one for the given page/domains */
+  private resolveAdapter(
+    providerCache: Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }>,
+    siteId: string,
+    page: CachedPage,
+    domains: string[],
+    manager: BrowserManager,
+  ): PlaywrightMcpAdapter {
+    const domainsKey = this.domainsKey(domains);
+    const cached = providerCache.get(siteId);
+    const pageIsClosed = cached
+      && typeof cached.page.isClosed === 'function'
+      && cached.page.isClosed();
+    if (cached && !pageIsClosed && cached.page === page && cached.domainsKey === domainsKey) {
+      return cached.adapter;
+    }
+    const adapter = new PlaywrightMcpAdapter(page as any, domains, {
+      flags: getFlags(this.config),
+      capabilities: manager.getCapabilities() ?? undefined,
+      handlerTimeoutMs: manager.getHandlerTimeoutMs(),
+    });
+    providerCache.set(siteId, { adapter, page, domainsKey });
+    return adapter;
+  }
+
   resetExploreState(expectedId: string | null): void {
     if (this.activeSessionId !== expectedId) return;
     if (this.activeSessionId) {
@@ -200,8 +229,8 @@ export class Engine {
     }
     this.activeSessionId = null;
     this.mode = 'idle';
-    this.multiSessionManager.updateSiteId('default', '');
-    this.multiSessionManager.updateContextOverrides('default', undefined);
+    this.multiSessionManager.updateSiteId(DEFAULT_SESSION_NAME, '');
+    this.multiSessionManager.updateContextOverrides(DEFAULT_SESSION_NAME, undefined);
   }
 
   /**
@@ -229,45 +258,13 @@ export class Engine {
       }
       const pages = existing.pages();
       const page = pages[0] ?? await existing.newPage();
-      const effectiveDomains = domains ?? [siteId];
-      const domainsKey = this.domainsKey(effectiveDomains);
-      const cached = providerCache.get(siteId);
-      const pageIsClosed = cached
-        && typeof (cached.page as { isClosed?: () => boolean }).isClosed === 'function'
-        && (cached.page as { isClosed: () => boolean }).isClosed();
-      if (cached && !pageIsClosed && cached.page === page && cached.domainsKey === domainsKey) {
-        return cached.adapter;
-      }
-
-      const adapter = new PlaywrightMcpAdapter(page, effectiveDomains, {
-        flags: getFlags(this.config),
-        capabilities: manager.getCapabilities() ?? undefined,
-        handlerTimeoutMs: manager.getHandlerTimeoutMs(),
-      });
-      providerCache.set(siteId, { adapter, page, domainsKey });
-      return adapter;
+      return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
     }
 
     const context = await manager.getOrCreateContext(siteId, options?.overrides);
     const pages = context.pages();
     const page = pages[0] ?? await context.newPage();
-    const effectiveDomains = domains ?? [siteId];
-    const domainsKey = this.domainsKey(effectiveDomains);
-    const cached = providerCache.get(siteId);
-    const pageIsClosed = cached
-      && typeof (cached.page as { isClosed?: () => boolean }).isClosed === 'function'
-      && (cached.page as { isClosed: () => boolean }).isClosed();
-    if (cached && !pageIsClosed && cached.page === page && cached.domainsKey === domainsKey) {
-      return cached.adapter;
-    }
-
-    const adapter = new PlaywrightMcpAdapter(page, effectiveDomains, {
-      flags: getFlags(this.config),
-      capabilities: manager.getCapabilities() ?? undefined,
-      handlerTimeoutMs: manager.getHandlerTimeoutMs(),
-    });
-    providerCache.set(siteId, { adapter, page, domainsKey });
-    return adapter;
+    return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
   }
 
   private navigateFireAndForget(siteId: string, url: string, overrides?: ContextOverrides, sessionId?: string): void {
@@ -351,8 +348,8 @@ export class Engine {
       this.mode = 'exploring';
 
       // Sync default session siteId
-      this.multiSessionManager.updateSiteId('default', siteId);
-      this.multiSessionManager.updateContextOverrides('default', overrides);
+      this.multiSessionManager.updateSiteId(DEFAULT_SESSION_NAME, siteId);
+      this.multiSessionManager.updateContextOverrides(DEFAULT_SESSION_NAME, overrides);
 
       this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
@@ -396,13 +393,13 @@ export class Engine {
     }
 
     // Verify recording is on the default launch-based session
-    if (this.multiSessionManager.getActive() !== 'default') {
+    if (this.multiSessionManager.getActive() !== DEFAULT_SESSION_NAME) {
       throw new Error(
         'Recording is only supported on the default session. ' +
         'Switch to the default session first with oneagent_switch_session.',
       );
     }
-    const defaultSession = this.multiSessionManager.get('default');
+    const defaultSession = this.multiSessionManager.get(DEFAULT_SESSION_NAME);
     if (!defaultSession) {
       throw new Error('No default session available for recording.');
     }
@@ -907,8 +904,8 @@ export class Engine {
       }
 
       // A2: Handle structural failures — tier lock
-      const structuralCauses = ['js_computed_field', 'protocol_sensitivity', 'signed_payload'];
-      if (result.failureCause && structuralCauses.includes(result.failureCause)) {
+      const structuralCauses: ReadonlySet<PermanentTierLock['reason']> = new Set(['js_computed_field', 'protocol_sensitivity', 'signed_payload']);
+      if (result.failureCause && structuralCauses.has(result.failureCause as PermanentTierLock['reason'])) {
         const failResult = handleFailure(skill, result.failureCause);
         this.skillRepo.updateTier(skill.id, failResult.newTier, failResult.tierLock);
       }
@@ -933,7 +930,7 @@ export class Engine {
           const enforcementSchema = buildEnforcementSchema(skill.outputSchema as Record<string, unknown>);
           const drift = detectDrift(enforcementSchema, result.data);
           if (drift.breaking) {
-            this.skillRepo.update(skill.id, { status: 'stale' as SkillStatusName, consecutiveValidations: 0 });
+            this.skillRepo.update(skill.id, { status: SkillStatus.STALE, consecutiveValidations: 0 });
             notify(createEvent('skill_demoted', skill.id, skill.siteId,
               { reason: 'schema_drift', changes: drift.changes.length }), this.config).catch(err => this.log.debug({ err }, 'Notification failed'));
             this.log.warn({ skillId: skill.id, changes: drift.changes.length }, 'Breaking schema drift — skill demoted');
@@ -949,7 +946,7 @@ export class Engine {
       // B2: Health monitoring
       const [healthReport] = monitorSkills([skill], this.metricsRepo);
       if (healthReport?.status === 'broken') {
-        this.skillRepo.update(skill.id, { status: 'broken' as SkillStatusName, consecutiveValidations: 0 });
+        this.skillRepo.update(skill.id, { status: SkillStatus.BROKEN, consecutiveValidations: 0 });
         notify(createEvent('skill_broken', skill.id, skill.siteId,
           { successRate: healthReport.successRate }), this.config).catch(err => this.log.debug({ err }, 'Notification failed'));
       } else if (healthReport?.status === 'degrading') {
@@ -995,7 +992,7 @@ export class Engine {
     let activeNamedSession: EngineStatus['activeNamedSession'];
     const activeName = this.multiSessionManager.getActive();
     const activeNamed = this.multiSessionManager.get(activeName);
-    if (activeNamed && (activeName !== 'default' || activeNamed.contextOverrides)) {
+    if (activeNamed && (activeName !== DEFAULT_SESSION_NAME || activeNamed.contextOverrides)) {
       activeNamedSession = {
         name: activeName,
         siteId: activeNamed.siteId,
