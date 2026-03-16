@@ -1,7 +1,7 @@
 /**
  * MCP End-to-End Test — exercises the real MCP stdio server
  *
- * Spawns the actual OneAgent MCP server process, sends JSON-RPC 2.0 messages
+ * Spawns the actual Schrute MCP server process, sends JSON-RPC 2.0 messages
  * via stdin, reads responses from stdout, and verifies the full wiring lifecycle:
  *
  *   initialize → tools/list → explore → record → stop → skills → status → execute
@@ -57,7 +57,7 @@ class McpTestClient {
       env: {
         ...process.env,
         ...env,
-        ONEAGENT_LOG_LEVEL: 'silent',
+        SCHRUTE_LOG_LEVEL: 'silent',
         NODE_OPTIONS: '--no-warnings',
       },
     });
@@ -187,14 +187,14 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
   beforeAll(async () => {
     // Create temp data directory for the server
-    tempDir = mkdtempSync(join(tmpdir(), 'oneagent-mcp-e2e-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'schrute-mcp-e2e-'));
 
     // Start mock REST server
     mockServer = await createRestMockServer();
 
     // Start MCP server
     client = new McpTestClient(serverEntry, {
-      ONEAGENT_DATA_DIR: tempDir,
+      SCHRUTE_DATA_DIR: tempDir,
     });
   }, 15000);
 
@@ -210,7 +210,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(resp.result).toBeDefined();
 
     const result = resp.result as any;
-    expect(result.serverInfo?.name).toBe('oneagent');
+    expect(result.serverInfo?.name).toBe('schrute');
     expect(result.capabilities?.tools).toBeDefined();
   }, 10000);
 
@@ -218,17 +218,17 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const tools = await client.listTools();
 
     const toolNames = tools.map(t => t.name);
-    expect(toolNames).toContain('oneagent_explore');
-    expect(toolNames).toContain('oneagent_record');
-    expect(toolNames).toContain('oneagent_stop');
-    expect(toolNames).toContain('oneagent_skills');
-    expect(toolNames).toContain('oneagent_status');
-    expect(toolNames).toContain('oneagent_dry_run');
-    expect(toolNames).toContain('oneagent_confirm');
+    expect(toolNames).toContain('schrute_explore');
+    expect(toolNames).toContain('schrute_record');
+    expect(toolNames).toContain('schrute_stop');
+    expect(toolNames).toContain('schrute_skills');
+    expect(toolNames).toContain('schrute_status');
+    expect(toolNames).toContain('schrute_dry_run');
+    expect(toolNames).toContain('schrute_confirm');
   }, 10000);
 
-  it('oneagent_status returns idle state', async () => {
-    const result = await client.callTool('oneagent_status');
+  it('schrute_status returns idle state', async () => {
+    const result = await client.callTool('schrute_status');
     expect(result.isError).toBeFalsy();
 
     const data = JSON.parse(result.content[0].text);
@@ -236,8 +236,8 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.uptime).toBeGreaterThanOrEqual(0);
   }, 10000);
 
-  it('oneagent_explore creates a session', async () => {
-    const result = await client.callTool('oneagent_explore', {
+  it('schrute_explore creates a session', async () => {
+    const result = await client.callTool('schrute_explore', {
       url: mockServer.url + '/api/users',
     });
     expect(result.isError).toBeFalsy();
@@ -247,8 +247,8 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.siteId).toBe('127.0.0.1');
   }, 10000);
 
-  it('oneagent_status shows exploring after explore', async () => {
-    const result = await client.callTool('oneagent_status');
+  it('schrute_status shows exploring after explore', async () => {
+    const result = await client.callTool('schrute_status');
     expect(result.isError).toBeFalsy();
 
     const data = JSON.parse(result.content[0].text);
@@ -257,8 +257,8 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.activeSession.siteId).toBe('127.0.0.1');
   }, 10000);
 
-  it('oneagent_record starts recording', async () => {
-    const result = await client.callTool('oneagent_record', {
+  it('schrute_record starts recording', async () => {
+    const result = await client.callTool('schrute_record', {
       name: 'mcp-e2e-test',
     });
     expect(result.isError).toBeFalsy();
@@ -268,16 +268,16 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.siteId).toBe('127.0.0.1');
   }, 10000);
 
-  it('oneagent_status shows recording after record', async () => {
-    const result = await client.callTool('oneagent_status');
+  it('schrute_status shows recording after record', async () => {
+    const result = await client.callTool('schrute_status');
     expect(result.isError).toBeFalsy();
 
     const data = JSON.parse(result.content[0].text);
     expect(data.mode).toBe('recording');
   }, 10000);
 
-  it('oneagent_stop stops recording and runs capture pipeline', async () => {
-    const result = await client.callTool('oneagent_stop');
+  it('schrute_stop stops recording and runs capture pipeline', async () => {
+    const result = await client.callTool('schrute_stop');
     // Stop might succeed or report no HAR (since we didn't actually browse)
     // Either is fine — the important thing is the MCP call doesn't crash
     const data = JSON.parse(result.content[0].text);
@@ -285,42 +285,44 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data).toBeDefined();
   }, 15000);
 
-  it('oneagent_status returns to exploring after stop', async () => {
-    const result = await client.callTool('oneagent_status');
+  it('schrute_status returns to exploring after stop', async () => {
+    const result = await client.callTool('schrute_status');
     expect(result.isError).toBeFalsy();
 
     const data = JSON.parse(result.content[0].text);
     expect(data.mode).toBe('exploring');
   }, 10000);
 
-  it('oneagent_skills returns skill list (may be empty without browser)', async () => {
-    const result = await client.callTool('oneagent_skills', {
+  it('schrute_skills returns skill list (may be empty without browser)', async () => {
+    const result = await client.callTool('schrute_skills', {
       siteId: '127.0.0.1',
     });
     expect(result.isError).toBeFalsy();
 
     const data = JSON.parse(result.content[0].text);
-    // Data is an array of skills (may be empty since no real browser traffic)
-    expect(Array.isArray(data)).toBe(true);
+    // Data is a grouped skills object with totalSkills and sites
+    expect(data.totalSkills).toBeDefined();
+    expect(typeof data.totalSkills).toBe('number');
+    expect(data.sites).toBeDefined();
   }, 10000);
 
-  it('oneagent_dry_run validates error on missing skill', async () => {
-    const result = await client.callTool('oneagent_dry_run', {
+  it('schrute_dry_run validates error on missing skill', async () => {
+    const result = await client.callTool('schrute_dry_run', {
       skillId: 'nonexistent.skill.v1',
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
   }, 10000);
 
-  it('oneagent_explore with invalid URL returns error', async () => {
-    const result = await client.callTool('oneagent_explore', {
+  it('schrute_explore with invalid URL returns error', async () => {
+    const result = await client.callTool('schrute_explore', {
       url: 'not-a-url',
     });
     expect(result.isError).toBe(true);
   }, 10000);
 
-  it('oneagent_record without name returns error', async () => {
-    const result = await client.callTool('oneagent_record', {});
+  it('schrute_record without name returns error', async () => {
+    const result = await client.callTool('schrute_record', {});
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('name is required');
   }, 10000);
@@ -332,8 +334,8 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
     // All meta tools should still be present
     const toolNames = tools.map(t => t.name);
-    expect(toolNames).toContain('oneagent_explore');
-    expect(toolNames).toContain('oneagent_status');
+    expect(toolNames).toContain('schrute_explore');
+    expect(toolNames).toContain('schrute_status');
   }, 10000);
 
   // ═══════════════════════════════════════════════════════════════
@@ -344,41 +346,41 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     // Note: these tests run after the main lifecycle tests above,
     // so the engine is in 'exploring' mode (after stop, mode goes back to exploring).
 
-    it('oneagent_stop without active recording returns error', async () => {
+    it('schrute_stop without active recording returns error', async () => {
       // Engine is in exploring mode (not recording), so stop should fail
-      const result = await client.callTool('oneagent_stop');
+      const result = await client.callTool('schrute_stop');
       // callTool throws on MCP error, but the tool dispatch returns isError
       // If router catches the engine error, we get isError response
       const data = result.content[0].text;
       expect(data).toContain('No active recording');
     }, 10000);
 
-    it('double oneagent_record returns error on second call', async () => {
+    it('double schrute_record returns error on second call', async () => {
       // Start first recording
-      const first = await client.callTool('oneagent_record', { name: 'first-rec' });
+      const first = await client.callTool('schrute_record', { name: 'first-rec' });
       expect(first.isError).toBeFalsy();
 
       // Second record while already recording should fail
-      const second = await client.callTool('oneagent_record', { name: 'second-rec' });
+      const second = await client.callTool('schrute_record', { name: 'second-rec' });
       const data = second.content[0].text;
       expect(data).toContain('Cannot start recording');
 
       // Clean up: stop the first recording
-      await client.callTool('oneagent_stop');
+      await client.callTool('schrute_stop');
     }, 15000);
 
-    it('oneagent_record is rejected after oneagent_stop when in idle mode', async () => {
+    it('schrute_record is rejected after schrute_stop when in idle mode', async () => {
       // First stop the recording from the previous test if still active
       // Start recording, stop, then verify we're back in exploring mode
-      await client.callTool('oneagent_record', { name: 'temp-rec' });
+      await client.callTool('schrute_record', { name: 'temp-rec' });
 
-      const statusDuring = await client.callTool('oneagent_status');
+      const statusDuring = await client.callTool('schrute_status');
       const duringData = JSON.parse(statusDuring.content[0].text);
       expect(duringData.mode).toBe('recording');
 
-      await client.callTool('oneagent_stop');
+      await client.callTool('schrute_stop');
 
-      const statusAfter = await client.callTool('oneagent_status');
+      const statusAfter = await client.callTool('schrute_status');
       const afterData = JSON.parse(statusAfter.content[0].text);
       expect(afterData.mode).toBe('exploring');
     }, 15000);
@@ -392,7 +394,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     it('session management tools route correctly', async () => {
       // 1. We already have an explore session (site A = mock server).
       //    Verify active session is 'default'
-      const sessionsResult = await client.callTool('oneagent_sessions');
+      const sessionsResult = await client.callTool('schrute_sessions');
       expect(sessionsResult.isError).toBeFalsy();
       const sessions = JSON.parse(sessionsResult.content[0].text);
       expect(Array.isArray(sessions)).toBe(true);
@@ -402,7 +404,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
       // 2. Attempt to connect CDP session (will fail without real CDP, but
       //    validates the routing and error handling)
-      const cdpResult = await client.callTool('oneagent_connect_cdp', {
+      const cdpResult = await client.callTool('schrute_connect_cdp', {
         name: 'session-b',
         port: 19222, // unlikely to have a real CDP endpoint
       });
@@ -411,13 +413,13 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       expect(cdpResult.content[0].text).toBeDefined();
 
       // 3. Verify default session is still active after failed CDP connect
-      const sessionsAfter = await client.callTool('oneagent_sessions');
+      const sessionsAfter = await client.callTool('schrute_sessions');
       const sessionsData = JSON.parse(sessionsAfter.content[0].text);
       const stillDefault = sessionsData.find((s: any) => s.name === 'default');
       expect(stillDefault.active).toBe(true);
 
       // 4. Switch to non-existent session should error
-      const switchResult = await client.callTool('oneagent_switch_session', {
+      const switchResult = await client.callTool('schrute_switch_session', {
         name: 'nonexistent',
       });
       // setActive may throw or silently accept — verify either way
@@ -430,20 +432,20 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('Cookie persistence', () => {
-    it('oneagent_import_cookies requires siteId and cookieFile', async () => {
-      const result = await client.callTool('oneagent_import_cookies', {});
+    it('schrute_import_cookies requires siteId and cookieFile', async () => {
+      const result = await client.callTool('schrute_import_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('required');
     }, 10000);
 
-    it('oneagent_export_cookies requires siteId', async () => {
-      const result = await client.callTool('oneagent_export_cookies', {});
+    it('schrute_export_cookies requires siteId', async () => {
+      const result = await client.callTool('schrute_export_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('required');
     }, 10000);
 
-    it('oneagent_import_cookies with missing file returns error', async () => {
-      const result = await client.callTool('oneagent_import_cookies', {
+    it('schrute_import_cookies with missing file returns error', async () => {
+      const result = await client.callTool('schrute_import_cookies', {
         siteId: '127.0.0.1',
         cookieFile: '/tmp/nonexistent-cookie-file-12345.txt',
       });
@@ -451,9 +453,9 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       expect(result.content[0].text).toContain('not found');
     }, 10000);
 
-    it('oneagent_export_cookies on explored site returns cookie list', async () => {
+    it('schrute_export_cookies on explored site returns cookie list', async () => {
       // The engine should have a browser context for 127.0.0.1 from prior explore
-      const result = await client.callTool('oneagent_export_cookies', {
+      const result = await client.callTool('schrute_export_cookies', {
         siteId: '127.0.0.1',
       });
       // May succeed (empty cookies) or error if context was lost

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { OneAgentConfig, BrowserProvider } from '../../src/skill/types.js';
+import type { SchruteConfig, BrowserProvider } from '../../src/skill/types.js';
 
 // ─── Mock modules before importing ───────────────────────────────────
 
@@ -30,7 +30,7 @@ import { scanWebMcp } from '../../src/discovery/webmcp-scanner.js';
 
 // ─── Config ──────────────────────────────────────────────────────────
 
-const baseConfig: OneAgentConfig = {
+const baseConfig: SchruteConfig = {
   dataDir: '/tmp/test',
   logLevel: 'silent',
   features: { webmcp: false, httpTransport: false },

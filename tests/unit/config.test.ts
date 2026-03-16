@@ -39,7 +39,7 @@ describe('config', () => {
     });
 
     it('returns default config when config file is invalid JSON', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-config-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-config-${Date.now()}.json`);
       fs.writeFileSync(tmpPath, 'not json at all{{{', 'utf-8');
 
       try {
@@ -51,7 +51,7 @@ describe('config', () => {
     });
 
     it('deep-merges config file with defaults', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-config-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-config-${Date.now()}.json`);
       fs.writeFileSync(
         tmpPath,
         JSON.stringify({
@@ -73,7 +73,7 @@ describe('config', () => {
     });
 
     it('throws on invalid config sections (payloadLimits)', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-config-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-config-${Date.now()}.json`);
       fs.writeFileSync(
         tmpPath,
         JSON.stringify({ payloadLimits: 'not an object' }),
@@ -90,7 +90,7 @@ describe('config', () => {
 
   describe('deepMerge (tested via loadConfig)', () => {
     it('merges nested objects correctly', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-merge-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-merge-${Date.now()}.json`);
       fs.writeFileSync(
         tmpPath,
         JSON.stringify({
@@ -113,7 +113,7 @@ describe('config', () => {
     });
 
     it('does not merge arrays (replaces them)', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-array-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-array-${Date.now()}.json`);
       fs.writeFileSync(
         tmpPath,
         JSON.stringify({
@@ -183,7 +183,7 @@ describe('config', () => {
 
   describe('setConfigValue → loadConfig persistence round-trip', () => {
     it('persists value that loadConfig reads back', () => {
-      const tmpDir = path.join('/tmp', `oneagent-roundtrip-${Date.now()}`);
+      const tmpDir = path.join('/tmp', `schrute-roundtrip-${Date.now()}`);
       fs.mkdirSync(tmpDir, { recursive: true });
       const tmpConfigPath = path.join(tmpDir, 'config.json');
 
@@ -210,9 +210,9 @@ describe('config', () => {
 
   describe('environment variable overrides are NOT persisted', () => {
     it('env override appears in getConfig but setConfigValue does not save it', () => {
-      const origVal = process.env.ONEAGENT_LOG_LEVEL;
+      const origVal = process.env.SCHRUTE_LOG_LEVEL;
       try {
-        process.env.ONEAGENT_LOG_LEVEL = 'trace';
+        process.env.SCHRUTE_LOG_LEVEL = 'trace';
         configModule.resetConfigCache();
 
         // Runtime config should reflect env override
@@ -232,9 +232,9 @@ describe('config', () => {
         expect(runtimeAfter.logLevel).toBe('trace');
       } finally {
         if (origVal === undefined) {
-          delete process.env.ONEAGENT_LOG_LEVEL;
+          delete process.env.SCHRUTE_LOG_LEVEL;
         } else {
-          process.env.ONEAGENT_LOG_LEVEL = origVal;
+          process.env.SCHRUTE_LOG_LEVEL = origVal;
         }
         configModule.resetConfigCache();
       }
@@ -265,7 +265,7 @@ describe('config', () => {
 
   describe('setConfigValueInMemory preserves env-override precedence', () => {
     it('env variable wins over in-memory write for the overridden key', () => {
-      const envKey = 'ONEAGENT_LOG_LEVEL';
+      const envKey = 'SCHRUTE_LOG_LEVEL';
       const original = process.env[envKey];
       try {
         process.env[envKey] = 'warn';
@@ -287,7 +287,7 @@ describe('config', () => {
     });
 
     it('non-overridden keys are still set by in-memory write', () => {
-      const envKey = 'ONEAGENT_LOG_LEVEL';
+      const envKey = 'SCHRUTE_LOG_LEVEL';
       const original = process.env[envKey];
       try {
         // Ensure no env override for tempTtlMs
@@ -327,7 +327,7 @@ describe('config', () => {
 
   describe('invalid logLevel falls back to info', () => {
     it('unrecognized logLevel in config file falls back to info', () => {
-      const tmpPath = path.join('/tmp', `oneagent-test-loglevel-${Date.now()}.json`);
+      const tmpPath = path.join('/tmp', `schrute-test-loglevel-${Date.now()}.json`);
       fs.writeFileSync(tmpPath, JSON.stringify({ logLevel: 'banana' }), 'utf-8');
 
       try {
@@ -380,83 +380,83 @@ describe('config', () => {
   });
 
   describe('screenshot env overrides', () => {
-    it('ONEAGENT_SCREENSHOT_FORMAT=jpeg is applied', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+    it('SCHRUTE_SCREENSHOT_FORMAT=jpeg is applied', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_FORMAT;
       try {
-        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'jpeg';
+        process.env.SCHRUTE_SCREENSHOT_FORMAT = 'jpeg';
         configModule.resetConfigCache();
         const config = configModule.getConfig();
         expect(config.browser?.features?.screenshotFormat).toBe('jpeg');
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
-        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_FORMAT;
+        else process.env.SCHRUTE_SCREENSHOT_FORMAT = orig;
         configModule.resetConfigCache();
       }
     });
 
-    it('ONEAGENT_SCREENSHOT_FORMAT=png is applied', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+    it('SCHRUTE_SCREENSHOT_FORMAT=png is applied', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_FORMAT;
       try {
-        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'png';
+        process.env.SCHRUTE_SCREENSHOT_FORMAT = 'png';
         configModule.resetConfigCache();
         const config = configModule.getConfig();
         expect(config.browser?.features?.screenshotFormat).toBe('png');
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
-        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_FORMAT;
+        else process.env.SCHRUTE_SCREENSHOT_FORMAT = orig;
         configModule.resetConfigCache();
       }
     });
 
-    it('ONEAGENT_SCREENSHOT_FORMAT=webp is rejected', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_FORMAT;
+    it('SCHRUTE_SCREENSHOT_FORMAT=webp is rejected', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_FORMAT;
       try {
-        process.env.ONEAGENT_SCREENSHOT_FORMAT = 'webp';
+        process.env.SCHRUTE_SCREENSHOT_FORMAT = 'webp';
         configModule.resetConfigCache();
         expect(() => configModule.getConfig()).toThrow(/jpeg.*png/i);
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_FORMAT;
-        else process.env.ONEAGENT_SCREENSHOT_FORMAT = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_FORMAT;
+        else process.env.SCHRUTE_SCREENSHOT_FORMAT = orig;
         configModule.resetConfigCache();
       }
     });
 
-    it('ONEAGENT_SCREENSHOT_QUALITY=80 is applied as number', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+    it('SCHRUTE_SCREENSHOT_QUALITY=80 is applied as number', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_QUALITY;
       try {
-        process.env.ONEAGENT_SCREENSHOT_QUALITY = '80';
+        process.env.SCHRUTE_SCREENSHOT_QUALITY = '80';
         configModule.resetConfigCache();
         const config = configModule.getConfig();
         expect(config.browser?.features?.screenshotQuality).toBe(80);
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
-        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_QUALITY;
+        else process.env.SCHRUTE_SCREENSHOT_QUALITY = orig;
         configModule.resetConfigCache();
       }
     });
 
-    it('ONEAGENT_SCREENSHOT_QUALITY=0 is rejected', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+    it('SCHRUTE_SCREENSHOT_QUALITY=0 is rejected', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_QUALITY;
       try {
-        process.env.ONEAGENT_SCREENSHOT_QUALITY = '0';
+        process.env.SCHRUTE_SCREENSHOT_QUALITY = '0';
         configModule.resetConfigCache();
         expect(() => configModule.getConfig()).toThrow(/1.*100/);
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
-        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_QUALITY;
+        else process.env.SCHRUTE_SCREENSHOT_QUALITY = orig;
         configModule.resetConfigCache();
       }
     });
 
-    it('ONEAGENT_SCREENSHOT_QUALITY=101 is rejected', () => {
-      const orig = process.env.ONEAGENT_SCREENSHOT_QUALITY;
+    it('SCHRUTE_SCREENSHOT_QUALITY=101 is rejected', () => {
+      const orig = process.env.SCHRUTE_SCREENSHOT_QUALITY;
       try {
-        process.env.ONEAGENT_SCREENSHOT_QUALITY = '101';
+        process.env.SCHRUTE_SCREENSHOT_QUALITY = '101';
         configModule.resetConfigCache();
         expect(() => configModule.getConfig()).toThrow(/1.*100/);
       } finally {
-        if (orig === undefined) delete process.env.ONEAGENT_SCREENSHOT_QUALITY;
-        else process.env.ONEAGENT_SCREENSHOT_QUALITY = orig;
+        if (orig === undefined) delete process.env.SCHRUTE_SCREENSHOT_QUALITY;
+        else process.env.SCHRUTE_SCREENSHOT_QUALITY = orig;
         configModule.resetConfigCache();
       }
     });
@@ -540,21 +540,43 @@ describe('config', () => {
 
   describe('path helpers', () => {
     it('getDaemonSocketPath returns path under dataDir', () => {
-      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').OneAgentConfig;
+      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').SchruteConfig;
       const result = configModule.getDaemonSocketPath(config);
       expect(result).toBe('/test/data/daemon.sock');
     });
 
     it('getDaemonPidPath returns path under dataDir', () => {
-      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').OneAgentConfig;
+      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').SchruteConfig;
       const result = configModule.getDaemonPidPath(config);
       expect(result).toBe('/test/data/daemon.pid');
     });
 
     it('getDaemonTokenPath returns path under dataDir', () => {
-      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').OneAgentConfig;
+      const config = { dataDir: '/test/data' } as import('../../src/skill/types.js').SchruteConfig;
       const result = configModule.getDaemonTokenPath(config);
       expect(result).toBe('/test/data/daemon.token');
+    });
+  });
+
+  describe('config immutability', () => {
+    it('getConfig returns a clone — mutating the result does not affect the cached config', () => {
+      const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cfg-immut-'));
+      const cfgPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(cfgPath, JSON.stringify({ logLevel: 'info' }));
+
+      const config1 = configModule.loadConfig(cfgPath);
+      const config2 = configModule.getConfig();
+
+      // Mutate the returned object
+      (config2 as Record<string, unknown>).logLevel = 'TAMPERED';
+      (config2 as Record<string, unknown>).features = 'CORRUPTED';
+
+      // Fetch again — should be unaffected
+      const config3 = configModule.getConfig();
+      expect(config3.logLevel).not.toBe('TAMPERED');
+      expect((config3 as Record<string, unknown>).features).not.toBe('CORRUPTED');
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     });
   });
 });

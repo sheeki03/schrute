@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 import {
   ALLOWED_BROWSER_TOOLS,
   BLOCKED_BROWSER_TOOLS,
@@ -17,8 +17,8 @@ import * as os from 'node:os';
 // We test the MCP server logic by replicating the registration pattern
 // from mcp-stdio.ts, but using an in-memory transport to avoid stdio.
 
-function makeTestConfig(): OneAgentConfig {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneagent-mcp-test-'));
+function makeTestConfig(): SchruteConfig {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'schrute-mcp-test-'));
   return {
     dataDir: tmpDir,
     logLevel: 'silent',
@@ -59,14 +59,14 @@ function loadSkillFixture(name: string): SkillSpec {
 // (avoids importing startMcpServer which tries to open a database and stdio)
 
 const META_TOOL_NAMES = [
-  'oneagent_explore',
-  'oneagent_record',
-  'oneagent_stop',
-  'oneagent_sites',
-  'oneagent_skills',
-  'oneagent_status',
-  'oneagent_dry_run',
-  'oneagent_confirm',
+  'schrute_explore',
+  'schrute_record',
+  'schrute_stop',
+  'schrute_sites',
+  'schrute_skills',
+  'schrute_status',
+  'schrute_dry_run',
+  'schrute_confirm',
 ];
 
 function skillToToolName(skill: SkillSpec): string {
@@ -82,7 +82,7 @@ function skillToToolName(skill: SkillSpec): string {
 }
 
 describe('MCP Server Protocol', () => {
-  let config: OneAgentConfig;
+  let config: SchruteConfig;
 
   beforeAll(() => {
     config = makeTestConfig();
@@ -158,7 +158,7 @@ describe('MCP Server Protocol', () => {
 
   it('should create an MCP server instance with correct metadata', () => {
     const server = new Server(
-      { name: 'oneagent', version: '0.1.0' },
+      { name: 'schrute', version: '0.1.0' },
       { capabilities: { tools: {} } },
     );
 
@@ -168,7 +168,7 @@ describe('MCP Server Protocol', () => {
 
   it('should register list tools and call tool handlers on an MCP server', async () => {
     const server = new Server(
-      { name: 'oneagent', version: '0.1.0' },
+      { name: 'schrute', version: '0.1.0' },
       { capabilities: { tools: {} } },
     );
 
@@ -180,7 +180,7 @@ describe('MCP Server Protocol', () => {
       return {
         tools: [
           {
-            name: 'oneagent_status',
+            name: 'schrute_status',
             description: 'Get current session and engine status',
             inputSchema: { type: 'object' as const, properties: {} },
           },
@@ -191,7 +191,7 @@ describe('MCP Server Protocol', () => {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       callToolCalled = true;
       const { name } = request.params;
-      if (name === 'oneagent_status') {
+      if (name === 'schrute_status') {
         return {
           content: [{
             type: 'text' as const,

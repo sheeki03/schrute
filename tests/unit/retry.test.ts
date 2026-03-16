@@ -215,6 +215,50 @@ describe('retry', () => {
     expect(result.success).toBe(false);
   });
 
+  describe('siteRecommendedTier cascade', () => {
+    it('uses direct-first cascade when siteRecommendedTier is direct for tier_3 skill', async () => {
+      const skill = makeSkill({ currentTier: 'tier_3', tierLock: null });
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        siteRecommendedTier: ExecutionTier.DIRECT,
+      });
+      // Should succeed via direct tier (first in cascade)
+      expect(result.tier).toBe('direct');
+      expect(result.success).toBe(true);
+    });
+
+    it('does NOT use direct-first cascade with permanent tier lock even if site recommends', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_3',
+        tierLock: { type: 'permanent', reason: 'signed_payload', evidence: 'nonce' },
+      });
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        browserProvider: {
+          evaluateFetch: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        } as any,
+        siteRecommendedTier: ExecutionTier.DIRECT,
+      });
+      // Should use browser_proxied (permanent lock overrides site recommendation)
+      expect(result.tier).toBe('browser_proxied');
+    });
+
+    it('does NOT use direct-first cascade with temporary demotion even if site recommends', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_3',
+        tierLock: { type: 'temporary_demotion', since: new Date().toISOString(), demotions: 1 },
+      });
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        browserProvider: {
+          evaluateFetch: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        } as any,
+        siteRecommendedTier: ExecutionTier.DIRECT,
+      });
+      expect(result.tier).toBe('browser_proxied');
+    });
+  });
+
   describe('wiring: tier cascade', () => {
     it('starts with DIRECT for tier_1 skill without locks', async () => {
       const skill = makeSkill({ currentTier: 'tier_1', tierLock: null });

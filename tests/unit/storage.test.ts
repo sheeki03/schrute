@@ -13,105 +13,19 @@ vi.mock('../../src/core/logger.js', () => ({
 // ─── Mock config ─────────────────────────────────────────────────
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-storage-test',
+    dataDir: '/tmp/schrute-storage-test',
     logLevel: 'silent',
   }),
   getDbPath: () => ':memory:',
   ensureDirectories: vi.fn(),
 }));
 
-import Database from 'better-sqlite3';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
 import { SiteRepository } from '../../src/storage/site-repository.js';
 import type { AgentDatabase } from '../../src/storage/database.js';
+import { MIGRATIONS } from '../../src/storage/database.js';
 import type { SkillSpec, SiteManifest } from '../../src/skill/types.js';
-
-// ─── In-Memory DB Setup ──────────────────────────────────────────
-
-function createTestDb(): AgentDatabase & { close: () => void } {
-  const raw = new Database(':memory:');
-  raw.pragma('journal_mode = WAL');
-  raw.pragma('foreign_keys = ON');
-
-  // Run migrations (inlined from database.ts)
-  raw.exec(`
-    CREATE TABLE IF NOT EXISTS sites (
-      id              TEXT PRIMARY KEY,
-      display_name    TEXT,
-      first_seen      INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
-      last_visited    INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
-      mastery_level   TEXT NOT NULL DEFAULT 'explore',
-      recommended_tier TEXT NOT NULL DEFAULT 'browser_proxied',
-      total_requests  INTEGER NOT NULL DEFAULT 0,
-      successful_requests INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS skills (
-      id                TEXT PRIMARY KEY,
-      site_id           TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-      name              TEXT NOT NULL,
-      version           INTEGER NOT NULL DEFAULT 1,
-      status            TEXT NOT NULL DEFAULT 'draft',
-      description       TEXT,
-      method            TEXT NOT NULL,
-      path_template     TEXT NOT NULL,
-      input_schema      TEXT NOT NULL DEFAULT '{}',
-      output_schema     TEXT,
-      auth_type         TEXT,
-      required_headers  TEXT,
-      dynamic_headers   TEXT,
-      side_effect_class TEXT NOT NULL DEFAULT 'read-only',
-      is_composite      INTEGER NOT NULL DEFAULT 0,
-      chain_spec        TEXT,
-      current_tier      TEXT NOT NULL DEFAULT 'tier_3',
-      tier_lock         TEXT,
-      confidence        REAL NOT NULL DEFAULT 0.0,
-      consecutive_validations INTEGER NOT NULL DEFAULT 0,
-      sample_count      INTEGER NOT NULL DEFAULT 0,
-      parameter_evidence TEXT,
-      last_verified     INTEGER,
-      last_used         INTEGER,
-      success_rate      REAL NOT NULL DEFAULT 0.0,
-      skill_md          TEXT,
-      openapi_fragment  TEXT,
-      created_at        INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
-      updated_at        INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
-      allowed_domains TEXT NOT NULL DEFAULT '[]',
-      required_capabilities TEXT NOT NULL DEFAULT '[]',
-      parameters TEXT NOT NULL DEFAULT '[]',
-      validation TEXT NOT NULL DEFAULT '{"semanticChecks":[],"customInvariants":[]}',
-      redaction TEXT NOT NULL DEFAULT '{"piiClassesFound":[],"fieldsRedacted":0}',
-      replay_strategy TEXT NOT NULL DEFAULT 'prefer_tier_3',
-      UNIQUE(site_id, name, version)
-    );
-  `);
-
-  const db = {
-    run(sql: string, ...params: unknown[]) {
-      return raw.prepare(sql).run(...params);
-    },
-    get<T = unknown>(sql: string, ...params: unknown[]): T | undefined {
-      return raw.prepare(sql).get(...params) as T | undefined;
-    },
-    all<T = unknown>(sql: string, ...params: unknown[]): T[] {
-      return raw.prepare(sql).all(...params) as T[];
-    },
-    exec(sql: string) {
-      raw.exec(sql);
-    },
-    transaction<T>(fn: () => T): T {
-      return raw.transaction(fn)();
-    },
-    close() {
-      raw.close();
-    },
-    get raw() {
-      return raw;
-    },
-  } as unknown as AgentDatabase & { close: () => void };
-
-  return db;
-}
+import { createFullSchemaDb } from '../helpers.js';
 
 function makeSkill(overrides?: Partial<SkillSpec>): SkillSpec {
   const now = Date.now();
@@ -172,7 +86,7 @@ describe('Storage Repositories', () => {
   let db: AgentDatabase & { close: () => void };
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createFullSchemaDb();
   });
 
   afterEach(() => {
@@ -507,6 +421,85 @@ describe('Storage Repositories', () => {
         const retrieved = skillRepo.getById('example.com.get_users.v1');
         expect(retrieved).toBeDefined();
       });
+
+      it('throws on invalid status value read from DB', () => {
+        // Insert a row directly with an invalid status
+        const now = Date.now();
+        db.run(
+          `INSERT INTO skills (id, site_id, name, version, status, method, path_template,
+           input_schema, side_effect_class, current_tier, confidence,
+           consecutive_validations, sample_count, success_rate, created_at, updated_at,
+           allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          'bad.status.v1', 'example.com', 'bad_status', 1, 'INVALID_STATUS', 'GET', '/api/bad',
+          '{}', 'read-only', 'tier_1', 0.5,
+          0, 0, 0.0, now, now,
+          '[]', '[]', '[]', '{"semanticChecks":[],"customInvariants":[]}',
+          '{"piiClassesFound":[],"fieldsRedacted":0}', 'prefer_tier_1',
+        );
+
+        expect(() => skillRepo.getById('bad.status.v1')).toThrow(/invalid skill status/i);
+      });
+
+      it('throws on invalid tier value read from DB', () => {
+        const now = Date.now();
+        db.run(
+          `INSERT INTO skills (id, site_id, name, version, status, method, path_template,
+           input_schema, side_effect_class, current_tier, confidence,
+           consecutive_validations, sample_count, success_rate, created_at, updated_at,
+           allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          'bad.tier.v1', 'example.com', 'bad_tier', 1, 'active', 'GET', '/api/bad',
+          '{}', 'read-only', 'INVALID_TIER', 0.5,
+          0, 0, 0.0, now, now,
+          '[]', '[]', '[]', '{"semanticChecks":[],"customInvariants":[]}',
+          '{"piiClassesFound":[],"fieldsRedacted":0}', 'prefer_tier_1',
+        );
+
+        expect(() => skillRepo.getById('bad.tier.v1')).toThrow(/invalid tier state/i);
+      });
+
+      it('falls back to null for malformed JSON in tier_lock column', () => {
+        const now = Date.now();
+        db.run(
+          `INSERT INTO skills (id, site_id, name, version, status, method, path_template,
+           input_schema, side_effect_class, current_tier, tier_lock, confidence,
+           consecutive_validations, sample_count, success_rate, created_at, updated_at,
+           allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          'bad.json.v1', 'example.com', 'bad_json', 1, 'active', 'GET', '/api/bad',
+          '{}', 'read-only', 'tier_1', '{not valid json}', 0.5,
+          0, 0, 0.0, now, now,
+          '[]', '[]', '[]', '{"semanticChecks":[],"customInvariants":[]}',
+          '{"piiClassesFound":[],"fieldsRedacted":0}', 'prefer_tier_1',
+        );
+
+        // parseJson catches parse errors and uses the fallback (null for tier_lock)
+        const retrieved = skillRepo.getById('bad.json.v1');
+        expect(retrieved).toBeDefined();
+        expect(retrieved!.tierLock).toBeNull();
+      });
+
+      it('falls back to null for invalid TierLock shape (unknown type)', () => {
+        const now = Date.now();
+        db.run(
+          `INSERT INTO skills (id, site_id, name, version, status, method, path_template,
+           input_schema, side_effect_class, current_tier, tier_lock, confidence,
+           consecutive_validations, sample_count, success_rate, created_at, updated_at,
+           allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          'bad.lock.v1', 'example.com', 'bad_lock', 1, 'active', 'GET', '/api/bad',
+          '{}', 'read-only', 'tier_1', '{"type":"bogus"}', 0.5,
+          0, 0, 0.0, now, now,
+          '[]', '[]', '[]', '{"semanticChecks":[],"customInvariants":[]}',
+          '{"piiClassesFound":[],"fieldsRedacted":0}', 'prefer_tier_1',
+        );
+
+        // Shape validator throws internally, parseJson catches and uses fallback (null)
+        const retrieved = skillRepo.getById('bad.lock.v1');
+        expect(retrieved).toBeDefined();
+        expect(retrieved!.tierLock).toBeNull();
+      });
     });
   });
 
@@ -545,6 +538,42 @@ describe('Storage Repositories', () => {
       expect(columnNames).toContain('validation');
       expect(columnNames).toContain('redaction');
       expect(columnNames).toContain('replay_strategy');
+    });
+
+    it('all expected tables exist after running migrations', () => {
+      const tables = db.all<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      ).map(r => r.name);
+
+      // Core tables from migration 001
+      expect(tables).toContain('sites');
+      expect(tables).toContain('skills');
+      expect(tables).toContain('auth_flows');
+      expect(tables).toContain('action_frames');
+      expect(tables).toContain('action_frame_entries');
+      expect(tables).toContain('skill_confirmations');
+      expect(tables).toContain('confirmation_nonces');
+      expect(tables).toContain('skill_metrics');
+      expect(tables).toContain('policies');
+      // Migration 002: webmcp
+      expect(tables).toContain('webmcp_tools');
+      // Migration 004: exemplars
+      expect(tables).toContain('skill_exemplars');
+      // Migration 005: amendments
+      expect(tables).toContain('skill_amendments');
+      // Migration tracking
+      expect(tables).toContain('schema_migrations');
+    });
+
+    it('all MIGRATIONS entries are recorded in schema_migrations', () => {
+      const applied = db.all<{ filename: string }>(
+        'SELECT filename FROM schema_migrations ORDER BY id',
+      ).map(r => r.filename);
+
+      for (const migration of MIGRATIONS) {
+        expect(applied).toContain(migration.filename);
+      }
+      expect(applied).toHaveLength(MIGRATIONS.length);
     });
   });
 });

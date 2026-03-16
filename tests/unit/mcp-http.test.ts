@@ -14,7 +14,7 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-test',
+    dataDir: '/tmp/schrute-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -693,7 +693,11 @@ describe('mcp-http', () => {
       ).catch((err: Error) => { reqError = err; return null; });
 
       // Give the request handler time to reach the blocked connect()
-      await new Promise(r => setTimeout(r, 30));
+      // (Increased from 30ms to handle CPU contention during full-suite runs)
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (serverInstances.length - serversBeforeRace >= 1) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
 
       // Verify the delayed request actually created a late Server instance
       expect(serverInstances.length - serversBeforeRace).toBe(1);

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mock modules before importing rest-server
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-test',
+    dataDir: '/tmp/schrute-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {

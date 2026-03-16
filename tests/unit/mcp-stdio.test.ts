@@ -136,7 +136,11 @@ describe('mcp-stdio', () => {
       const handler = listToolsCall![1];
       const result = await handler({});
 
-      expect(mockBuildToolList).toHaveBeenCalledWith(deps);
+      // deps is spread with an added `router` property at startup
+      expect(mockBuildToolList).toHaveBeenCalledWith(
+        expect.objectContaining(deps),
+        'stdio',
+      );
       expect(result.tools).toBeDefined();
       expect(result.tools).toHaveLength(2);
 
@@ -160,10 +164,12 @@ describe('mcp-stdio', () => {
         },
       });
 
+      // deps is spread with an added `router` property at startup
       expect(mockDispatchToolCall).toHaveBeenCalledWith(
         'explore',
         { url: 'https://example.com' },
-        deps,
+        expect.objectContaining(deps),
+        'stdio',
       );
 
       await handle.close();

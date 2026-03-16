@@ -4,17 +4,17 @@ import {
   handleFailure,
   getEffectiveTier,
 } from '../../src/core/tiering.js';
-import { TierState, FailureCause } from '../../src/skill/types.js';
+import { TierState, FailureCause, ExecutionTier } from '../../src/skill/types.js';
 import type {
   SkillSpec,
   FieldVolatility,
-  OneAgentConfig,
+  SchruteConfig,
   PermanentTierLock,
 } from '../../src/skill/types.js';
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent',
+    dataDir: '/tmp/test-schrute',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -43,7 +43,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
@@ -152,6 +152,61 @@ describe('tiering', () => {
       );
       expect(result.promote).toBe(false);
       expect(result.reason).toContain('Already at Tier 1');
+    });
+  });
+
+  describe('siteRecommendedTier promotion', () => {
+    it('promotes after 1 pass when siteRecommendedTier is direct', () => {
+      const skill = makeSkill({ consecutiveValidations: 1, tierLock: null });
+      const result = checkPromotion(
+        skill,
+        makeStaticVolatility(),
+        { match: true, hasDynamicRequiredFields: false },
+        config,
+        ExecutionTier.DIRECT,
+      );
+      expect(result.promote).toBe(true);
+    });
+
+    it('does NOT promote with 0 validations even when site recommends direct', () => {
+      const skill = makeSkill({ consecutiveValidations: 0, tierLock: null });
+      const result = checkPromotion(
+        skill,
+        makeStaticVolatility(),
+        { match: true, hasDynamicRequiredFields: false },
+        config,
+        ExecutionTier.DIRECT,
+      );
+      expect(result.promote).toBe(false);
+      expect(result.reason).toContain('0/1');
+    });
+
+    it('does NOT promote permanently locked skill even with site recommendation', () => {
+      const skill = makeSkill({
+        consecutiveValidations: 10,
+        tierLock: { type: 'permanent', reason: 'signed_payload', evidence: 'test' },
+      });
+      const result = checkPromotion(
+        skill,
+        makeStaticVolatility(),
+        { match: true, hasDynamicRequiredFields: false },
+        config,
+        ExecutionTier.DIRECT,
+      );
+      expect(result.promote).toBe(false);
+      expect(result.reason).toContain('Permanently locked');
+    });
+
+    it('uses standard threshold (5) when no site recommendation', () => {
+      const skill = makeSkill({ consecutiveValidations: 1, tierLock: null });
+      const result = checkPromotion(
+        skill,
+        makeStaticVolatility(),
+        { match: true, hasDynamicRequiredFields: false },
+        config,
+      );
+      expect(result.promote).toBe(false);
+      expect(result.reason).toContain('1/5');
     });
   });
 

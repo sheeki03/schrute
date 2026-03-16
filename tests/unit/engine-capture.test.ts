@@ -25,11 +25,11 @@ vi.mock('../../src/core/config.js', () => ({
   getConfig: () => getConfigMockValue(),
   ensureDirectories: vi.fn(),
   getDbPath: () => ':memory:',
-  getDataDir: () => '/tmp/oneagent-engine-test',
-  getBrowserDataDir: () => '/tmp/oneagent-engine-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-engine-test/tmp',
-  getAuditDir: () => '/tmp/oneagent-engine-test/audit',
-  getSkillsDir: () => '/tmp/oneagent-engine-test/skills',
+  getDataDir: () => '/tmp/schrute-engine-test',
+  getBrowserDataDir: () => '/tmp/schrute-engine-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-engine-test/tmp',
+  getAuditDir: () => '/tmp/schrute-engine-test/audit',
+  getSkillsDir: () => '/tmp/schrute-engine-test/skills',
 }));
 
 // Mock database singleton
@@ -48,6 +48,8 @@ vi.mock('../../src/storage/skill-repository.js', () => ({
     create: vi.fn(),
     getBySiteId: vi.fn().mockReturnValue([]),
     getActive: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    getByStatus: vi.fn().mockReturnValue([]),
     update: vi.fn(),
     delete: vi.fn(),
     updateConfidence: vi.fn(),
@@ -99,6 +101,8 @@ vi.mock('../../src/automation/rate-limiter.js', () => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
+    attachDatabase: vi.fn(),
+    persistBackoffs: vi.fn(),
   })),
 }));
 
@@ -735,6 +739,8 @@ describe('Engine capture pipeline', () => {
         expect.any(Object),  // config
         undefined,           // browserProvider (hasContext returns false)
         expect.anything(),   // db object
+        undefined,           // origin
+        expect.any(Function), // scrapeContextFactory
       );
     });
 

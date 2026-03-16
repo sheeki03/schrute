@@ -21,6 +21,11 @@ function mockBrowser(
 
   if (modelContextResult !== undefined) {
     base.evaluateModelContext = vi.fn().mockResolvedValue(modelContextResult);
+    // Scanner now uses listModelContextTools() — wrap result in { tools, testingTools } envelope
+    const toolsEnvelope = modelContextResult.error
+      ? modelContextResult
+      : { result: { tools: modelContextResult.result, testingTools: null }, error: modelContextResult.error };
+    base.listModelContextTools = vi.fn().mockResolvedValue(toolsEnvelope);
   }
 
   return base;
@@ -62,7 +67,7 @@ function mockDatabase(): AgentDatabase {
 
 describe('webmcp-scanner', () => {
   describe('scanWebMcp', () => {
-    it('returns unavailable when browser lacks evaluateModelContext', async () => {
+    it('returns unavailable when browser lacks listModelContextTools', async () => {
       const browser = mockBrowser(); // no evaluateModelContext
       const db = mockDatabase();
 
@@ -119,6 +124,8 @@ describe('webmcp-scanner', () => {
         '{"type":"object"}',
         expect.any(Number),
         expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
       );
     });
 
@@ -134,7 +141,7 @@ describe('webmcp-scanner', () => {
 
     it('handles exceptions gracefully', async () => {
       const browser = mockBrowser();
-      browser.evaluateModelContext = vi.fn().mockRejectedValue(new Error('Crash'));
+      browser.listModelContextTools = vi.fn().mockRejectedValue(new Error('Crash'));
       const db = mockDatabase();
 
       const result = await scanWebMcp('example.com', browser, db);

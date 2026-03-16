@@ -64,7 +64,7 @@ describe('openapi-server', () => {
       const repo = makeSkillRepo([]);
       const spec = buildOpenApiSpec(repo);
       expect(spec.openapi).toBe('3.1.0');
-      expect(spec.info.title).toBe('OneAgent API');
+      expect(spec.info.title).toBe('Schrute API');
       expect(spec.info.version).toBe('0.2.0');
     });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock request-builder to produce deterministic requests without tier-based
 // header filtering, auth injection, or body/query construction.
@@ -29,11 +29,13 @@ vi.mock('../../src/storage/redactor.js', () => ({
   redactString: vi.fn().mockResolvedValue('REDACTED'),
 }));
 
+import * as http from 'node:http';
 import { executeSkill, type ExecutorOptions, type ExecutionResult } from '../../src/replay/executor.js';
 import type { SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
 import { FailureCause, ExecutionTier, TierState, Capability } from '../../src/skill/types.js';
 import type { SkillMetric } from '../../src/storage/metrics-repository.js';
 import { setSitePolicy, resolveAndValidate } from '../../src/core/policy.js';
+import { buildRequest } from '../../src/replay/request-builder.js';
 import { redactNative } from '../../src/native/redactor.js';
 import { getCachedSalt } from '../../src/storage/redactor.js';
 
@@ -83,6 +85,8 @@ function mockFetch(response: Partial<SealedFetchResponse>): (req: SealedFetchReq
     body: response.body ?? '{"data":"ok"}',
   });
 }
+
+// TODO: add integration test with real DB/real fetch
 
 describe('executor', () => {
   beforeEach(() => {
@@ -233,13 +237,13 @@ describe('executor', () => {
       expect(result.failureCause).toBe(FailureCause.COOKIE_REFRESH);
     });
 
-    it('classifies unknown for unrecognized errors', async () => {
+    it('classifies fetch_error for thrown fetch errors', async () => {
       const skill = makeSkill();
       const result = await executeSkill(skill, {}, {
         fetchFn: async () => { throw new Error('network failure'); },
       });
       expect(result.success).toBe(false);
-      expect(result.failureCause).toBe(FailureCause.UNKNOWN);
+      expect(result.failureCause).toBe(FailureCause.FETCH_ERROR);
     });
   });
 
@@ -327,7 +331,7 @@ describe('executor', () => {
       expect(result.success).toBe(true);
     });
 
-    it('blocks redirects to disallowed domains', async () => {
+    it('blocks redirects to disallowed domains with failureDetail', async () => {
       const skill = makeSkill();
       const result = await executeSkill(skill, {}, {
         fetchFn: async () => ({
@@ -338,6 +342,9 @@ describe('executor', () => {
       });
       // Should fail because redirect target is not in domain allowlist
       expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.POLICY_DENIED);
+      expect(result.failureDetail).toBeDefined();
+      expect(result.failureDetail).toContain('evil.com');
     });
 
     it('respects max redirect limit', async () => {
@@ -384,6 +391,9 @@ describe('executor', () => {
       });
       // Should be blocked because redirect resolved to private IP
       expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.POLICY_DENIED);
+      expect(result.failureDetail).toBeDefined();
+      expect(result.failureDetail).toContain('private IP');
     });
   });
 
@@ -614,5 +624,150 @@ describe('executor', () => {
       // The intent audit entry should have the natively-redacted URL
       expect(appendedEntries[0].requestSummary.url).toBe('natively-redacted-path');
     });
+  });
+
+  // ─── TA-6: Pinned IP fetch tests ─────────────────────────────
+  //
+  // These tests exercise the pinnedIpFetch code path (directFetch when
+  // resolvedIp is set and no fetchFn is injected). A local HTTP server
+  // stands in for the target so we can verify real socket-level behavior.
+
+  describe('pinned IP fetch (pinnedIpFetch path)', () => {
+    let server: http.Server;
+    const mockResolve = resolveAndValidate as ReturnType<typeof vi.fn>;
+    const mockBuild = buildRequest as ReturnType<typeof vi.fn>;
+
+    function startServer(handler: http.RequestListener): Promise<number> {
+      return new Promise((resolve, reject) => {
+        server = http.createServer(handler);
+        server.listen(0, '127.0.0.1', () => {
+          const addr = server.address();
+          if (addr && typeof addr === 'object') {
+            resolve(addr.port);
+          } else {
+            reject(new Error('Could not determine server port'));
+          }
+        });
+        server.on('error', reject);
+      });
+    }
+
+    function stopServer(): Promise<void> {
+      return new Promise((resolve) => {
+        if (!server) { resolve(); return; }
+        server.close(() => resolve());
+      });
+    }
+
+    afterEach(async () => {
+      await stopServer();
+      // Restore default mocks after each test
+      mockResolve.mockResolvedValue({ ip: '93.184.216.34', allowed: true, category: 'unicast' });
+    });
+
+    beforeEach(() => {
+      // Add localhost to domain allowlist so policy gates pass
+      setSitePolicy({
+        siteId: 'example.com',
+        allowedMethods: ['GET', 'HEAD', 'POST', 'DELETE'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: ['example.com', 'localhost'],
+        redactionRules: [],
+        capabilities: [
+          Capability.NET_FETCH_DIRECT,
+          Capability.NET_FETCH_BROWSER_PROXIED,
+          Capability.BROWSER_AUTOMATION,
+          Capability.STORAGE_WRITE,
+          Capability.SECRETS_USE,
+        ],
+      });
+    });
+
+    // Helper: override buildRequest for both calls (pre-build in executeSkill
+    // and the actual request in executeTier).
+    function mockBuildForPort(port: number): void {
+      const value = {
+        url: `http://localhost:${port}/api/data`,
+        method: 'GET',
+        headers: { 'accept': 'application/json' },
+        body: undefined,
+      };
+      mockBuild
+        .mockReturnValueOnce(value)   // pre-build (body size check)
+        .mockReturnValueOnce(value);  // executeTier request
+    }
+
+    it('successful fetch through pinned IP hits the local server', async () => {
+      const port = await startServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ pinned: true }));
+      });
+
+      mockBuildForPort(port);
+
+      // resolveAndValidate returns 127.0.0.1 as allowed (normally blocked, but
+      // mocked here) so the executor uses pinnedIpFetch with this IP.
+      mockResolve.mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' });
+
+      const skill = makeSkill({ allowedDomains: ['example.com', 'localhost'] });
+      const result = await executeSkill(skill, {}, {
+        // No fetchFn — real directFetch -> pinnedIpFetch
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe(200);
+      expect(result.rawBody).toContain('"pinned":true');
+    });
+
+    it('rejects response exceeding body size limit', async () => {
+      // Server sends a body larger than the configured limit
+      const port = await startServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        // 200 bytes is enough to exceed a 100-byte limit
+        res.end(JSON.stringify({ payload: 'x'.repeat(200) }));
+      });
+
+      mockBuildForPort(port);
+      mockResolve.mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' });
+
+      const skill = makeSkill({ allowedDomains: ['example.com', 'localhost'] });
+      // pinnedIpFetch checks maxResponseBytes; use config to set a small limit
+      const result = await executeSkill(skill, {}, {
+        timeoutMs: 5000,
+        config: {
+          payloadLimits: { maxResponseBodyBytes: 100 },
+        } as any,
+      });
+
+      // pinnedIpFetch rejects with an error when body exceeds the limit,
+      // which directFetch propagates as a thrown error -> FETCH_ERROR
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.FETCH_ERROR);
+    });
+
+    it('times out when server delays beyond timeoutMs', async () => {
+      const port = await startServer((_req, res) => {
+        // Delay response well beyond the timeout
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"data":"late"}');
+        }, 5000);
+      });
+
+      mockBuildForPort(port);
+      mockResolve.mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' });
+
+      const skill = makeSkill({ allowedDomains: ['example.com', 'localhost'] });
+      const result = await executeSkill(skill, {}, {
+        timeoutMs: 200, // Very short timeout
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.FETCH_ERROR);
+    }, 10000); // Generous test timeout to account for cleanup
   });
 });

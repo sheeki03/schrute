@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { AuditLog } from '../../src/replay/audit-log.js';
-import type { OneAgentConfig, AuditEntry, PolicyDecision } from '../../src/skill/types.js';
+import type { SchruteConfig, AuditEntry, PolicyDecision } from '../../src/skill/types.js';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-function makeConfig(dataDir: string, strictMode = true): OneAgentConfig {
+function makeConfig(dataDir: string, strictMode = true): SchruteConfig {
   return {
     dataDir,
     logLevel: 'silent',
@@ -36,7 +36,7 @@ function makeConfig(dataDir: string, strictMode = true): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makeValidEntry(): Omit<AuditEntry, 'previousHash' | 'entryHash' | 'signature'> {
@@ -62,7 +62,7 @@ describe('audit-log', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'oneagent-audit-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'schrute-audit-test-'));
   });
 
   afterEach(() => {

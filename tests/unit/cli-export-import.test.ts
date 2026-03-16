@@ -227,7 +227,7 @@ describe('Import bundle', () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(tmpdir(), 'oneagent-test-'));
+    tmpDir = fs.mkdtempSync(path.join(tmpdir(), 'schrute-test-'));
   });
 
   afterEach(() => {

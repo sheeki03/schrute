@@ -1,5 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { Command } from 'commander';
 import type { IncomingMessage } from 'node:http';
 
@@ -19,7 +23,7 @@ vi.mock('../../src/core/config.js', () => ({
   getDaemonTokenPath: (config: { dataDir: string }) => `${config.dataDir}/daemon.token`,
 }));
 
-import { checkBearerAuth, LifecycleGuard } from '../../src/server/daemon.js';
+import { checkBearerAuth, LifecycleGuard, startDaemonServer } from '../../src/server/daemon.js';
 
 // Helper to create a minimal mock IncomingMessage with an authorization header
 function mockReq(authHeader?: string): IncomingMessage {
@@ -248,5 +252,112 @@ describe('Daemon utilities', () => {
       const t2 = crypto.randomBytes(32).toString('hex');
       expect(t1).not.toBe(t2);
     });
+  });
+
+  // ─── TA-7: Socket / token validation via startDaemonServer ────
+  //
+  // These tests exercise validateAndCleanSocket and writeTokenFile
+  // indirectly through startDaemonServer with real temp directories.
+  // Engine is mocked since it's unused during server startup.
+
+  describe('startDaemonServer socket validation', () => {
+    // Minimal mock engine — only engine.close() is called during shutdown,
+    // and we never trigger graceful shutdown in these tests.
+    const mockEngine = {
+      close: vi.fn(),
+      getStatus: vi.fn().mockReturnValue({}),
+      getMultiSessionManager: vi.fn().mockReturnValue({ list: () => [], getActive: () => null }),
+      getSessionManager: vi.fn().mockReturnValue({ getBrowserManager: () => null }),
+      getAmendmentRepo: vi.fn().mockReturnValue(null),
+      getExemplarRepo: vi.fn().mockReturnValue(null),
+      getMetricsRepo: vi.fn().mockReturnValue(null),
+    } as any;
+
+    let tmpDir: string;
+    let closeHandle: (() => Promise<void>) | null = null;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-test-'));
+    });
+
+    afterEach(async () => {
+      // Always clean up the server if it was started
+      if (closeHandle) {
+        try { await closeHandle(); } catch { /* ignore */ }
+        closeHandle = null;
+      }
+      // Remove temp directory
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    it('removes stale socket and starts server', async () => {
+      const socketPath = path.join(tmpDir, 'daemon.sock');
+
+      // Create a stale socket: spawn a child process that binds a Unix
+      // socket and then exits via process.exit(0). Node removes socket
+      // files on graceful server.close(), so a hard exit is needed to
+      // leave the file behind. Using execFileSync (not exec) prevents
+      // shell injection — socketPath is passed as an argv element.
+      execFileSync('node', [
+        '-e',
+        'const net = require("net"); const s = net.createServer(); s.listen(process.argv[1], () => process.exit(0));',
+        socketPath,
+      ]);
+
+      // Verify the stale socket file exists and is actually a socket
+      expect(fs.existsSync(socketPath)).toBe(true);
+      expect(fs.lstatSync(socketPath).isSocket()).toBe(true);
+
+      const config = { dataDir: tmpDir, daemon: { port: 0, autoStart: false } } as any;
+      const handle = await startDaemonServer(mockEngine, config);
+      closeHandle = handle.close;
+
+      // Server started successfully in UDS mode (stale socket was cleaned)
+      expect(handle.transport.mode).toBe('uds');
+    }, 10000);
+
+    // ── TCP fallback tests (triggered by long dataDir path > 104 chars) ──
+
+    it('rejects symlink at token path in TCP mode', async () => {
+      // Create a dataDir path longer than 104 chars to force TCP fallback
+      const longSuffix = 'a'.repeat(120);
+      const longDir = path.join(tmpDir, longSuffix);
+      fs.mkdirSync(longDir, { recursive: true });
+
+      const tokenPath = path.join(longDir, 'daemon.token');
+      const symlinkTarget = path.join(longDir, 'symlink-target');
+      fs.writeFileSync(symlinkTarget, 'target-content', { mode: 0o600 });
+      fs.symlinkSync(symlinkTarget, tokenPath);
+
+      const config = { dataDir: longDir, daemon: { port: 0, autoStart: false } } as any;
+
+      await expect(
+        startDaemonServer(mockEngine, config),
+      ).rejects.toThrow(/symlink/i);
+    }, 10000);
+
+    it('writes token file with 0o600 permissions in TCP mode', async () => {
+      // Skip on Windows where Unix file permissions don't apply
+      if (process.platform === 'win32') return;
+
+      // Create a dataDir path longer than 104 chars to force TCP fallback
+      const longSuffix = 'b'.repeat(120);
+      const longDir = path.join(tmpDir, longSuffix);
+      fs.mkdirSync(longDir, { recursive: true });
+
+      const config = { dataDir: longDir, daemon: { port: 0, autoStart: false } } as any;
+      const handle = await startDaemonServer(mockEngine, config);
+      closeHandle = handle.close;
+
+      expect(handle.transport.mode).toBe('tcp');
+
+      // Verify token file permissions
+      const tokenPath = path.join(longDir, 'daemon.token');
+      const stat = fs.statSync(tokenPath);
+      expect(stat.mode & 0o777).toBe(0o600);
+    }, 10000);
+
+    // TODO: Consider adding a test for validateAndCleanSocket rejecting sockets
+    // owned by a different UID. This is difficult to test without root privileges.
   });
 });

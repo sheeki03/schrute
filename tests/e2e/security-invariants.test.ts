@@ -4,14 +4,14 @@ import { redactString, redactHeaders, redactBody } from '../../src/storage/redac
 import { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from '../../src/skill/types.js';
 import { ToolBudgetTracker } from '../../src/replay/tool-budget.js';
 import { AuditLog } from '../../src/replay/audit-log.js';
-import type { OneAgentConfig, ExecutionTierName, CapabilityName } from '../../src/skill/types.js';
+import type { SchruteConfig, ExecutionTierName, CapabilityName } from '../../src/skill/types.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
-function makeTestConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneagent-sec-'));
-  const base: OneAgentConfig = {
+function makeTestConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'schrute-sec-'));
+  const base: SchruteConfig = {
     dataDir: tmpDir,
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },

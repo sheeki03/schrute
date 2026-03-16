@@ -83,7 +83,7 @@ describe('Secrets (keytar wrapper)', () => {
   describe('store/retrieve/delete flow', () => {
     it('stores a value', async () => {
       await secretsModule.store('test-key', 'test-value');
-      expect(mockKeytar.setPassword).toHaveBeenCalledWith('oneagent', 'test-key', 'test-value');
+      expect(mockKeytar.setPassword).toHaveBeenCalledWith('schrute', 'test-key', 'test-value');
     });
 
     it('retrieves a stored value', async () => {

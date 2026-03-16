@@ -72,7 +72,7 @@ describe('Security Parity — Policy Checks', () => {
     });
 
     it('blocks v0.1 disabled capabilities', () => {
-      const result = checkCapability('example.com', 'browser.modelContext');
+      const result = checkCapability('example.com', 'export.skills');
       expect(result.allowed).toBe(false);
       expect(result.rule).toBe('capability.disabled_by_default');
     });

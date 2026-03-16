@@ -8,6 +8,8 @@ function makeEntry(overrides: Partial<{
   bodySize: number;
   postDataText: string;
   responseContentType: string;
+  responseStatus: number;
+  responseBodySize: number;
   startedDateTime: string;
 }>): HarEntry {
   const {
@@ -16,6 +18,8 @@ function makeEntry(overrides: Partial<{
     bodySize = 0,
     postDataText,
     responseContentType = 'application/json',
+    responseStatus = 200,
+    responseBodySize = 100,
     startedDateTime = '2025-01-01T00:00:00Z',
   } = overrides;
 
@@ -33,14 +37,14 @@ function makeEntry(overrides: Partial<{
       ...(postDataText ? { postData: { mimeType: 'application/json', text: postDataText } } : {}),
     },
     response: {
-      status: 200,
+      status: responseStatus,
       statusText: 'OK',
       httpVersion: 'HTTP/1.1',
       headers: [{ name: 'content-type', value: responseContentType }],
-      content: { size: 100, mimeType: responseContentType },
+      content: { size: responseBodySize, mimeType: responseContentType },
       redirectURL: '',
       headersSize: 0,
-      bodySize: 100,
+      bodySize: responseBodySize,
     },
     timings: { send: 0, wait: 50, receive: 50 },
   };
@@ -106,6 +110,42 @@ describe('noise-filter', () => {
         postDataText: '{"name":"test"}',
       })]);
       expect(result.signal).toHaveLength(1);
+    });
+  });
+
+  describe('tracking endpoint detection', () => {
+    it('filters pixel.gif as tracking endpoint', () => {
+      const result = filterRequests([makeEntry({ url: 'https://example.com/track/pixel.gif' })]);
+      expect(result.noise).toHaveLength(1);
+      expect(result.signal).toHaveLength(0);
+    });
+
+    it('filters /decision with small body as tracking endpoint', () => {
+      const result = filterRequests([makeEntry({
+        url: 'https://api.example.com/api/v1/decision/',
+        responseBodySize: 100,
+      })]);
+      expect(result.noise).toHaveLength(1);
+      expect(result.signal).toHaveLength(0);
+    });
+
+    it('does NOT filter /decision with large body (real API)', () => {
+      const result = filterRequests([makeEntry({
+        url: 'https://api.example.com/api/v1/decision/',
+        responseBodySize: 500,
+      })]);
+      expect(result.noise).toHaveLength(0);
+      expect(result.signal).toHaveLength(1);
+    });
+
+    it('filters 204 response to /collect as tracking endpoint', () => {
+      const result = filterRequests([makeEntry({
+        url: 'https://api.example.com/collect',
+        responseStatus: 204,
+        responseBodySize: 0,
+      })]);
+      expect(result.noise).toHaveLength(1);
+      expect(result.signal).toHaveLength(0);
     });
   });
 

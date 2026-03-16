@@ -20,6 +20,7 @@ vi.mock('node:fs', async () => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     mkdirSync: vi.fn(),
+    renameSync: vi.fn(),
   };
 });
 
@@ -230,7 +231,7 @@ describe('proxy/geo config validation', () => {
 
   describe('strict float parsing for env vars', () => {
     it('rejects "12abc" for latitude', () => {
-      setEnv('ONEAGENT_GEO_LATITUDE', '12abc');
+      setEnv('SCHRUTE_GEO_LATITUDE', '12abc');
       expect(() => {
         resetConfigCache();
         getConfig();
@@ -238,7 +239,7 @@ describe('proxy/geo config validation', () => {
     });
 
     it('accepts "12.5" for latitude', () => {
-      setEnv('ONEAGENT_GEO_LATITUDE', '12.5');
+      setEnv('SCHRUTE_GEO_LATITUDE', '12.5');
       expect(() => {
         resetConfigCache();
         getConfig();
@@ -248,7 +249,7 @@ describe('proxy/geo config validation', () => {
     it('empty string for latitude parses to 0 (Number("") === 0)', () => {
       // Number('') === 0, which is a valid finite number in [-90,90]
       // so the float parser accepts it — this matches JavaScript semantics
-      setEnv('ONEAGENT_GEO_LATITUDE', '');
+      setEnv('SCHRUTE_GEO_LATITUDE', '');
       resetConfigCache();
       const cfg = getConfig();
       expect(cfg.browser?.geo?.geolocation?.latitude).toBe(0);
@@ -258,45 +259,45 @@ describe('proxy/geo config validation', () => {
   // ─── Env Var Overrides ─────────────────────────────────────
 
   describe('env var overrides', () => {
-    it('ONEAGENT_PROXY_SERVER overrides config', () => {
-      setEnv('ONEAGENT_PROXY_SERVER', 'socks5://myproxy:1080');
+    it('SCHRUTE_PROXY_SERVER overrides config', () => {
+      setEnv('SCHRUTE_PROXY_SERVER', 'socks5://myproxy:1080');
       resetConfigCache();
       const cfg = getConfig();
       expect(cfg.browser?.proxy?.server).toBe('socks5://myproxy:1080');
     });
 
-    it('ONEAGENT_TIMEZONE overrides config', () => {
-      setEnv('ONEAGENT_TIMEZONE', 'Asia/Tokyo');
+    it('SCHRUTE_TIMEZONE overrides config', () => {
+      setEnv('SCHRUTE_TIMEZONE', 'Asia/Tokyo');
       resetConfigCache();
       const cfg = getConfig();
       expect(cfg.browser?.geo?.timezoneId).toBe('Asia/Tokyo');
     });
 
-    it('ONEAGENT_LOCALE overrides config', () => {
-      setEnv('ONEAGENT_LOCALE', 'de-DE');
+    it('SCHRUTE_LOCALE overrides config', () => {
+      setEnv('SCHRUTE_LOCALE', 'de-DE');
       resetConfigCache();
       const cfg = getConfig();
       expect(cfg.browser?.geo?.locale).toBe('de-DE');
     });
 
-    it('invalid ONEAGENT_PROXY_SERVER fails fast with ConfigError', () => {
-      setEnv('ONEAGENT_PROXY_SERVER', 'not-a-url');
+    it('invalid SCHRUTE_PROXY_SERVER fails fast with ConfigError', () => {
+      setEnv('SCHRUTE_PROXY_SERVER', 'not-a-url');
       expect(() => {
         resetConfigCache();
         getConfig();
       }).toThrow(ConfigError);
     });
 
-    it('invalid ONEAGENT_TIMEZONE fails fast with ConfigError', () => {
-      setEnv('ONEAGENT_TIMEZONE', 'Mars/Olympus');
+    it('invalid SCHRUTE_TIMEZONE fails fast with ConfigError', () => {
+      setEnv('SCHRUTE_TIMEZONE', 'Mars/Olympus');
       expect(() => {
         resetConfigCache();
         getConfig();
       }).toThrow(ConfigError);
     });
 
-    it('invalid ONEAGENT_LOCALE fails fast with ConfigError', () => {
-      setEnv('ONEAGENT_LOCALE', '');
+    it('invalid SCHRUTE_LOCALE fails fast with ConfigError', () => {
+      setEnv('SCHRUTE_LOCALE', '');
       expect(() => {
         resetConfigCache();
         getConfig();

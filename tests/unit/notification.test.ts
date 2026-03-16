@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { notify, createEvent, drainMcpNotifications } from '../../src/healing/notification.js';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
 
-const mockConfig: OneAgentConfig = {
-  dataDir: '/tmp/oneagent-test',
+const mockConfig: SchruteConfig = {
+  dataDir: '/tmp/schrute-test',
   logLevel: 'info',
   features: { webmcp: false, httpTransport: false },
   toolBudget: {

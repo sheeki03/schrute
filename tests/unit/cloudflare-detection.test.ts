@@ -242,13 +242,13 @@ describe('challenge-aware snapshot content', () => {
       'This page is showing a Cloudflare security challenge.\n' +
       'Options:\n' +
       '- Wait: call browser_snapshot again in 5-10 seconds (challenge may auto-resolve)\n' +
-      '- Import cookies: use oneagent_import_cookies with a cf_clearance cookie file\n' +
+      '- Import cookies: use schrute_import_cookies with a cf_clearance cookie file\n' +
       engineHint +
       '- Current engine: ' + currentEngine + '\n\n';
 
     expect(warning).toContain('CLOUDFLARE CHALLENGE PAGE DETECTED');
     expect(warning).toContain('browser_snapshot');
-    expect(warning).toContain('oneagent_import_cookies');
+    expect(warning).toContain('schrute_import_cookies');
     expect(warning).toContain('Switch engine');
     expect(warning).toContain('Current engine: playwright');
   });

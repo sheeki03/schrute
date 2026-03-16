@@ -1,7 +1,7 @@
 /**
  * Dogfood E2E: MCP Stdio — ALL meta tools, pro user workflows
  *
- * Spawns the real OneAgent MCP server process and exercises every meta tool
+ * Spawns the real Schrute MCP server process and exercises every meta tool
  * via JSON-RPC 2.0 over stdio. Tests behavior like a power user would:
  *
  *   - Full lifecycle: explore → record → stop → skills → execute → doctor
@@ -58,7 +58,7 @@ class McpClient {
       env: {
         ...process.env,
         ...env,
-        ONEAGENT_LOG_LEVEL: 'silent',
+        SCHRUTE_LOG_LEVEL: 'silent',
         NODE_OPTIONS: '--no-warnings',
       },
     });
@@ -160,9 +160,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   let tempDir: string;
 
   beforeAll(async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'oneagent-dogfood-stdio-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'schrute-dogfood-stdio-'));
     mockServer = await createRestMockServer();
-    client = new McpClient(serverEntry, { ONEAGENT_DATA_DIR: tempDir });
+    client = new McpClient(serverEntry, { SCHRUTE_DATA_DIR: tempDir });
   }, 20000);
 
   afterAll(async () => {
@@ -180,7 +180,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       const resp = await client.initialize();
       expect(resp.error).toBeUndefined();
       const result = resp.result as any;
-      expect(result.serverInfo?.name).toBe('oneagent');
+      expect(result.serverInfo?.name).toBe('schrute');
       expect(result.capabilities?.tools).toBeDefined();
     }, 10000);
   });
@@ -195,22 +195,22 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       const names = tools.map(t => t.name);
 
       const expectedMetaTools = [
-        'oneagent_explore',
-        'oneagent_record',
-        'oneagent_stop',
-        'oneagent_sites',
-        'oneagent_skills',
-        'oneagent_status',
-        'oneagent_dry_run',
-        'oneagent_confirm',
-        'oneagent_connect_cdp',
-        'oneagent_sessions',
-        'oneagent_close_session',
-        'oneagent_switch_session',
-        'oneagent_import_cookies',
-        'oneagent_execute',
-        'oneagent_doctor',
-        'oneagent_export_cookies',
+        'schrute_explore',
+        'schrute_record',
+        'schrute_stop',
+        'schrute_sites',
+        'schrute_skills',
+        'schrute_status',
+        'schrute_dry_run',
+        'schrute_confirm',
+        'schrute_connect_cdp',
+        'schrute_sessions',
+        'schrute_close_session',
+        'schrute_switch_session',
+        'schrute_import_cookies',
+        'schrute_execute',
+        'schrute_doctor',
+        'schrute_export_cookies',
       ];
 
       for (const tool of expectedMetaTools) {
@@ -242,9 +242,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // C. Status — Before Explore (idle)
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_status — idle', () => {
+  describe('schrute_status — idle', () => {
     it('returns idle mode with uptime', async () => {
-      const result = await client.callTool('oneagent_status');
+      const result = await client.callTool('schrute_status');
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(data.mode).toBe('idle');
@@ -258,9 +258,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // D. Doctor — Diagnostics
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_doctor', () => {
+  describe('schrute_doctor', () => {
     it('returns diagnostic report', async () => {
-      const result = await client.callTool('oneagent_doctor');
+      const result = await client.callTool('schrute_doctor');
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(data.diagnostics).toBeDefined();
@@ -277,9 +277,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // E. Explore — Happy Path
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_explore', () => {
+  describe('schrute_explore', () => {
     it('creates a session for the mock server', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: mockServer.url + '/api/users',
       });
       expect(result.isError).toBeFalsy();
@@ -289,7 +289,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('status shows exploring after explore', async () => {
-      const result = await client.callTool('oneagent_status');
+      const result = await client.callTool('schrute_status');
       const data = parseToolResult(result);
       expect(data.mode).toBe('exploring');
       expect(data.activeSession).toBeDefined();
@@ -300,20 +300,20 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // F. Explore — Error Paths
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_explore — error paths', () => {
+  describe('schrute_explore — error paths', () => {
     it('rejects missing URL', async () => {
-      const result = await client.callTool('oneagent_explore', {});
+      const result = await client.callTool('schrute_explore', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('url is required');
     }, 10000);
 
     it('rejects invalid URL', async () => {
-      const result = await client.callTool('oneagent_explore', { url: 'not-a-url' });
+      const result = await client.callTool('schrute_explore', { url: 'not-a-url' });
       expect(result.isError).toBe(true);
     }, 10000);
 
     it('rejects proxy with invalid URL', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'not-a-url' },
       });
@@ -322,7 +322,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('rejects proxy with credentials in URL', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://user:pass@proxy:8080' },
       });
@@ -331,7 +331,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('rejects invalid timezone', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         geo: { timezoneId: 'Mars/Olympus' },
       });
@@ -340,7 +340,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('rejects latitude out of range', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 91, longitude: 0 } },
       });
@@ -349,7 +349,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('rejects longitude out of range', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 0, longitude: -181 } },
       });
@@ -358,7 +358,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('rejects invalid locale', async () => {
-      const result = await client.callTool('oneagent_explore', {
+      const result = await client.callTool('schrute_explore', {
         url: 'https://example.com',
         geo: { locale: '!invalid!' },
       });
@@ -371,9 +371,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // G. Record → Stop Lifecycle
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_record → oneagent_stop', () => {
+  describe('schrute_record → schrute_stop', () => {
     it('starts recording with name and inputs', async () => {
-      const result = await client.callTool('oneagent_record', {
+      const result = await client.callTool('schrute_record', {
         name: 'dogfood-test-rec',
         inputs: { page: '1' },
       });
@@ -384,7 +384,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('status shows recording during recording', async () => {
-      const result = await client.callTool('oneagent_status');
+      const result = await client.callTool('schrute_status');
       const data = parseToolResult(result);
       expect(data.mode).toBe('recording');
       expect(data.currentRecording).toBeDefined();
@@ -392,13 +392,13 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     }, 10000);
 
     it('stops recording', async () => {
-      const result = await client.callTool('oneagent_stop');
+      const result = await client.callTool('schrute_stop');
       const data = parseToolResult(result);
       expect(data).toBeDefined();
     }, 15000);
 
     it('status returns to exploring after stop', async () => {
-      const result = await client.callTool('oneagent_status');
+      const result = await client.callTool('schrute_status');
       const data = parseToolResult(result);
       expect(data.mode).toBe('exploring');
       expect(data.currentRecording).toBeNull();
@@ -409,25 +409,25 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // H. Record — Error Paths
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_record — error paths', () => {
+  describe('schrute_record — error paths', () => {
     it('rejects missing name', async () => {
-      const result = await client.callTool('oneagent_record', {});
+      const result = await client.callTool('schrute_record', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required');
     }, 10000);
 
     it('double record is rejected', async () => {
-      await client.callTool('oneagent_record', { name: 'first' });
+      await client.callTool('schrute_record', { name: 'first' });
 
-      const second = await client.callTool('oneagent_record', { name: 'second' });
+      const second = await client.callTool('schrute_record', { name: 'second' });
       expect(second.content[0].text).toContain('Cannot start recording');
 
       // Clean up
-      await client.callTool('oneagent_stop');
+      await client.callTool('schrute_stop');
     }, 15000);
 
     it('stop without recording is rejected', async () => {
-      const result = await client.callTool('oneagent_stop');
+      const result = await client.callTool('schrute_stop');
       expect(result.content[0].text).toContain('No active recording');
     }, 10000);
   });
@@ -436,9 +436,9 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // I. Sites
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_sites', () => {
+  describe('schrute_sites', () => {
     it('lists known sites', async () => {
-      const result = await client.callTool('oneagent_sites');
+      const result = await client.callTool('schrute_sites');
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(Array.isArray(data)).toBe(true);
@@ -449,16 +449,18 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // J. Skills — By Site and Grouped
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_skills', () => {
+  describe('schrute_skills', () => {
     it('lists skills by siteId', async () => {
-      const result = await client.callTool('oneagent_skills', { siteId: '127.0.0.1' });
+      const result = await client.callTool('schrute_skills', { siteId: '127.0.0.1' });
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
-      expect(Array.isArray(data)).toBe(true);
+      expect(data.totalSkills).toBeDefined();
+      expect(typeof data.totalSkills).toBe('number');
+      expect(data.sites).toBeDefined();
     }, 10000);
 
     it('lists all skills grouped by site (no siteId)', async () => {
-      const result = await client.callTool('oneagent_skills', {});
+      const result = await client.callTool('schrute_skills', {});
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(data.totalSkills).toBeDefined();
@@ -471,15 +473,15 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // K. Dry Run
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_dry_run', () => {
+  describe('schrute_dry_run', () => {
     it('rejects missing skillId', async () => {
-      const result = await client.callTool('oneagent_dry_run', {});
+      const result = await client.callTool('schrute_dry_run', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     }, 10000);
 
     it('rejects nonexistent skill', async () => {
-      const result = await client.callTool('oneagent_dry_run', {
+      const result = await client.callTool('schrute_dry_run', {
         skillId: 'nonexistent.skill.v1',
       });
       expect(result.isError).toBe(true);
@@ -491,15 +493,15 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // L. Execute — Error Paths
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_execute', () => {
+  describe('schrute_execute', () => {
     it('rejects missing skillId', async () => {
-      const result = await client.callTool('oneagent_execute', {});
+      const result = await client.callTool('schrute_execute', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     }, 10000);
 
     it('rejects nonexistent skill', async () => {
-      const result = await client.callTool('oneagent_execute', {
+      const result = await client.callTool('schrute_execute', {
         skillId: 'nonexistent.skill.v1',
       });
       expect(result.isError).toBe(true);
@@ -511,21 +513,21 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // M. Confirm — Error Paths
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_confirm', () => {
+  describe('schrute_confirm', () => {
     it('rejects missing token', async () => {
-      const result = await client.callTool('oneagent_confirm', { approve: true });
+      const result = await client.callTool('schrute_confirm', { approve: true });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('confirmationToken is required');
     }, 10000);
 
     it('rejects missing approve', async () => {
-      const result = await client.callTool('oneagent_confirm', { confirmationToken: 'abc' });
+      const result = await client.callTool('schrute_confirm', { confirmationToken: 'abc' });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('approve must be a boolean');
     }, 10000);
 
     it('rejects invalid token', async () => {
-      const result = await client.callTool('oneagent_confirm', {
+      const result = await client.callTool('schrute_confirm', {
         confirmationToken: 'invalid-token-xyz',
         approve: true,
       });
@@ -539,8 +541,8 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('Session management', () => {
-    it('oneagent_sessions lists active sessions', async () => {
-      const result = await client.callTool('oneagent_sessions');
+    it('schrute_sessions lists active sessions', async () => {
+      const result = await client.callTool('schrute_sessions');
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(Array.isArray(data)).toBe(true);
@@ -550,14 +552,14 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       expect(defaultSession.active).toBe(true);
     }, 10000);
 
-    it('oneagent_switch_session requires name', async () => {
-      const result = await client.callTool('oneagent_switch_session', {});
+    it('schrute_switch_session requires name', async () => {
+      const result = await client.callTool('schrute_switch_session', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required');
     }, 10000);
 
-    it('oneagent_close_session requires name', async () => {
-      const result = await client.callTool('oneagent_close_session', {});
+    it('schrute_close_session requires name', async () => {
+      const result = await client.callTool('schrute_close_session', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required');
     }, 10000);
@@ -567,27 +569,27 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // O. CDP — Error Paths
   // ═══════════════════════════════════════════════════════════════
 
-  describe('oneagent_connect_cdp — error paths', () => {
+  describe('schrute_connect_cdp — error paths', () => {
     it('rejects missing name', async () => {
-      const result = await client.callTool('oneagent_connect_cdp', {});
+      const result = await client.callTool('schrute_connect_cdp', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required');
     }, 10000);
 
     it('rejects "default" as session name', async () => {
-      const result = await client.callTool('oneagent_connect_cdp', { name: 'default' });
+      const result = await client.callTool('schrute_connect_cdp', { name: 'default' });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('Cannot use "default"');
     }, 10000);
 
     it('rejects non-integer port', async () => {
-      const result = await client.callTool('oneagent_connect_cdp', { name: 'test', port: 'abc' });
+      const result = await client.callTool('schrute_connect_cdp', { name: 'test', port: 'abc' });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('port must be an integer');
     }, 10000);
 
     it('connects to nonexistent CDP endpoint → graceful error', async () => {
-      const result = await client.callTool('oneagent_connect_cdp', {
+      const result = await client.callTool('schrute_connect_cdp', {
         name: 'test-cdp',
         port: 19222,
       });
@@ -601,14 +603,14 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('Cookie management', () => {
-    it('oneagent_import_cookies requires siteId and cookieFile', async () => {
-      const result = await client.callTool('oneagent_import_cookies', {});
+    it('schrute_import_cookies requires siteId and cookieFile', async () => {
+      const result = await client.callTool('schrute_import_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('required');
     }, 10000);
 
-    it('oneagent_import_cookies with missing file → error', async () => {
-      const result = await client.callTool('oneagent_import_cookies', {
+    it('schrute_import_cookies with missing file → error', async () => {
+      const result = await client.callTool('schrute_import_cookies', {
         siteId: '127.0.0.1',
         cookieFile: '/tmp/nonexistent-cookie-dogfood-12345.txt',
       });
@@ -616,14 +618,14 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       expect(result.content[0].text).toContain('not found');
     }, 10000);
 
-    it('oneagent_export_cookies requires siteId', async () => {
-      const result = await client.callTool('oneagent_export_cookies', {});
+    it('schrute_export_cookies requires siteId', async () => {
+      const result = await client.callTool('schrute_export_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('siteId is required');
     }, 10000);
 
-    it('oneagent_export_cookies on explored site', async () => {
-      const result = await client.callTool('oneagent_export_cookies', {
+    it('schrute_export_cookies on explored site', async () => {
+      const result = await client.callTool('schrute_export_cookies', {
         siteId: '127.0.0.1',
       });
       // May succeed (empty cookies) or error if no context
@@ -668,12 +670,12 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     it('server is still responsive', async () => {
       const tools = await client.listTools();
       expect(tools.length).toBeGreaterThan(0);
-      const status = await client.callTool('oneagent_status');
+      const status = await client.callTool('schrute_status');
       expect(status.isError).toBeFalsy();
     }, 10000);
 
     it('doctor still runs cleanly', async () => {
-      const result = await client.callTool('oneagent_doctor');
+      const result = await client.callTool('schrute_doctor');
       expect(result.isError).toBeFalsy();
       const data = parseToolResult(result);
       expect(data.diagnostics.engine.mode).toBeDefined();

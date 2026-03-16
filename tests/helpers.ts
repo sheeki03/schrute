@@ -1,11 +1,12 @@
 /**
- * Shared test helpers and fixtures for OneAgent tests.
+ * Shared test helpers and fixtures for Schrute tests.
  */
 
+import Database from 'better-sqlite3';
 import type {
   SkillSpec,
   SiteManifest,
-  OneAgentConfig,
+  SchruteConfig,
   SitePolicy,
   PolicyDecision,
   AuditEntry,
@@ -18,12 +19,66 @@ import {
   Capability,
   MasteryLevel,
 } from '../src/skill/types.js';
+import type { AgentDatabase } from '../src/storage/database.js';
+import { MIGRATIONS } from '../src/storage/database.js';
+
+// ─── Full-schema in-memory database ──────────────────────────────
+// Uses the production MIGRATIONS constant so tests never drift from real schema.
+
+export function createFullSchemaDb(): AgentDatabase & { close: () => void } {
+  const raw = new Database(':memory:');
+  raw.pragma('journal_mode = WAL');
+  raw.pragma('foreign_keys = ON');
+
+  // Create the schema_migrations tracking table (mirrors AgentDatabase.runMigrations)
+  raw.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id INTEGER PRIMARY KEY,
+      filename TEXT NOT NULL,
+      applied_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+  `);
+
+  // Apply all production migrations in order
+  for (const migration of MIGRATIONS) {
+    raw.transaction(() => {
+      raw.exec(migration.sql);
+      raw.prepare('INSERT INTO schema_migrations (filename) VALUES (?)').run(migration.filename);
+    })();
+  }
+
+  const db = {
+    run(sql: string, ...params: unknown[]) {
+      return raw.prepare(sql).run(...params);
+    },
+    get<T = unknown>(sql: string, ...params: unknown[]): T | undefined {
+      return raw.prepare(sql).get(...params) as T | undefined;
+    },
+    all<T = unknown>(sql: string, ...params: unknown[]): T[] {
+      return raw.prepare(sql).all(...params) as T[];
+    },
+    exec(sql: string) {
+      raw.exec(sql);
+    },
+    transaction<T>(fn: () => T): T {
+      return raw.transaction(fn)();
+    },
+    close() {
+      raw.close();
+    },
+    get raw() {
+      return raw;
+    },
+  } as unknown as AgentDatabase & { close: () => void };
+
+  return db;
+}
 
 // ─── Default test config ──────────────────────────────────────────
 
-export function makeTestConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+export function makeTestConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-test-' + Math.random().toString(36).slice(2),
+    dataDir: '/tmp/schrute-test-' + Math.random().toString(36).slice(2),
     logLevel: 'silent',
     features: {
       webmcp: false,
@@ -58,6 +113,7 @@ export function makeTestConfig(overrides?: Partial<OneAgentConfig>): OneAgentCon
     server: {
       network: false,
     },
+    daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,
     confirmationTimeoutMs: 30000,

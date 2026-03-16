@@ -61,7 +61,7 @@ describe('doctor', () => {
     it('includes version header', () => {
       const report = makeReport([]);
       const output = formatDoctorReport(report);
-      expect(output).toContain('OneAgent Doctor (v0.1.0)');
+      expect(output).toContain('Schrute Doctor (v0.1.0)');
     });
   });
 

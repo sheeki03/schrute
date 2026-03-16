@@ -196,7 +196,7 @@ describe('v0.2 Security — Policy Blocks', () => {
   it('checkCapability blocks disabled capabilities', async () => {
     const { checkCapability } = await import('../../src/core/policy.js');
 
-    const result = checkCapability('any-site', 'browser.modelContext');
+    const result = checkCapability('any-site', 'export.skills');
     expect(result.allowed).toBe(false);
     expect(result.rule).toBe('capability.disabled_by_default');
   });

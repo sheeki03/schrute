@@ -25,11 +25,11 @@ vi.mock('../../src/core/config.js', () => ({
   getConfig: () => getConfigMockValue(),
   ensureDirectories: vi.fn(),
   getDbPath: () => ':memory:',
-  getDataDir: () => '/tmp/oneagent-engine-test',
-  getBrowserDataDir: () => '/tmp/oneagent-engine-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-engine-test/tmp',
-  getAuditDir: () => '/tmp/oneagent-engine-test/audit',
-  getSkillsDir: () => '/tmp/oneagent-engine-test/skills',
+  getDataDir: () => '/tmp/schrute-engine-test',
+  getBrowserDataDir: () => '/tmp/schrute-engine-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-engine-test/tmp',
+  getAuditDir: () => '/tmp/schrute-engine-test/audit',
+  getSkillsDir: () => '/tmp/schrute-engine-test/skills',
 }));
 
 // Mock database singleton
@@ -48,6 +48,8 @@ vi.mock('../../src/storage/skill-repository.js', () => ({
     create: vi.fn(),
     getBySiteId: vi.fn().mockReturnValue([]),
     getActive: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    getByStatus: vi.fn().mockReturnValue([]),
     update: vi.fn(),
     delete: vi.fn(),
     updateConfidence: vi.fn(),
@@ -73,6 +75,9 @@ vi.mock('../../src/storage/metrics-repository.js', () => ({
   MetricsRepository: vi.fn().mockImplementation(() => ({
     record: vi.fn(),
     getForSkill: vi.fn().mockReturnValue([]),
+    getBySkillId: vi.fn().mockReturnValue([]),
+    getRecentBySkillId: vi.fn().mockReturnValue([]),
+    getSuccessRate: vi.fn().mockReturnValue(0),
   })),
 }));
 
@@ -99,6 +104,8 @@ vi.mock('../../src/automation/rate-limiter.js', () => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
+    attachDatabase: vi.fn(),
+    persistBackoffs: vi.fn(),
   })),
 }));
 
@@ -112,9 +119,18 @@ vi.mock('../../src/browser/manager.js', () => {
       this.name = 'ContextOverrideMismatchError';
     }
   }
+  function stableStringify(obj: unknown): string {
+    if (obj === null || obj === undefined) return 'null';
+    if (typeof obj !== 'object') return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(stableStringify).join(',') + ']';
+    const record = obj as Record<string, unknown>;
+    const sorted = Object.keys(record).filter(k => record[k] !== undefined).sort();
+    return '{' + sorted.map(k => JSON.stringify(k) + ':' + stableStringify(record[k])).join(',') + '}';
+  }
   return {
     BrowserManager: vi.fn().mockImplementation(() => mockBrowserManager),
     ContextOverrideMismatchError,
+    stableStringify,
   };
 });
 
@@ -235,6 +251,8 @@ vi.mock('../../src/core/tiering.js', () => ({
     tierLock: { type: 'permanent', reason: 'js_computed_field', evidence: 'test' },
     reason: 'test',
   }),
+  checkPromotion: vi.fn().mockReturnValue({ promote: false, reason: 'test' }),
+  getEffectiveTier: vi.fn().mockImplementation((skill: any) => skill.currentTier),
 }));
 
 // Mock diff-engine
@@ -304,16 +322,19 @@ import { ContextOverrideMismatchError } from '../../src/browser/manager.js';
 import { PlaywrightMcpAdapter } from '../../src/browser/playwright-mcp-adapter.js';
 import { checkMethodAllowed, checkPathRisk } from '../../src/core/policy.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
+import { MetricsRepository } from '../../src/storage/metrics-repository.js';
 import { retryWithEscalation } from '../../src/replay/retry.js';
 import { updateStrategy } from '../../src/automation/strategy.js';
 import { discoverSite } from '../../src/discovery/cold-start.js';
 import { canPromote, promoteSkill } from '../../src/core/promotion.js';
-import { handleFailure } from '../../src/core/tiering.js';
+import { handleFailure, checkPromotion } from '../../src/core/tiering.js';
 import { detectDrift } from '../../src/healing/diff-engine.js';
 import { monitorSkills } from '../../src/healing/monitor.js';
 import { notify, createEvent } from '../../src/healing/notification.js';
 import { inferSchema, mergeSchemas } from '../../src/capture/schema-inferrer.js';
 import type { SkillSpec } from '../../src/skill/types.js';
+
+// TODO: add integration test with real DB/real fetch
 
 describe('Engine', () => {
   let engine: Engine;
@@ -460,7 +481,7 @@ describe('Engine', () => {
       await engine.explore('https://example.com');
       // Give the fire-and-forget promise a tick to resolve
       await new Promise(r => setTimeout(r, 10));
-      expect(discoverSite).toHaveBeenCalledWith('https://example.com', expect.any(Object), undefined, expect.anything());
+      expect(discoverSite).toHaveBeenCalledWith('https://example.com', expect.any(Object), undefined, expect.anything(), undefined, expect.any(Function));
     });
   });
 
@@ -493,7 +514,7 @@ describe('Engine', () => {
       msm.getOrCreate('other-session');
       msm.setActive('other-session');
       await expect(engine.startRecording('test')).rejects.toThrow(
-        /Recording is only supported on the default session/,
+        /Recording with Playwright HAR is only supported on the default session/,
       );
       // Restore for other tests
       msm.setActive('default');
@@ -576,8 +597,9 @@ describe('Engine', () => {
 
       const result = await engine.executeSkill('example.com.delete_user.v1', {});
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Policy blocked');
-      expect(result.error).toContain('method');
+      expect(result.error).toContain('Failure: policy_denied');
+      expect(result.failureCause).toBe('policy_denied');
+      expect(result.failureDetail).toBeDefined();
     });
 
     it('returns error when path is flagged as risky', async () => {
@@ -601,7 +623,9 @@ describe('Engine', () => {
 
       const result = await engine.executeSkill('example.com.logout.v1', {});
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Policy blocked');
+      expect(result.error).toContain('Failure: policy_denied');
+      expect(result.failureCause).toBe('policy_denied');
+      expect(result.failureDetail).toContain('Destructive GET pattern detected');
     });
 
     it('returns error when rate limited', async () => {
@@ -632,7 +656,9 @@ describe('Engine', () => {
 
       const result = await engine.executeSkill('example.com.get_data.v1', {});
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Rate limited');
+      expect(result.error).toContain('Failure: rate_limited');
+      expect(result.failureCause).toBe('rate_limited');
+      expect(result.failureDetail).toContain('rate limited');
     });
 
     it('delegates to retryWithEscalation for read-only skills', async () => {
@@ -674,6 +700,109 @@ describe('Engine', () => {
       expect(retryWithEscalation).toHaveBeenCalled();
     });
 
+    it('promotes tier_3 skill after direct success when site recommends direct', async () => {
+      const mockSkill = {
+        id: 'example.com.promo_test.v1',
+        siteId: 'example.com',
+        name: 'promo_test',
+        method: 'GET',
+        pathTemplate: '/api/promo',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        authType: undefined,
+        consecutiveValidations: 1,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById
+          .mockReturnValueOnce(mockSkill)  // first lookup (execute path)
+          .mockReturnValueOnce(mockSkill); // refetch for promotion check
+      }
+      // Site recommends direct
+      mockSiteRepoInstance.getById.mockReturnValueOnce({ siteId: 'example.com', recommendedTier: 'direct' });
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+
+      // retryWithEscalation returns success via direct tier
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'direct',
+        status: 200,
+        data: {},
+        rawBody: '{}',
+        headers: {},
+        latencyMs: 30,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      // Make checkPromotion return promote: true
+      (checkPromotion as ReturnType<typeof vi.fn>).mockReturnValueOnce({ promote: true });
+
+      const result = await engine.executeSkill('example.com.promo_test.v1', {});
+      expect(result.success).toBe(true);
+      // checkPromotion should have been called with the site recommendation
+      expect(checkPromotion).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'example.com.promo_test.v1' }),
+        [],
+        expect.objectContaining({ match: true }),
+        expect.anything(),
+        'direct',
+      );
+      // And skillRepo.updateTier should have been called to promote
+      if (repoInstance) {
+        expect(repoInstance.updateTier).toHaveBeenCalledWith(
+          'example.com.promo_test.v1',
+          'tier_1',
+          null,
+        );
+      }
+    });
+
+    it('does NOT promote when tier is browser_proxied even if site recommends direct', async () => {
+      const mockSkill = {
+        id: 'example.com.no_promo.v1',
+        siteId: 'example.com',
+        name: 'no_promo',
+        method: 'GET',
+        pathTemplate: '/api/no-promo',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        authType: undefined,
+        consecutiveValidations: 1,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({ siteId: 'example.com', recommendedTier: 'direct' });
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+
+      // retryWithEscalation returns success via browser_proxied tier (NOT direct)
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'browser_proxied',
+        status: 200,
+        data: {},
+        rawBody: '{}',
+        headers: {},
+        latencyMs: 100,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      await engine.executeSkill('example.com.no_promo.v1', {});
+      // checkPromotion should NOT have been called because tier was not 'direct'
+      expect(checkPromotion).not.toHaveBeenCalled();
+    });
+
     it('calls updateStrategy after successful skill execution', async () => {
       const mockSkill = {
         id: 'example.com.get_items.v1',
@@ -713,6 +842,68 @@ describe('Engine', () => {
         tier: 'direct',
         success: true,
       }));
+    });
+
+    it('executeSkill with skipMetrics skips metricsRepo.record', async () => {
+      const mockSkill = {
+        id: 'example.com.get_data.v1',
+        siteId: 'example.com',
+        name: 'get_data',
+        method: 'GET',
+        pathTemplate: '/api/data',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_1',
+        tierLock: null,
+        authType: undefined,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const metricsInstance = (MetricsRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+
+      // First execution: skipMetrics = true → record should NOT be called
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'direct',
+        status: 200,
+        data: {},
+        rawBody: '{}',
+        headers: {},
+        latencyMs: 10,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      await engine.executeSkill('example.com.get_data.v1', {}, undefined, { skipMetrics: true });
+      expect(metricsInstance?.record).not.toHaveBeenCalled();
+
+      // Second execution: no skipMetrics → record SHOULD be called
+      vi.clearAllMocks();
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'direct',
+        status: 200,
+        data: {},
+        rawBody: '{}',
+        headers: {},
+        latencyMs: 10,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      await engine.executeSkill('example.com.get_data.v1', {});
+      expect(metricsInstance?.record).toHaveBeenCalled();
     });
   });
 
@@ -1166,7 +1357,6 @@ describe('Engine', () => {
         siteId: 'example.com',
         url: 'https://example.com/page1',
         startedAt: Date.now(),
-        browserContextId: 'ctx-1',
       });
 
       // Second explore to same site should reuse
@@ -1185,7 +1375,6 @@ describe('Engine', () => {
         siteId: 'example.com',
         url: 'https://example.com/page1',
         startedAt: Date.now(),
-        browserContextId: 'ctx-1',
       });
 
       // Mock getOrCreateContext to throw ContextOverrideMismatchError
@@ -1365,6 +1554,70 @@ describe('Engine', () => {
         properties: {},
         required: [],
       });
+    });
+  });
+
+  // ─── Warnings Bounding ──────────────────────────────────────────
+
+  describe('warnings bounding', () => {
+    it('caps warnings at MAX_WARNINGS (100)', () => {
+      // Push 150 warnings via drainWarnings round-trip
+      // We use the public API: addWarning is private, but we can test
+      // via getStatus which exposes warnings.
+      // Directly test via peekWarnings after pushing through the engine.
+      // Since addWarning is private, we test the bounded behavior through
+      // the public interface by triggering many warnings.
+
+      // Access the private addWarning via bracket notation for testing
+      const eng = engine as unknown as { addWarning(msg: string): void };
+      for (let i = 0; i < 150; i++) {
+        eng.addWarning(`warning-${i}`);
+      }
+
+      const warnings = engine.peekWarnings();
+      expect(warnings.length).toBe(100);
+      // Oldest warnings should have been dropped (FIFO)
+      expect(warnings[0]).toBe('warning-50');
+      expect(warnings[99]).toBe('warning-149');
+    });
+
+    it('drainWarnings clears the bounded queue', () => {
+      const eng = engine as unknown as { addWarning(msg: string): void };
+      for (let i = 0; i < 10; i++) {
+        eng.addWarning(`w-${i}`);
+      }
+
+      const drained = engine.drainWarnings();
+      expect(drained.length).toBe(10);
+      expect(engine.peekWarnings().length).toBe(0);
+    });
+
+    it('peekWarnings does not drain', () => {
+      const eng = engine as unknown as { addWarning(msg: string): void };
+      eng.addWarning('test-warning');
+
+      const peek1 = engine.peekWarnings();
+      const peek2 = engine.peekWarnings();
+      expect(peek1).toEqual(['test-warning']);
+      expect(peek2).toEqual(['test-warning']);
+    });
+
+    it('getStatus with drainWarnings=false preserves warnings', () => {
+      const eng = engine as unknown as { addWarning(msg: string): void };
+      eng.addWarning('preserved');
+
+      engine.getStatus({ drainWarnings: false });
+      const after = engine.peekWarnings();
+      expect(after).toEqual(['preserved']);
+    });
+
+    it('getStatus with drainWarnings=true clears warnings', () => {
+      const eng = engine as unknown as { addWarning(msg: string): void };
+      eng.addWarning('cleared');
+
+      const status = engine.getStatus({ drainWarnings: true });
+      expect(status.warnings).toEqual(['cleared']);
+      expect(engine.peekWarnings().length).toBe(0);
     });
   });
 });

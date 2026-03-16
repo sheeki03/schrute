@@ -131,6 +131,48 @@ describe('tool-registry', () => {
         expect(r).toMatch(/^[a-zA-Z0-9_.-]{1,64}$/);
       }
     });
+
+    it('with no options returns full description', () => {
+      const longDesc = 'A'.repeat(500);
+      const skill = makeSkill({ description: longDesc });
+      const def = skillToToolDefinition(skill);
+      expect(def.description).toBe(longDesc);
+      expect(def.description.length).toBe(500);
+    });
+
+    it('with maxDescriptionLength truncates long descriptions', () => {
+      const longDesc = 'A'.repeat(500);
+      const skill = makeSkill({ description: longDesc });
+      const def = skillToToolDefinition(skill, { maxDescriptionLength: 200 });
+      expect(def.description.length).toBe(203); // 200 + '...'
+      expect(def.description.endsWith('...')).toBe(true);
+    });
+
+    it('with maxDescriptionLength leaves short descriptions unchanged', () => {
+      const shortDesc = 'Fetch users from the API';
+      const skill = makeSkill({ description: shortDesc });
+      const def = skillToToolDefinition(skill, { maxDescriptionLength: 200 });
+      expect(def.description).toBe(shortDesc);
+    });
+
+    it('preserves full inputSchema regardless of description trimming', () => {
+      const longDesc = 'B'.repeat(500);
+      const skill = makeSkill({
+        description: longDesc,
+        parameters: [
+          { name: 'id', type: 'string', source: 'user_input', evidence: ['123'] },
+          { name: 'token', type: 'string', source: 'extracted', evidence: ['abc'] },
+        ],
+      });
+      const def = skillToToolDefinition(skill, { maxDescriptionLength: 50 });
+      // Description is truncated
+      expect(def.description.length).toBe(53); // 50 + '...'
+      // inputSchema remains complete
+      const props = def.inputSchema.properties as Record<string, unknown>;
+      expect(props).toHaveProperty('id');
+      expect(props).toHaveProperty('token');
+      expect(def.inputSchema.required).toContain('id');
+    });
   });
 
   describe('sanitizeParamKey', () => {
@@ -192,6 +234,63 @@ describe('tool-registry', () => {
       expect(result[0].id).toBe('a');
     });
 
+    it('gives whole-segment bonus — "users" ranks /users above /producers', () => {
+      const usersSkill = makeSkill({
+        id: 'site.get_users.v1',
+        name: 'get_users',
+        pathTemplate: '/api/users',
+        successRate: 0,
+      });
+      const producersSkill = makeSkill({
+        id: 'site.get_producers.v1',
+        name: 'get_producers',
+        pathTemplate: '/api/producers',
+        successRate: 0,
+      });
+      // "users" is a whole segment in /api/users but NOT in /api/producers
+      const result = rankToolsByIntent([producersSkill, usersSkill], 'users', 1);
+      expect(result[0].id).toBe('site.get_users.v1');
+    });
+
+    it('gives method+path combo bonus — "GET users" prefers GET /users over POST /users', () => {
+      const getUsers = makeSkill({
+        id: 'site.get_users.v1',
+        name: 'get_users',
+        pathTemplate: '/api/users',
+        method: 'GET',
+        successRate: 0,
+      });
+      const postUsers = makeSkill({
+        id: 'site.create_user.v1',
+        name: 'create_user',
+        pathTemplate: '/api/users',
+        method: 'POST',
+        successRate: 0,
+      });
+      const result = rankToolsByIntent([postUsers, getUsers], 'GET users', 1);
+      expect(result[0].id).toBe('site.get_users.v1');
+    });
+
+    it('exact method match (+2) scores higher than no method match', () => {
+      const getSkill = makeSkill({
+        id: 'site.get_item.v1',
+        name: 'item',
+        method: 'GET',
+        pathTemplate: '/items',
+        successRate: 0,
+      });
+      const deleteSkill = makeSkill({
+        id: 'site.delete_item.v1',
+        name: 'item',
+        method: 'DELETE',
+        pathTemplate: '/items',
+        successRate: 0,
+      });
+      // "get" matches GET exactly, doesn't match DELETE at all
+      const result = rankToolsByIntent([deleteSkill, getSkill], 'get', 1);
+      expect(result[0].id).toBe('site.get_item.v1');
+    });
+
     it('boosts recently used skills', () => {
       const recentSkill = makeSkill({
         id: 'recent',
@@ -222,29 +321,34 @@ describe('tool-registry', () => {
   describe('META_TOOLS', () => {
     it('includes all expected meta tools', () => {
       const names = META_TOOLS.map((t) => t.name);
-      expect(names).toContain('oneagent_explore');
-      expect(names).toContain('oneagent_record');
-      expect(names).toContain('oneagent_stop');
-      expect(names).toContain('oneagent_sites');
-      expect(names).toContain('oneagent_skills');
-      expect(names).toContain('oneagent_status');
-      expect(names).toContain('oneagent_dry_run');
-      expect(names).toContain('oneagent_confirm');
+      expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_record');
+      expect(names).toContain('schrute_stop');
+      expect(names).toContain('schrute_sites');
+      expect(names).toContain('schrute_skills');
+      expect(names).toContain('schrute_status');
+      expect(names).toContain('schrute_dry_run');
+      expect(names).toContain('schrute_confirm');
     });
 
-    it('includes oneagent_execute meta tool', () => {
+    it('includes schrute_execute meta tool', () => {
       const names = META_TOOLS.map((t) => t.name);
-      expect(names).toContain('oneagent_execute');
+      expect(names).toContain('schrute_execute');
     });
 
-    it('includes oneagent_doctor meta tool', () => {
+    it('includes schrute_doctor meta tool', () => {
       const names = META_TOOLS.map((t) => t.name);
-      expect(names).toContain('oneagent_doctor');
+      expect(names).toContain('schrute_doctor');
     });
 
-    it('includes oneagent_export_cookies meta tool', () => {
+    it('includes schrute_export_cookies meta tool', () => {
       const names = META_TOOLS.map((t) => t.name);
-      expect(names).toContain('oneagent_export_cookies');
+      expect(names).toContain('schrute_export_cookies');
+    });
+
+    it('includes schrute_revoke meta tool', () => {
+      const names = META_TOOLS.map((t) => t.name);
+      expect(names).toContain('schrute_revoke');
     });
 
     it('all meta tools have valid inputSchema', () => {
@@ -261,7 +365,7 @@ describe('tool-registry', () => {
       const closeDef = defs.find(d => d.name === 'browser_close');
       if (closeDef) {
         expect(closeDef.description).toContain('NOT the session');
-        expect(closeDef.description).toContain('oneagent_close_session');
+        expect(closeDef.description).toContain('schrute_close_session');
       }
     });
   });

@@ -3,12 +3,12 @@ import { createRouter, type RouterDeps } from '../../src/server/router.js';
 import type { Engine } from '../../src/core/engine.js';
 import type { SkillRepository } from '../../src/storage/skill-repository.js';
 import type { SiteRepository } from '../../src/storage/site-repository.js';
-import type { OneAgentConfig, SkillSpec, SiteManifest } from '../../src/skill/types.js';
+import type { SchruteConfig, SkillSpec, SiteManifest } from '../../src/skill/types.js';
 
 // ─── Mock Config ─────────────────────────────────────────────────
 
-const mockConfig: OneAgentConfig = {
-  dataDir: '/tmp/oneagent-test',
+const mockConfig: SchruteConfig = {
+  dataDir: '/tmp/schrute-test',
   logLevel: 'silent',
   features: { webmcp: false, httpTransport: false },
   toolBudget: {
@@ -27,6 +27,7 @@ const mockConfig: OneAgentConfig = {
   audit: { strictMode: true, rootHashExport: true },
   storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
   server: { network: false },
+  paramLimits: { maxStringLength: 10_000, maxDepth: 5, maxProperties: 50 },
   daemon: { port: 19420, autoStart: false },
   tempTtlMs: 3600000,
   gcIntervalMs: 900000,
@@ -125,6 +126,24 @@ function makeConfirmationManager() {
     consumeToken: vi.fn().mockImplementation((tokenId: string, _approve: boolean) => {
       const token = pendingTokens.get(tokenId);
       if (token) token.consumed = true;
+    }),
+    verifyAndConsume: vi.fn().mockImplementation((tokenId: string, _approve: boolean) => {
+      const token = pendingTokens.get(tokenId);
+      if (!token) return { valid: false, error: 'Token not found' };
+      if (token.consumed) return { valid: false, error: 'Token already consumed' };
+      token.consumed = true;
+      return {
+        valid: true,
+        token: {
+          nonce: tokenId,
+          skillId: token.skillId,
+          paramsHash: 'test-hash',
+          tier: token.tier,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60000,
+          consumed: true,
+        },
+      };
     }),
   };
 }
@@ -242,7 +261,7 @@ describe('router', () => {
       const skill = makeSkill({ consecutiveValidations: 0, sideEffectClass: 'non-idempotent' });
       (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
       const router = createRouter(deps);
-      const result = await router.executeSkill('example.com', 'get_users', {});
+      const result = await router.executeSkill('example.com', 'get_users', { id: '123' });
       expect(result.statusCode).toBe(202);
       expect((result.data as Record<string, unknown>).status).toBe('confirmation_required');
     });
@@ -253,7 +272,7 @@ describe('router', () => {
       // Mark skill as confirmed so it bypasses the confirmation gate
       (deps.confirmation.isSkillConfirmed as ReturnType<typeof vi.fn>).mockReturnValue(true);
       const router = createRouter(deps);
-      const result = await router.executeSkill('example.com', 'get_users', {});
+      const result = await router.executeSkill('example.com', 'get_users', { id: '123' });
       expect(result.success).toBe(true);
     });
   });
@@ -270,7 +289,7 @@ describe('router', () => {
       const skill = makeSkill();
       (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
       const router = createRouter(deps);
-      const result = await router.dryRunSkill('example.com', 'get_users', {});
+      const result = await router.dryRunSkill('example.com', 'get_users', { id: '123' });
       expect(result.success).toBe(true);
       expect((result.data as Record<string, string>).note).toContain('preview');
     });

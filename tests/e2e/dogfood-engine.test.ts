@@ -148,6 +148,8 @@ vi.mock('../../src/automation/rate-limiter.js', () => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
+    attachDatabase: vi.fn(),
+    persistBackoffs: vi.fn(),
   })),
 }));
 
@@ -218,6 +220,7 @@ const mockBrowserManager = {
   getBrowser: vi.fn().mockReturnValue(null),
   importCookies: vi.fn().mockResolvedValue(3),
   exportCookies: vi.fn().mockResolvedValue([]),
+  setAuthIntegration: vi.fn(),
 };
 
 vi.mock('../../src/browser/manager.js', () => {
@@ -240,10 +243,12 @@ vi.mock('../../src/browser/playwright-mcp-adapter.js', () => ({
 }));
 
 const mockSessionCreate = vi.fn().mockResolvedValue({
-  id: 'sess-1',
-  siteId: 'example.com',
-  url: 'https://example.com',
-  createdAt: Date.now(),
+  session: {
+    id: 'sess-1',
+    siteId: 'example.com',
+    url: 'https://example.com',
+    startedAt: Date.now(),
+  },
 });
 const mockSessionResume = vi.fn().mockResolvedValue({
   id: 'sess-1',
@@ -295,6 +300,9 @@ vi.mock('../../src/browser/multi-session.js', () => ({
     list: vi.fn().mockReturnValue([]),
     connectCDP: vi.fn().mockRejectedValue(new Error('No CDP endpoint found')),
     setActive: vi.fn(),
+    setOnSessionChanged: vi.fn(),
+    setAuthIntegration: vi.fn(),
+    sweepIdleSessions: vi.fn().mockReturnValue(0),
   })),
 }));
 
@@ -390,6 +398,93 @@ vi.mock('../../src/browser/feature-flags.js', () => ({
   VALID_SNAPSHOT_MODES: new Set(['annotated', 'full', 'none']),
 }));
 
+vi.mock('../../src/replay/trajectory.js', () => ({
+  TrajectoryRecorder: vi.fn().mockImplementation(() => ({
+    record: vi.fn(),
+    save: vi.fn(),
+    load: vi.fn().mockReturnValue(null),
+    getTrajectory: vi.fn().mockReturnValue(null),
+  })),
+}));
+vi.mock('../../src/storage/exemplar-repository.js', () => ({
+  ExemplarRepository: vi.fn().mockImplementation(() => ({
+    getById: vi.fn().mockReturnValue(undefined),
+    create: vi.fn(),
+    getBySiteId: vi.fn().mockReturnValue([]),
+    getBySkillId: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+  })),
+}));
+vi.mock('../../src/storage/amendment-repository.js', () => ({
+  AmendmentRepository: vi.fn().mockImplementation(() => ({
+    getById: vi.fn().mockReturnValue(undefined),
+    create: vi.fn(),
+    getBySkillId: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    update: vi.fn(),
+    delete: vi.fn(),
+  })),
+}));
+vi.mock('../../src/healing/amendment.js', () => ({
+  AmendmentEngine: vi.fn().mockImplementation(() => ({
+    apply: vi.fn(),
+    suggest: vi.fn().mockReturnValue([]),
+  })),
+}));
+vi.mock('../../src/browser/auth-store.js', () => ({
+  BrowserAuthStore: vi.fn().mockImplementation(() => ({
+    getCredentials: vi.fn().mockReturnValue(null),
+    setCredentials: vi.fn(),
+    deleteCredentials: vi.fn(),
+  })),
+}));
+vi.mock('../../src/browser/auth-coordinator.js', () => ({
+  AuthCoordinator: vi.fn().mockImplementation(() => ({
+    coordinate: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+vi.mock('../../src/browser/agent-browser-backend.js', () => ({
+  AgentBrowserBackend: vi.fn().mockImplementation(() => ({
+    setAuthCoordinator: vi.fn(),
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/browser/playwright-backend.js', () => ({
+  PlaywrightBackend: vi.fn().mockImplementation(() => ({
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/browser/live-chrome-backend.js', () => ({
+  LiveChromeBackend: vi.fn().mockImplementation(() => ({
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/capture/path-trie.js', () => ({
+  PathTrie: vi.fn().mockImplementation(() => ({
+    insert: vi.fn(),
+    lookup: vi.fn().mockReturnValue(null),
+  })),
+}));
+vi.mock('../../src/browser/pool.js', () => ({
+  BrowserPool: vi.fn().mockImplementation(() => ({
+    acquire: vi.fn(),
+    release: vi.fn(),
+  })),
+}));
+vi.mock('../../src/replay/param-validator.js', () => ({
+  validateParams: vi.fn().mockReturnValue({ valid: true, errors: [] }),
+}));
+vi.mock('../../src/skill/security-scanner.js', () => ({
+  scanSkill: vi.fn().mockReturnValue({ issues: [] }),
+}));
+vi.mock('../../src/skill/dependency-graph.js', () => ({
+  buildDependencyGraph: vi.fn().mockReturnValue(new Map()),
+  getCascadeAffected: vi.fn().mockReturnValue([]),
+}));
+vi.mock('../../src/browser/base-browser-adapter.js', () => ({
+  detectAndWaitForChallenge: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
@@ -452,10 +547,12 @@ describe('Dogfood E2E: Engine API (non-MCP)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSessionCreate.mockResolvedValue({
-      id: 'sess-1',
-      siteId: 'example.com',
-      url: 'https://example.com',
-      createdAt: Date.now(),
+      session: {
+        id: 'sess-1',
+        siteId: 'example.com',
+        url: 'https://example.com',
+        startedAt: Date.now(),
+      },
     });
     mockSessionResume.mockResolvedValue({
       id: 'sess-1',
@@ -625,10 +722,12 @@ describe('Dogfood E2E: Engine API (non-MCP)', () => {
 
       // Re-explore
       mockSessionCreate.mockResolvedValueOnce({
-        id: 'sess-2',
-        siteId: 'example.com',
-        url: 'https://example.com',
-        createdAt: Date.now(),
+        session: {
+          id: 'sess-2',
+          siteId: 'example.com',
+          url: 'https://example.com',
+          startedAt: Date.now(),
+        },
       });
 
       const result = await engine.explore('https://example.com');
@@ -793,10 +892,12 @@ describe('Dogfood E2E: Engine API (non-MCP)', () => {
 
       // Explore site B
       mockSessionCreate.mockResolvedValueOnce({
-        id: 'sess-3',
-        siteId: 'other-site.com',
-        url: 'https://other-site.com',
-        createdAt: Date.now(),
+        session: {
+          id: 'sess-3',
+          siteId: 'other-site.com',
+          url: 'https://other-site.com',
+          startedAt: Date.now(),
+        },
       });
 
       const result = await engine.explore('https://other-site.com');

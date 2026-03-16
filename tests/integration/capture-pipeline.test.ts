@@ -136,3 +136,114 @@ describe('capture pipeline integration', () => {
     expect(parameterizePath('/api/users')).toBe('/api/users');
   });
 });
+
+// ─── Edge Cases: extractRequestResponse ──────────────────────────
+
+describe('extractRequestResponse edge cases', () => {
+  it('handles entry with missing response body (content.text is undefined)', () => {
+    const entry = {
+      startedDateTime: '2024-01-01T00:00:00.000Z',
+      time: 50,
+      request: {
+        method: 'GET',
+        url: 'https://api.example.com/health',
+        httpVersion: 'HTTP/1.1',
+        headers: [{ name: 'Accept', value: 'application/json' }],
+        queryString: [],
+        headersSize: -1,
+        bodySize: 0,
+      },
+      response: {
+        status: 204,
+        statusText: 'No Content',
+        httpVersion: 'HTTP/1.1',
+        headers: [],
+        content: {
+          size: 0,
+          mimeType: 'application/json',
+          // text is intentionally missing
+        },
+        redirectURL: '',
+        headersSize: -1,
+        bodySize: 0,
+      },
+      timings: { send: 1, wait: 40, receive: 9 },
+    };
+
+    const record = extractRequestResponse(entry as any);
+
+    expect(record.request.method).toBe('GET');
+    expect(record.response.status).toBe(204);
+    expect(record.response.body).toBeUndefined();
+    expect(record.duration).toBe(50);
+  });
+
+  it('handles entry with missing timing data (time is 0)', () => {
+    const entry = {
+      startedDateTime: '2024-01-01T00:00:00.000Z',
+      time: 0,
+      request: {
+        method: 'GET',
+        url: 'https://api.example.com/fast',
+        httpVersion: 'HTTP/1.1',
+        headers: [],
+        queryString: [],
+        headersSize: -1,
+        bodySize: 0,
+      },
+      response: {
+        status: 200,
+        statusText: 'OK',
+        httpVersion: 'HTTP/1.1',
+        headers: [],
+        content: {
+          size: 2,
+          mimeType: 'application/json',
+          text: '{}',
+        },
+        redirectURL: '',
+        headersSize: -1,
+        bodySize: 2,
+      },
+      timings: { send: 0, wait: 0, receive: 0 },
+    };
+
+    const record = extractRequestResponse(entry as any);
+
+    expect(record.duration).toBe(0);
+    expect(record.response.status).toBe(200);
+  });
+
+  it('handles empty entries array from HAR (clustering and filtering produce empty results)', () => {
+    // Simulate an empty entries array going through the pipeline
+    const emptyEntries: any[] = [];
+    const records = emptyEntries.map(extractRequestResponse);
+
+    expect(records).toHaveLength(0);
+
+    const clusters = clusterEndpoints(records);
+    expect(clusters).toHaveLength(0);
+  });
+});
+
+describe('parseHar error handling', () => {
+  it('throws on truncated JSON input', () => {
+    // parseHar reads from a file, so we simulate by writing a truncated file
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const os = require('node:os');
+
+    const tmpDir = os.tmpdir();
+    const truncatedPath = path.join(tmpDir, 'truncated-test.har');
+
+    // Write truncated JSON
+    fs.writeFileSync(truncatedPath, '{"log":{"version":"1.2","entries":[{"request":');
+
+    try {
+      expect(() => parseHar(truncatedPath)).toThrow();
+    } finally {
+      // Clean up
+      try { fs.unlinkSync(truncatedPath); } catch { /* best effort */ }
+    }
+  });
+});

@@ -7,15 +7,15 @@ import { clusterEndpoints } from '../../src/capture/api-extractor.js';
 import { generateSkill, generateSkillMd } from '../../src/skill/generator.js';
 import { validateSkill } from '../../src/skill/validator.js';
 import { canPromote, promoteSkill, demoteSkill } from '../../src/core/promotion.js';
-import type { SkillSpec, OneAgentConfig, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
 import { SkillStatus, SideEffectClass } from '../../src/skill/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const harDir = join(__dirname, '..', 'fixtures', 'har-files');
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent-integration',
+    dataDir: '/tmp/test-schrute-integration',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -43,7 +43,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function mockFetch(responseBody: unknown, status = 200): (req: SealedFetchRequest) => Promise<SealedFetchResponse> {

@@ -34,7 +34,7 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-dogfood-http',
+    dataDir: '/tmp/schrute-dogfood-http',
     logLevel: 'silent',
     daemon: { port: 19420, autoStart: false },
   }),
@@ -214,7 +214,7 @@ function createMockDeps(authToken: string): McpHttpDeps {
     siteRepo,
     confirmation,
     config: {
-      dataDir: '/tmp/oneagent-dogfood-http',
+      dataDir: '/tmp/schrute-dogfood-http',
       logLevel: 'silent',
       features: { webmcp: false, httpTransport: false },
       server: { network: true, authToken: authToken },
@@ -315,7 +315,7 @@ describe('Dogfood E2E: MCP HTTP Transport', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.headers['mcp-session-id']).toBeDefined();
-    expect(res.json?.result?.serverInfo?.name).toBe('oneagent');
+    expect(res.json?.result?.serverInfo?.name).toBe('schrute');
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -355,10 +355,10 @@ describe('Dogfood E2E: MCP HTTP Transport', () => {
     expect(Array.isArray(listRes.json.result.tools)).toBe(true);
     expect(listRes.json.result.tools.length).toBeGreaterThan(0);
 
-    // Verify meta tools present
+    // Verify meta tools present (schrute_explore is admin-only with network mode)
     const names = listRes.json.result.tools.map((t: any) => t.name);
-    expect(names).toContain('oneagent_status');
-    expect(names).toContain('oneagent_explore');
+    expect(names).toContain('schrute_status');
+    expect(names).toContain('schrute_skills');
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -381,13 +381,13 @@ describe('Dogfood E2E: MCP HTTP Transport', () => {
       'mcp-session-id': sessionId,
     }, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
 
-    // Call oneagent_status
+    // Call schrute_status
     const callRes = await httpRequest(port, 'POST', '/mcp', {
       Authorization: `Bearer ${AUTH_TOKEN}`,
       'mcp-session-id': sessionId,
     }, JSON.stringify({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
-      params: { name: 'oneagent_status', arguments: {} },
+      params: { name: 'schrute_status', arguments: {} },
     }));
 
     expect(callRes.statusCode).toBe(200);
@@ -524,7 +524,7 @@ describe('Dogfood E2E: MCP HTTP Transport', () => {
   // 11. Doctor via HTTP
   // ═══════════════════════════════════════════════════════════════
 
-  it('oneagent_doctor via HTTP returns diagnostics', async () => {
+  it('schrute_doctor via HTTP returns diagnostics', async () => {
     // Init session
     const initRes = await httpRequest(port, 'POST', '/mcp', {
       Authorization: `Bearer ${AUTH_TOKEN}`,
@@ -546,7 +546,7 @@ describe('Dogfood E2E: MCP HTTP Transport', () => {
       'mcp-session-id': sessionId,
     }, JSON.stringify({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
-      params: { name: 'oneagent_doctor', arguments: {} },
+      params: { name: 'schrute_doctor', arguments: {} },
     }));
 
     expect(callRes.statusCode).toBe(200);

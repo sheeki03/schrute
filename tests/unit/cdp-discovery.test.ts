@@ -233,10 +233,10 @@ describe('CDP Auto-Discovery', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       await expect(connectViaCDP({ autoDiscover: true })).rejects.toThrow(
-        /auto-discovery found no endpoints/i,
+        /No Chrome debugging endpoint found/i,
       );
       await expect(connectViaCDP({ autoDiscover: true })).rejects.toThrow(
-        /--remote-debugging-port/,
+        /chrome:\/\/inspect/,
       );
 
       vi.unstubAllGlobals();

@@ -29,7 +29,7 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-e2e-features',
+    dataDir: '/tmp/schrute-e2e-features',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -59,18 +59,18 @@ vi.mock('../../src/core/config.js', () => ({
     toolShortlistK: 10,
   }),
   loadConfig: vi.fn().mockReturnValue({
-    dataDir: '/tmp/oneagent-e2e-features',
+    dataDir: '/tmp/schrute-e2e-features',
     logLevel: 'silent',
     daemon: { port: 19420, autoStart: false },
   }),
   ensureDirectories: vi.fn(),
   getDbPath: () => ':memory:',
-  getDataDir: () => '/tmp/oneagent-e2e-features',
-  getBrowserDataDir: () => '/tmp/oneagent-e2e-features/browser-data',
-  getTmpDir: () => '/tmp/oneagent-e2e-features/tmp',
-  getAuditDir: () => '/tmp/oneagent-e2e-features/audit',
-  getSkillsDir: () => '/tmp/oneagent-e2e-features/skills',
-  getConfigPath: () => '/tmp/oneagent-e2e-features/config.json',
+  getDataDir: () => '/tmp/schrute-e2e-features',
+  getBrowserDataDir: () => '/tmp/schrute-e2e-features/browser-data',
+  getTmpDir: () => '/tmp/schrute-e2e-features/tmp',
+  getAuditDir: () => '/tmp/schrute-e2e-features/audit',
+  getSkillsDir: () => '/tmp/schrute-e2e-features/skills',
+  getConfigPath: () => '/tmp/schrute-e2e-features/config.json',
   setConfigValue: vi.fn(),
   resetConfigCache: vi.fn(),
 }));
@@ -99,6 +99,8 @@ vi.mock('../../src/storage/skill-repository.js', () => ({
     create: vi.fn(),
     getBySiteId: vi.fn().mockReturnValue([]),
     getActive: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    getByStatus: vi.fn().mockReturnValue([]),
     update: vi.fn(),
     delete: vi.fn(),
     updateConfidence: vi.fn(),
@@ -149,6 +151,8 @@ vi.mock('../../src/automation/rate-limiter.js', () => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
+    attachDatabase: vi.fn(),
+    persistBackoffs: vi.fn(),
   })),
 }));
 
@@ -179,6 +183,7 @@ const mockBrowserManager = {
   touchActivity: vi.fn(),
   releaseActivity: vi.fn(),
   isIdle: vi.fn().mockReturnValue(true),
+  setAuthIntegration: vi.fn(),
 };
 
 vi.mock('../../src/browser/manager.js', () => {
@@ -203,10 +208,12 @@ vi.mock('../../src/browser/playwright-mcp-adapter.js', () => ({
 
 // Mock session manager
 const mockSessionCreate = vi.fn().mockResolvedValue({
-  id: 'sess-e2e-1',
-  siteId: 'httpbin.org',
-  url: 'https://httpbin.org/get',
-  createdAt: Date.now(),
+  session: {
+    id: 'sess-e2e-1',
+    siteId: 'httpbin.org',
+    url: 'https://httpbin.org/get',
+    createdAt: Date.now(),
+  },
 });
 const mockSessionResume = vi.fn().mockResolvedValue({
   id: 'sess-e2e-1',
@@ -258,6 +265,10 @@ vi.mock('../../src/browser/multi-session.js', () => ({
     updateSiteId: vi.fn(),
     updateContextOverrides: vi.fn(),
     list: vi.fn().mockReturnValue([]),
+    setOnSessionChanged: vi.fn(),
+    setAuthIntegration: vi.fn(),
+    sweepIdleSessions: vi.fn().mockReturnValue(0),
+    setActive: vi.fn(),
   })),
 }));
 
@@ -346,6 +357,93 @@ vi.mock('../../src/browser/feature-flags.js', () => ({
   VALID_SNAPSHOT_MODES: new Set(['annotated', 'full', 'none']),
 }));
 
+vi.mock('../../src/replay/trajectory.js', () => ({
+  TrajectoryRecorder: vi.fn().mockImplementation(() => ({
+    record: vi.fn(),
+    save: vi.fn(),
+    load: vi.fn().mockReturnValue(null),
+    getTrajectory: vi.fn().mockReturnValue(null),
+  })),
+}));
+vi.mock('../../src/storage/exemplar-repository.js', () => ({
+  ExemplarRepository: vi.fn().mockImplementation(() => ({
+    getById: vi.fn().mockReturnValue(undefined),
+    create: vi.fn(),
+    getBySiteId: vi.fn().mockReturnValue([]),
+    getBySkillId: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+  })),
+}));
+vi.mock('../../src/storage/amendment-repository.js', () => ({
+  AmendmentRepository: vi.fn().mockImplementation(() => ({
+    getById: vi.fn().mockReturnValue(undefined),
+    create: vi.fn(),
+    getBySkillId: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    update: vi.fn(),
+    delete: vi.fn(),
+  })),
+}));
+vi.mock('../../src/healing/amendment.js', () => ({
+  AmendmentEngine: vi.fn().mockImplementation(() => ({
+    apply: vi.fn(),
+    suggest: vi.fn().mockReturnValue([]),
+  })),
+}));
+vi.mock('../../src/browser/auth-store.js', () => ({
+  BrowserAuthStore: vi.fn().mockImplementation(() => ({
+    getCredentials: vi.fn().mockReturnValue(null),
+    setCredentials: vi.fn(),
+    deleteCredentials: vi.fn(),
+  })),
+}));
+vi.mock('../../src/browser/auth-coordinator.js', () => ({
+  AuthCoordinator: vi.fn().mockImplementation(() => ({
+    coordinate: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+vi.mock('../../src/browser/agent-browser-backend.js', () => ({
+  AgentBrowserBackend: vi.fn().mockImplementation(() => ({
+    setAuthCoordinator: vi.fn(),
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/browser/playwright-backend.js', () => ({
+  PlaywrightBackend: vi.fn().mockImplementation(() => ({
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/browser/live-chrome-backend.js', () => ({
+  LiveChromeBackend: vi.fn().mockImplementation(() => ({
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/capture/path-trie.js', () => ({
+  PathTrie: vi.fn().mockImplementation(() => ({
+    insert: vi.fn(),
+    lookup: vi.fn().mockReturnValue(null),
+  })),
+}));
+vi.mock('../../src/browser/pool.js', () => ({
+  BrowserPool: vi.fn().mockImplementation(() => ({
+    acquire: vi.fn(),
+    release: vi.fn(),
+  })),
+}));
+vi.mock('../../src/replay/param-validator.js', () => ({
+  validateParams: vi.fn().mockReturnValue({ valid: true, errors: [] }),
+}));
+vi.mock('../../src/skill/security-scanner.js', () => ({
+  scanSkill: vi.fn().mockReturnValue({ issues: [] }),
+}));
+vi.mock('../../src/skill/dependency-graph.js', () => ({
+  buildDependencyGraph: vi.fn().mockReturnValue(new Map()),
+  getCascadeAffected: vi.fn().mockReturnValue([]),
+}));
+vi.mock('../../src/browser/base-browser-adapter.js', () => ({
+  detectAndWaitForChallenge: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
@@ -373,7 +471,7 @@ describe('e2e features', () => {
   let engine: InstanceType<typeof Engine>;
 
   const makeConfig = () => ({
-    dataDir: '/tmp/oneagent-e2e-features',
+    dataDir: '/tmp/schrute-e2e-features',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -406,10 +504,12 @@ describe('e2e features', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSessionCreate.mockResolvedValue({
-      id: 'sess-e2e-1',
-      siteId: 'httpbin.org',
-      url: 'https://httpbin.org/get',
-      createdAt: Date.now(),
+      session: {
+        id: 'sess-e2e-1',
+        siteId: 'httpbin.org',
+        url: 'https://httpbin.org/get',
+        createdAt: Date.now(),
+      },
     });
   });
 
@@ -503,10 +603,12 @@ describe('e2e features', () => {
 
       // Re-explore with Tokyo geo
       mockSessionCreate.mockResolvedValueOnce({
-        id: 'sess-e2e-2',
-        siteId: 'httpbin.org',
-        url: 'https://httpbin.org/get',
-        createdAt: Date.now(),
+        session: {
+          id: 'sess-e2e-2',
+          siteId: 'httpbin.org',
+          url: 'https://httpbin.org/get',
+          createdAt: Date.now(),
+        },
       });
 
       const result2 = await engine.explore('https://httpbin.org/get', {
@@ -534,7 +636,7 @@ describe('e2e features', () => {
 
       await expect(
         connectViaCDP({ autoDiscover: true }),
-      ).rejects.toThrow(/auto-discovery found no endpoints/);
+      ).rejects.toThrow(/No Chrome debugging endpoint found/);
     });
   });
 
@@ -550,19 +652,19 @@ describe('e2e features', () => {
     });
 
     it('accepts valid HTTP proxy', () => {
-      expect(() => realConfigModule.setConfigValue('browser.proxy.server', 'http://proxy.example.com:8080')).not.toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.proxy.server', 'http://proxy.example.com:8080')).not.toThrow();
     });
 
     it('accepts valid SOCKS5 proxy', () => {
-      expect(() => realConfigModule.setConfigValue('browser.proxy.server', 'socks5://proxy.example.com:1080')).not.toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.proxy.server', 'socks5://proxy.example.com:1080')).not.toThrow();
     });
 
     it('rejects invalid proxy (not a URL)', () => {
-      expect(() => realConfigModule.setConfigValue('browser.proxy.server', 'not-a-url')).toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.proxy.server', 'not-a-url')).toThrow();
     });
 
     it('rejects proxy with path/query', () => {
-      expect(() => realConfigModule.setConfigValue('browser.proxy.server', 'http://proxy.example.com/path?token=secret')).toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.proxy.server', 'http://proxy.example.com/path?token=secret')).toThrow();
     });
   });
 
@@ -576,23 +678,23 @@ describe('e2e features', () => {
     });
 
     it('accepts valid timezone', () => {
-      expect(() => realConfigModule.setConfigValue('browser.geo.timezoneId', 'Europe/Paris')).not.toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.geo.timezoneId', 'Europe/Paris')).not.toThrow();
     });
 
     it('rejects invalid timezone', () => {
-      expect(() => realConfigModule.setConfigValue('browser.geo.timezoneId', 'Mars/Olympus')).toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.geo.timezoneId', 'Mars/Olympus')).toThrow();
     });
 
     it('accepts valid locale', () => {
-      expect(() => realConfigModule.setConfigValue('browser.geo.locale', 'fr-FR')).not.toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.geo.locale', 'fr-FR')).not.toThrow();
     });
 
     it('rejects latitude > 90', () => {
-      expect(() => realConfigModule.setConfigValue('browser.geo.geolocation.latitude', 91)).toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.geo.geolocation.latitude', 91)).toThrow();
     });
 
     it('rejects longitude < -180', () => {
-      expect(() => realConfigModule.setConfigValue('browser.geo.geolocation.longitude', -181)).toThrow();
+      expect(() => realConfigModule.setConfigValueInMemory('browser.geo.geolocation.longitude', -181)).toThrow();
     });
   });
 

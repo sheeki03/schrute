@@ -13,7 +13,7 @@ vi.mock('../../src/core/logger.js', () => ({
 // ─── Mock config (needed by database) ────────────────────────────
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-confirm-test',
+    dataDir: '/tmp/schrute-confirm-test',
     logLevel: 'silent',
   }),
   getDbPath: () => ':memory:',
@@ -35,125 +35,29 @@ vi.mock('../../src/storage/secrets.js', () => ({
   }),
 }));
 
-import Database from 'better-sqlite3';
 import { ConfirmationManager } from '../../src/server/confirmation.js';
 import type { AgentDatabase } from '../../src/storage/database.js';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
+import { createFullSchemaDb } from '../helpers.js';
 
 // ─── In-Memory DB Setup ──────────────────────────────────────────
 
 function createTestDb(): AgentDatabase {
-  const raw = new Database(':memory:');
-  raw.pragma('journal_mode = WAL');
-  raw.pragma('foreign_keys = ON');
-
-  // Create the tables needed by ConfirmationManager
-  raw.exec(`
-    CREATE TABLE IF NOT EXISTS sites (
-      id TEXT PRIMARY KEY,
-      display_name TEXT,
-      first_seen INTEGER NOT NULL DEFAULT 0,
-      last_visited INTEGER NOT NULL DEFAULT 0,
-      mastery_level TEXT NOT NULL DEFAULT 'explore',
-      recommended_tier TEXT NOT NULL DEFAULT 'browser_proxied',
-      total_requests INTEGER NOT NULL DEFAULT 0,
-      successful_requests INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS skills (
-      id TEXT PRIMARY KEY,
-      site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 1,
-      status TEXT NOT NULL DEFAULT 'draft',
-      description TEXT,
-      method TEXT NOT NULL,
-      path_template TEXT NOT NULL,
-      input_schema TEXT NOT NULL DEFAULT '{}',
-      output_schema TEXT,
-      auth_type TEXT,
-      required_headers TEXT,
-      dynamic_headers TEXT,
-      side_effect_class TEXT NOT NULL DEFAULT 'read-only',
-      is_composite INTEGER NOT NULL DEFAULT 0,
-      chain_spec TEXT,
-      current_tier TEXT NOT NULL DEFAULT 'tier_3',
-      tier_lock TEXT,
-      confidence REAL NOT NULL DEFAULT 0.0,
-      consecutive_validations INTEGER NOT NULL DEFAULT 0,
-      sample_count INTEGER NOT NULL DEFAULT 0,
-      parameter_evidence TEXT,
-      last_verified INTEGER,
-      last_used INTEGER,
-      success_rate REAL NOT NULL DEFAULT 0.0,
-      skill_md TEXT,
-      openapi_fragment TEXT,
-      created_at INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL DEFAULT 0,
-      allowed_domains TEXT NOT NULL DEFAULT '[]',
-      required_capabilities TEXT NOT NULL DEFAULT '[]',
-      parameters TEXT NOT NULL DEFAULT '[]',
-      validation TEXT NOT NULL DEFAULT '{}',
-      redaction TEXT NOT NULL DEFAULT '{}',
-      replay_strategy TEXT NOT NULL DEFAULT 'prefer_tier_3',
-      UNIQUE(site_id, name, version)
-    );
-
-    CREATE TABLE IF NOT EXISTS skill_confirmations (
-      skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
-      confirmation_status TEXT NOT NULL DEFAULT 'pending',
-      approved_by TEXT,
-      approved_at INTEGER,
-      denied_at INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS confirmation_nonces (
-      nonce TEXT PRIMARY KEY,
-      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-      params_hash TEXT NOT NULL,
-      tier TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL,
-      consumed INTEGER NOT NULL DEFAULT 0,
-      consumed_at INTEGER
-    );
-  `);
+  const db = createFullSchemaDb();
 
   // Insert test site and skill
-  raw.exec(`
+  db.exec(`
     INSERT INTO sites (id, display_name) VALUES ('example.com', 'Example');
     INSERT INTO skills (id, site_id, name, method, path_template) VALUES ('skill1', 'example.com', 'test_skill', 'GET', '/api/test');
     INSERT INTO skills (id, site_id, name, method, path_template) VALUES ('skill2', 'example.com', 'test_skill2', 'POST', '/api/test2');
   `);
 
-  // Wrap as AgentDatabase-like
-  const db = {
-    run(sql: string, ...params: unknown[]) {
-      return raw.prepare(sql).run(...params);
-    },
-    get<T = unknown>(sql: string, ...params: unknown[]): T | undefined {
-      return raw.prepare(sql).get(...params) as T | undefined;
-    },
-    all<T = unknown>(sql: string, ...params: unknown[]): T[] {
-      return raw.prepare(sql).all(...params) as T[];
-    },
-    exec(sql: string) {
-      raw.exec(sql);
-    },
-    close() {
-      raw.close();
-    },
-    get raw() {
-      return raw;
-    },
-  } as unknown as AgentDatabase;
-
   return db;
 }
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-confirm-test',
+    dataDir: '/tmp/schrute-confirm-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -182,13 +86,13 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 describe('ConfirmationManager', () => {
   let db: AgentDatabase;
   let manager: ConfirmationManager;
-  let config: OneAgentConfig;
+  let config: SchruteConfig;
 
   beforeEach(() => {
     mockKeytarStore = {};
@@ -252,17 +156,22 @@ describe('ConfirmationManager', () => {
     });
 
     it('returns valid=false for an expired token', async () => {
-      // Create a token with very short expiry
-      const shortExpiryConfig = makeConfig({ confirmationExpiryMs: 1 });
-      const shortManager = new ConfirmationManager(db, shortExpiryConfig);
-      const token = await shortManager.generateToken('skill1', {}, 'tier_1');
+      vi.useFakeTimers();
+      try {
+        // Create a token with short expiry
+        const shortExpiryConfig = makeConfig({ confirmationExpiryMs: 100 });
+        const shortManager = new ConfirmationManager(db, shortExpiryConfig);
+        const token = await shortManager.generateToken('skill1', {}, 'tier_1');
 
-      // Wait for expiry
-      await new Promise((resolve) => setTimeout(resolve, 10));
+        // Advance past expiry
+        vi.advanceTimersByTime(200);
 
-      const result = shortManager.verifyToken(token.nonce);
-      expect(result.valid).toBe(false);
-      expect(result.error).toBe('Token expired');
+        const result = shortManager.verifyToken(token.nonce);
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('Token expired');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('returns valid=false for an already consumed token', async () => {
@@ -356,6 +265,59 @@ describe('ConfirmationManager', () => {
     });
   });
 
+  // ─── revokeApproval ──────────────────────────────────────────────
+
+  describe('revokeApproval', () => {
+    it('revokes a previously-approved skill', async () => {
+      // Approve first
+      const token = await manager.generateToken('skill1', {}, 'tier_1');
+      manager.consumeToken(token.nonce, true, 'test-user');
+      expect(manager.isSkillConfirmed('skill1')).toBe(true);
+
+      // Revoke
+      manager.revokeApproval('skill1');
+      expect(manager.isSkillConfirmed('skill1')).toBe(false);
+    });
+
+    it('invalidates outstanding nonces for the revoked skill', async () => {
+      // Approve first
+      const approveToken = await manager.generateToken('skill1', {}, 'tier_1');
+      manager.consumeToken(approveToken.nonce, true);
+
+      // Generate a new nonce while skill is approved
+      const pendingToken = await manager.generateToken('skill1', { page: 2 }, 'tier_1');
+
+      // Revoke — should invalidate pending nonce
+      manager.revokeApproval('skill1');
+
+      const result = manager.verifyToken(pendingToken.nonce);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Token already consumed');
+    });
+
+    it('is a no-op for non-approved skills', () => {
+      // Should not throw
+      manager.revokeApproval('skill1');
+      expect(manager.isSkillConfirmed('skill1')).toBe(false);
+    });
+
+    it('does not affect other skills', async () => {
+      // Approve both skills
+      const token1 = await manager.generateToken('skill1', {}, 'tier_1');
+      manager.consumeToken(token1.nonce, true);
+      const token2 = await manager.generateToken('skill2', {}, 'tier_1');
+      manager.consumeToken(token2.nonce, true);
+
+      expect(manager.isSkillConfirmed('skill1')).toBe(true);
+      expect(manager.isSkillConfirmed('skill2')).toBe(true);
+
+      // Revoke only skill1
+      manager.revokeApproval('skill1');
+      expect(manager.isSkillConfirmed('skill1')).toBe(false);
+      expect(manager.isSkillConfirmed('skill2')).toBe(true);
+    });
+  });
+
   // ─── HMAC Key Fallback ─────────────────────────────────────────
 
   describe('HMAC key fallback', () => {
@@ -389,6 +351,107 @@ describe('ConfirmationManager', () => {
       const results = Array.from({ length: 5 }, () => manager.verifyToken(token.nonce));
       // All should return valid since token is not consumed
       expect(results.every((r) => r.valid)).toBe(true);
+    });
+  });
+
+  // ─── verifyAndConsume (atomic race-condition-safe) ─────────────
+
+  describe('verifyAndConsume', () => {
+    it('returns valid=true and consumes token on first call', async () => {
+      const token = await manager.generateToken('skill1', {}, 'tier_1');
+      const result = manager.verifyAndConsume(token.nonce, true, 'test-user');
+
+      expect(result.valid).toBe(true);
+      expect(result.token).toBeDefined();
+      expect(result.token!.skillId).toBe('skill1');
+
+      // Token should be consumed in DB
+      const row = db.get<{ consumed: number }>(
+        'SELECT consumed FROM confirmation_nonces WHERE nonce = ?',
+        token.nonce,
+      );
+      expect(row!.consumed).toBe(1);
+    });
+
+    it('second call with same token returns valid=false (double-consume prevention)', async () => {
+      const token = await manager.generateToken('skill1', {}, 'tier_1');
+
+      const first = manager.verifyAndConsume(token.nonce, true);
+      expect(first.valid).toBe(true);
+
+      const second = manager.verifyAndConsume(token.nonce, true);
+      expect(second.valid).toBe(false);
+      expect(second.error).toBe('Token already consumed');
+    });
+
+    it('returns expired error for an expired token', async () => {
+      vi.useFakeTimers();
+      try {
+        // Create a token with short expiry
+        const shortExpiryConfig = makeConfig({ confirmationExpiryMs: 100 });
+        const shortManager = new ConfirmationManager(db, shortExpiryConfig);
+        const token = await shortManager.generateToken('skill1', {}, 'tier_1');
+
+        // Advance past expiry
+        vi.advanceTimersByTime(200);
+
+        const result = shortManager.verifyAndConsume(token.nonce, true);
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('Token expired');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('deny invalidates all sibling nonces for the same skill', async () => {
+      const token1 = await manager.generateToken('skill1', {}, 'tier_1');
+      const token2 = await manager.generateToken('skill1', { page: 2 }, 'tier_1');
+      const token3 = await manager.generateToken('skill2', {}, 'tier_1'); // different skill
+
+      // Deny with first token
+      const result = manager.verifyAndConsume(token1.nonce, false);
+      expect(result.valid).toBe(true);
+
+      // Second token for same skill should be invalidated
+      const sibling = manager.verifyAndConsume(token2.nonce, true);
+      expect(sibling.valid).toBe(false);
+      expect(sibling.error).toBe('Token already consumed');
+
+      // Token for a different skill should still be valid
+      const other = manager.verifyAndConsume(token3.nonce, true);
+      expect(other.valid).toBe(true);
+    });
+
+    it('creates global skill confirmation on approve', async () => {
+      const token = await manager.generateToken('skill1', {}, 'tier_1');
+      manager.verifyAndConsume(token.nonce, true, 'admin');
+
+      expect(manager.isSkillConfirmed('skill1')).toBe(true);
+
+      const confirmation = db.get<{ approved_by: string }>(
+        'SELECT approved_by FROM skill_confirmations WHERE skill_id = ?',
+        'skill1',
+      );
+      expect(confirmation!.approved_by).toBe('admin');
+    });
+
+    it('records denial status on deny', async () => {
+      const token = await manager.generateToken('skill1', {}, 'tier_1');
+      manager.verifyAndConsume(token.nonce, false);
+
+      expect(manager.isSkillConfirmed('skill1')).toBe(false);
+
+      const confirmation = db.get<{ confirmation_status: string }>(
+        'SELECT confirmation_status FROM skill_confirmations WHERE skill_id = ?',
+        'skill1',
+      );
+      expect(confirmation!.confirmation_status).toBe('denied');
+    });
+
+    it('returns token not found for unknown token', () => {
+      const result = manager.verifyAndConsume('nonexistent', true);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Token not found');
     });
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { relearnSkill } from '../../src/healing/relearner.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
   return {
@@ -57,8 +57,8 @@ function mockMetricsRepo() {
   };
 }
 
-const mockConfig: OneAgentConfig = {
-  dataDir: '/tmp/oneagent-test',
+const mockConfig: SchruteConfig = {
+  dataDir: '/tmp/schrute-test',
   logLevel: 'info',
   features: { webmcp: false, httpTransport: false },
   toolBudget: {

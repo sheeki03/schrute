@@ -44,37 +44,49 @@ vi.mock('../../src/core/engine.js', () => ({
   },
 }));
 
-vi.mock('../../src/storage/skill-repository.js', () => ({
-  SkillRepository: class {
-    getByStatus(status: string) {
-      if (status === 'active') {
-        return [{
-          id: 'example.com.get_users.v1',
-          version: 1, status: 'active', currentTier: 'tier_1',
-          tierLock: null, allowedDomains: ['example.com'],
-          requiredCapabilities: ['net.fetch.direct'],
-          parameters: [{ name: 'page', type: 'number', source: 'user_input', evidence: [] }],
-          validation: { semanticChecks: [], customInvariants: [] },
-          redaction: { piiClassesFound: [], fieldsRedacted: 0 },
-          replayStrategy: 'prefer_tier_1', sideEffectClass: 'read-only',
-          sampleCount: 10, consecutiveValidations: 5, confidence: 0.95,
-          method: 'GET', pathTemplate: '/api/users', inputSchema: { type: 'object' },
-          isComposite: false, siteId: 'example.com', name: 'get_users',
-          description: 'Get users', successRate: 0.98,
-          createdAt: Date.now(), updatedAt: Date.now(),
-        }];
+vi.mock('../../src/storage/skill-repository.js', () => {
+  const readSkill = {
+    id: 'example.com.get_users.v1',
+    version: 1, status: 'active', currentTier: 'tier_1',
+    tierLock: null, allowedDomains: ['example.com'],
+    requiredCapabilities: ['net.fetch.direct'],
+    parameters: [{ name: 'page', type: 'number', source: 'user_input', evidence: [] }],
+    validation: { semanticChecks: [], customInvariants: [] },
+    redaction: { piiClassesFound: [], fieldsRedacted: 0 },
+    replayStrategy: 'prefer_tier_1', sideEffectClass: 'read-only',
+    sampleCount: 10, consecutiveValidations: 5, confidence: 0.95,
+    method: 'GET', pathTemplate: '/api/users', inputSchema: { type: 'object' },
+    isComposite: false, siteId: 'example.com', name: 'get_users',
+    description: 'Get users', successRate: 0.98,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  const writeSkill = {
+    ...readSkill,
+    id: 'example.com.create_order.v1',
+    name: 'create_order',
+    description: 'Create order',
+    method: 'POST',
+    pathTemplate: '/api/orders',
+    sideEffectClass: 'non-idempotent',
+    parameters: [],
+  };
+  const allSkills = [readSkill, writeSkill];
+  return {
+    SkillRepository: class {
+      getByStatus(status: string) {
+        if (status === 'active') return allSkills;
+        return [];
       }
-      return [];
-    }
-    getBySiteId(siteId: string) {
-      return siteId === 'example.com' ? this.getByStatus('active') : [];
-    }
-    getById(id: string) {
-      return id === 'example.com.get_users.v1' ? this.getByStatus('active')[0] : null;
-    }
-    getAll() { return this.getByStatus('active'); }
-  },
-}));
+      getBySiteId(siteId: string) {
+        return siteId === 'example.com' ? allSkills : [];
+      }
+      getById(id: string) {
+        return allSkills.find(s => s.id === id) ?? null;
+      }
+      getAll() { return allSkills; }
+    },
+  };
+});
 
 vi.mock('../../src/storage/site-repository.js', () => ({
   SiteRepository: class {
@@ -105,25 +117,25 @@ describe('v0.2 SDK — TypeScript Client', () => {
   // We test the SDK class directly with a mock fetch
   // (rather than going through Fastify inject, which tests the server)
 
-  it('OneAgentClient constructs with baseUrl', async () => {
-    const { OneAgentClient } = await import('../../src/client/typescript/index.js');
-    const client = new OneAgentClient({ baseUrl: 'http://localhost:3000' });
+  it('SchruteClient constructs with baseUrl', async () => {
+    const { SchruteClient } = await import('../../src/client/typescript/index.js');
+    const client = new SchruteClient({ baseUrl: 'http://localhost:3000' });
     expect(client).toBeDefined();
   });
 
-  it('OneAgentClient strips trailing slash', async () => {
-    const { OneAgentClient } = await import('../../src/client/typescript/index.js');
-    const client = new OneAgentClient({ baseUrl: 'http://localhost:3000/' });
+  it('SchruteClient strips trailing slash', async () => {
+    const { SchruteClient } = await import('../../src/client/typescript/index.js');
+    const client = new SchruteClient({ baseUrl: 'http://localhost:3000/' });
     expect(client).toBeDefined();
   });
 
-  it('OneAgentError has statusCode and body', async () => {
-    const { OneAgentError } = await import('../../src/client/typescript/index.js');
-    const err = new OneAgentError('Not Found', 404, { error: 'missing' });
+  it('SchruteError has statusCode and body', async () => {
+    const { SchruteError } = await import('../../src/client/typescript/index.js');
+    const err = new SchruteError('Not Found', 404, { error: 'missing' });
     expect(err.message).toBe('Not Found');
     expect(err.statusCode).toBe(404);
     expect(err.body).toEqual({ error: 'missing' });
-    expect(err.name).toBe('OneAgentError');
+    expect(err.name).toBe('SchruteError');
   });
 
   it('SDK against Fastify inject — listSites', async () => {
@@ -141,16 +153,16 @@ describe('v0.2 SDK — TypeScript Client', () => {
     await app.close();
   });
 
-  it('SDK against Fastify inject — execute skill returns confirmation_required', async () => {
+  it('SDK against Fastify inject — execute skill returns confirmation_required for non-read-only skill', async () => {
     const { createRestServer } = await import('../../src/server/rest-server.js');
     const app = await createRestServer({ port: 0 });
     await app.ready();
 
-    // All unconfirmed skills now require confirmation before execution
+    // Use a POST non-idempotent skill so auto-confirm (P2-8) does not bypass the gate
     const res = await app.inject({
       method: 'POST',
-      url: '/api/sites/example.com/skills/get_users',
-      payload: { params: { page: 1 } },
+      url: '/api/sites/example.com/skills/create_order',
+      payload: { params: {} },
     });
     expect(res.statusCode).toBe(202);
     const body = res.json();
@@ -223,7 +235,7 @@ describe('v0.2 SDK — TypeScript Client', () => {
 describe('v0.2 SDK — Client Types', () => {
   it('exports all expected types', async () => {
     const sdkModule = await import('../../src/client/typescript/index.js');
-    expect(sdkModule.OneAgentClient).toBeDefined();
-    expect(sdkModule.OneAgentError).toBeDefined();
+    expect(sdkModule.SchruteClient).toBeDefined();
+    expect(sdkModule.SchruteError).toBeDefined();
   });
 });

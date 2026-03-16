@@ -14,12 +14,12 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-bm-test',
+    dataDir: '/tmp/schrute-bm-test',
     browser: {},
     daemon: { port: 19420, autoStart: false },
   }),
-  getBrowserDataDir: () => '/tmp/oneagent-bm-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-bm-test/tmp',
+  getBrowserDataDir: () => '/tmp/schrute-bm-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-bm-test/tmp',
 }));
 
 vi.mock('../../src/browser/engine.js', () => ({
@@ -487,6 +487,59 @@ describe('BrowserManager Lifecycle', () => {
       } as any);
 
       expect(manager.getHandlerTimeoutMs()).toBe(30000);
+    });
+  });
+
+  // ─── discardContext cleanup path ──────────────────────────────
+
+  describe('discardContext cleanup', () => {
+    it('discardContext removes context and browser.close is called on it', async () => {
+      const manager = new BrowserManager({
+        dataDir: '/tmp/test',
+        browser: { idleTimeoutMs: 0 },
+        daemon: { port: 19420, autoStart: false },
+      } as any);
+
+      const mockBrowser = setupLaunchMock();
+      await manager.launchBrowser();
+
+      // Create a context
+      const ctx = await manager.getOrCreateContext('discard-site');
+      expect(ctx).toBeDefined();
+
+      // Discard it
+      manager.discardContext('discard-site');
+
+      // The context's close should have been called
+      expect((ctx as any).close).toHaveBeenCalled();
+
+      // Getting context again should create a new one (browser still alive)
+      const ctx2 = await manager.getOrCreateContext('discard-site');
+      expect(ctx2).toBeDefined();
+      // newContext called twice: once for original, once for recreated
+      expect(mockBrowser.newContext).toHaveBeenCalledTimes(2);
+    });
+
+    it('discardContext followed by closeAll does not double-close', async () => {
+      const manager = new BrowserManager({
+        dataDir: '/tmp/test',
+        browser: { idleTimeoutMs: 0 },
+        daemon: { port: 19420, autoStart: false },
+      } as any);
+
+      const mockBrowser = setupLaunchMock();
+      await manager.launchBrowser();
+
+      const ctx = await manager.getOrCreateContext('discard-then-close');
+
+      // Discard first
+      manager.discardContext('discard-then-close');
+
+      // closeAll should not throw even though context was already discarded
+      await expect(manager.closeAll()).resolves.not.toThrow();
+
+      // ctx.close called once during discard, not again during closeAll
+      expect((ctx as any).close).toHaveBeenCalledTimes(1);
     });
   });
 });

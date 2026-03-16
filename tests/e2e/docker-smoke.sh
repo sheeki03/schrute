@@ -7,7 +7,7 @@ echo "=== Docker Smoke Test ==="
 docker compose build
 
 # Start
-ONEAGENT_AUTH_TOKEN=test-token-123 docker compose up -d
+SCHRUTE_AUTH_TOKEN=test-token-123 docker compose up -d
 
 # Wait for health
 echo "Waiting for health check..."

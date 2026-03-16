@@ -13,7 +13,7 @@ vi.mock('../../src/core/logger.js', () => ({
 // ─── Mock config ─────────────────────────────────────────────────
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-auth-repo-test',
+    dataDir: '/tmp/schrute-auth-repo-test',
     logLevel: 'silent',
     daemon: { port: 19420, autoStart: false },
   }),

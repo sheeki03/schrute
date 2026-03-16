@@ -51,11 +51,11 @@ vi.mock('node:child_process', () => ({
 
 import * as fs from 'node:fs';
 import { createDaemonClient } from '../../src/client/daemon-client.js';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
 
-function makeConfig(): OneAgentConfig {
+function makeConfig(): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-client-test',
+    dataDir: '/tmp/schrute-client-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -83,11 +83,11 @@ function makeConfig(): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 describe('daemon-client', () => {
-  let config: OneAgentConfig;
+  let config: SchruteConfig;
   const mockExistsSync = fs.existsSync as unknown as ReturnType<typeof vi.fn>;
   const mockReadFileSync = fs.readFileSync as unknown as ReturnType<typeof vi.fn>;
 

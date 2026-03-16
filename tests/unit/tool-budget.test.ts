@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ToolBudgetTracker } from '../../src/replay/tool-budget.js';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent',
+    dataDir: '/tmp/test-schrute',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -33,7 +33,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 describe('tool-budget', () => {
@@ -102,7 +102,7 @@ describe('tool-budget', () => {
           crossDomainCalls: true,
           secretsToNonAllowlisted: false,
         },
-      } as Partial<OneAgentConfig>));
+      } as Partial<SchruteConfig>));
       const result = crossDomainTracker.checkBudget('skill-1', 'example.com', {
         targetDomain: 'other-site.com',
       });
@@ -120,7 +120,7 @@ describe('tool-budget', () => {
           crossDomainCalls: true,
           secretsToNonAllowlisted: false,
         },
-      } as Partial<OneAgentConfig>));
+      } as Partial<SchruteConfig>));
       crossDomainTracker.setDomainAllowlist(['trusted.com']);
       const result = crossDomainTracker.checkBudget('skill-1', 'trusted.com', {
         targetDomain: 'evil.com',

@@ -17,7 +17,7 @@ vi.mock('../../src/core/logger.js', () => ({
 let testTmpDir: string;
 
 beforeEach(() => {
-  testTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneagent-har-test-'));
+  testTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'schrute-har-test-'));
 });
 
 afterEach(() => {

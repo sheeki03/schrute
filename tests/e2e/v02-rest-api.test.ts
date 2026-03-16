@@ -63,53 +63,58 @@ vi.mock('../../src/core/engine.js', () => {
 });
 
 vi.mock('../../src/storage/skill-repository.js', () => {
+  const readSkill = {
+    id: 'example.com.get_users.v1',
+    version: 1,
+    status: 'active',
+    currentTier: 'tier_1',
+    tierLock: null,
+    allowedDomains: ['example.com'],
+    requiredCapabilities: ['net.fetch.direct'],
+    parameters: [{ name: 'page', type: 'number', source: 'user_input', evidence: [] }],
+    validation: { semanticChecks: [], customInvariants: [] },
+    redaction: { piiClassesFound: [], fieldsRedacted: 0 },
+    replayStrategy: 'prefer_tier_1',
+    sideEffectClass: 'read-only',
+    sampleCount: 10,
+    consecutiveValidations: 5,
+    confidence: 0.95,
+    method: 'GET',
+    pathTemplate: '/api/users',
+    inputSchema: { type: 'object' },
+    isComposite: false,
+    siteId: 'example.com',
+    name: 'get_users',
+    description: 'Get users',
+    successRate: 0.98,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  const writeSkill = {
+    ...readSkill,
+    id: 'example.com.create_order.v1',
+    name: 'create_order',
+    description: 'Create order',
+    method: 'POST',
+    pathTemplate: '/api/orders',
+    sideEffectClass: 'non-idempotent',
+    parameters: [],
+  };
+  const allSkills = [readSkill, writeSkill];
   return {
     SkillRepository: class MockSkillRepo {
       getByStatus(status: string) {
-        if (status === 'active') {
-          return [{
-            id: 'example.com.get_users.v1',
-            version: 1,
-            status: 'active',
-            currentTier: 'tier_1',
-            tierLock: null,
-            allowedDomains: ['example.com'],
-            requiredCapabilities: ['net.fetch.direct'],
-            parameters: [{ name: 'page', type: 'number', source: 'user_input', evidence: [] }],
-            validation: { semanticChecks: [], customInvariants: [] },
-            redaction: { piiClassesFound: [], fieldsRedacted: 0 },
-            replayStrategy: 'prefer_tier_1',
-            sideEffectClass: 'read-only',
-            sampleCount: 10,
-            consecutiveValidations: 5,
-            confidence: 0.95,
-            method: 'GET',
-            pathTemplate: '/api/users',
-            inputSchema: { type: 'object' },
-            isComposite: false,
-            siteId: 'example.com',
-            name: 'get_users',
-            description: 'Get users',
-            successRate: 0.98,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          }];
-        }
+        if (status === 'active') return allSkills;
         return [];
       }
       getBySiteId(siteId: string) {
-        if (siteId === 'example.com') {
-          return this.getByStatus('active');
-        }
+        if (siteId === 'example.com') return allSkills;
         return [];
       }
       getById(id: string) {
-        if (id === 'example.com.get_users.v1') {
-          return this.getByStatus('active')[0];
-        }
-        return null;
+        return allSkills.find(s => s.id === id) ?? null;
       }
-      getAll() { return this.getByStatus('active'); }
+      getAll() { return allSkills; }
     },
   };
 });
@@ -211,13 +216,13 @@ describe('v0.2 REST API', () => {
 
   // ─── Execute Skill ────────────────────────────────────────────
 
-  it('POST /api/sites/:id/skills/:name returns confirmation_required for unconfirmed skill', async () => {
+  it('POST /api/sites/:id/skills/:name returns confirmation_required for unconfirmed non-read-only skill', async () => {
+    // Use a POST non-idempotent skill so auto-confirm (P2-8) does not bypass the gate
     const res = await app.inject({
       method: 'POST',
-      url: '/api/sites/example.com/skills/get_users',
-      payload: { params: { page: 1 } },
+      url: '/api/sites/example.com/skills/create_order',
+      payload: { params: {} },
     });
-    // All unconfirmed skills now require confirmation before execution
     expect(res.statusCode).toBe(202);
     const body = res.json();
     expect(body.status).toBe('confirmation_required');

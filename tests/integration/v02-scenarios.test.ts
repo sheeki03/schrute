@@ -50,6 +50,24 @@ function makeConfirmationManager() {
       const token = pendingTokens.get(tokenId);
       if (token) token.consumed = true;
     }),
+    verifyAndConsume: vi.fn().mockImplementation((tokenId: string, _approve: boolean) => {
+      const token = pendingTokens.get(tokenId);
+      if (!token) return { valid: false, error: 'Token not found' };
+      if (token.consumed) return { valid: false, error: 'Token already consumed' };
+      token.consumed = true;
+      return {
+        valid: true,
+        token: {
+          nonce: tokenId,
+          skillId: token.skillId,
+          paramsHash: 'test-hash',
+          tier: token.tier,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60000,
+          consumed: true,
+        },
+      };
+    }),
   };
 }
 
@@ -93,6 +111,7 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
       siteId: 'shop.example.com',
       name: 'list_products',
       consecutiveValidations: 5,
+      parameters: [],
     });
 
     const mockEngine = {
@@ -127,6 +146,7 @@ describe('v0.2 Scenarios — Cooperative Site', () => {
     const skill = makeSkill({
       siteId: 'shop.example.com',
       name: 'list_products',
+      parameters: [],
     });
 
     const router = createRouter({
@@ -255,6 +275,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       status: 'active',
       consecutiveValidations: 0,
       sideEffectClass: 'non-idempotent',
+      parameters: [],
     });
 
     const router = createRouter({
@@ -314,6 +335,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       status: 'active',
       consecutiveValidations: 0,
       sideEffectClass: 'non-idempotent',
+      parameters: [],
     });
 
     const config = makeTestConfig();
@@ -356,6 +378,7 @@ describe('v0.2 Scenarios — Hostile Site', () => {
       status: 'active',
       consecutiveValidations: 0,
       sideEffectClass: 'non-idempotent',
+      parameters: [],
     });
 
     const confirmation = makeConfirmationManager();

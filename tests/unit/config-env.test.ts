@@ -26,90 +26,90 @@ beforeEach(async () => {
     }),
   }));
   // Clean env vars before each test
-  delete process.env.ONEAGENT_DATA_DIR;
-  delete process.env.ONEAGENT_LOG_LEVEL;
-  delete process.env.ONEAGENT_AUTH_TOKEN;
-  delete process.env.ONEAGENT_NETWORK;
-  delete process.env.ONEAGENT_HTTP_TRANSPORT;
-  delete process.env.ONEAGENT_HTTP_PORT;
-  delete process.env.ONEAGENT_BROWSER_ENGINE;
-  delete process.env.ONEAGENT_SNAPSHOT_MODE;
-  delete process.env.ONEAGENT_INCREMENTAL_DIFFS;
+  delete process.env.SCHRUTE_DATA_DIR;
+  delete process.env.SCHRUTE_LOG_LEVEL;
+  delete process.env.SCHRUTE_AUTH_TOKEN;
+  delete process.env.SCHRUTE_NETWORK;
+  delete process.env.SCHRUTE_HTTP_TRANSPORT;
+  delete process.env.SCHRUTE_HTTP_PORT;
+  delete process.env.SCHRUTE_BROWSER_ENGINE;
+  delete process.env.SCHRUTE_SNAPSHOT_MODE;
+  delete process.env.SCHRUTE_INCREMENTAL_DIFFS;
 
   configModule = await import('../../src/core/config.js');
   configModule.resetConfigCache();
 });
 
 afterEach(() => {
-  delete process.env.ONEAGENT_DATA_DIR;
-  delete process.env.ONEAGENT_LOG_LEVEL;
-  delete process.env.ONEAGENT_AUTH_TOKEN;
-  delete process.env.ONEAGENT_NETWORK;
-  delete process.env.ONEAGENT_HTTP_TRANSPORT;
-  delete process.env.ONEAGENT_HTTP_PORT;
-  delete process.env.ONEAGENT_BROWSER_ENGINE;
-  delete process.env.ONEAGENT_SNAPSHOT_MODE;
-  delete process.env.ONEAGENT_INCREMENTAL_DIFFS;
+  delete process.env.SCHRUTE_DATA_DIR;
+  delete process.env.SCHRUTE_LOG_LEVEL;
+  delete process.env.SCHRUTE_AUTH_TOKEN;
+  delete process.env.SCHRUTE_NETWORK;
+  delete process.env.SCHRUTE_HTTP_TRANSPORT;
+  delete process.env.SCHRUTE_HTTP_PORT;
+  delete process.env.SCHRUTE_BROWSER_ENGINE;
+  delete process.env.SCHRUTE_SNAPSHOT_MODE;
+  delete process.env.SCHRUTE_INCREMENTAL_DIFFS;
 });
 
 describe('config env overrides', () => {
-  describe('ONEAGENT_DATA_DIR', () => {
+  describe('SCHRUTE_DATA_DIR', () => {
     it('overrides dataDir', () => {
-      process.env.ONEAGENT_DATA_DIR = '/custom/data';
+      process.env.SCHRUTE_DATA_DIR = '/custom/data';
       const config = configModule.getConfig();
       expect(config.dataDir).toBe('/custom/data');
     });
   });
 
-  describe('ONEAGENT_LOG_LEVEL', () => {
+  describe('SCHRUTE_LOG_LEVEL', () => {
     it('overrides logLevel', () => {
-      process.env.ONEAGENT_LOG_LEVEL = 'debug';
+      process.env.SCHRUTE_LOG_LEVEL = 'debug';
       const config = configModule.getConfig();
       expect(config.logLevel).toBe('debug');
     });
   });
 
-  describe('ONEAGENT_NETWORK', () => {
+  describe('SCHRUTE_NETWORK', () => {
     it('accepts "true"', () => {
-      process.env.ONEAGENT_NETWORK = 'true';
+      process.env.SCHRUTE_NETWORK = 'true';
       const config = configModule.getConfig();
       expect(config.server.network).toBe(true);
     });
 
     it('accepts "false"', () => {
-      process.env.ONEAGENT_NETWORK = 'false';
+      process.env.SCHRUTE_NETWORK = 'false';
       const config = configModule.getConfig();
       expect(config.server.network).toBe(false);
     });
 
     it('rejects "1" with strict parse error', () => {
-      process.env.ONEAGENT_NETWORK = '1';
+      process.env.SCHRUTE_NETWORK = '1';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
       expect(() => configModule.getConfig()).toThrow(/Invalid boolean value/);
     });
 
     it('rejects "0" with strict parse error', () => {
-      process.env.ONEAGENT_NETWORK = '0';
+      process.env.SCHRUTE_NETWORK = '0';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
       expect(() => configModule.getConfig()).toThrow(/Invalid boolean value/);
     });
 
     it('rejects "yes" with strict parse error', () => {
-      process.env.ONEAGENT_NETWORK = 'yes';
+      process.env.SCHRUTE_NETWORK = 'yes';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
       expect(() => configModule.getConfig()).toThrow(/Invalid boolean value/);
     });
 
     it('rejects "on" with strict parse error', () => {
-      process.env.ONEAGENT_NETWORK = 'on';
+      process.env.SCHRUTE_NETWORK = 'on';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
     });
   });
 
-  describe('ONEAGENT_BROWSER_ENGINE', () => {
+  describe('SCHRUTE_BROWSER_ENGINE', () => {
     it('accepts valid engine values', () => {
       for (const engine of ['playwright', 'patchright', 'camoufox']) {
-        process.env.ONEAGENT_BROWSER_ENGINE = engine;
+        process.env.SCHRUTE_BROWSER_ENGINE = engine;
         configModule.resetConfigCache();
         const config = configModule.getConfig();
         expect(config.browser?.engine).toBe(engine);
@@ -117,44 +117,44 @@ describe('config env overrides', () => {
     });
 
     it('rejects invalid engine values', () => {
-      process.env.ONEAGENT_BROWSER_ENGINE = 'selenium';
+      process.env.SCHRUTE_BROWSER_ENGINE = 'selenium';
       configModule.resetConfigCache();
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
     });
   });
 
-  describe('ONEAGENT_HTTP_PORT', () => {
+  describe('SCHRUTE_HTTP_PORT', () => {
     it('accepts valid port number', () => {
-      process.env.ONEAGENT_HTTP_PORT = '8080';
+      process.env.SCHRUTE_HTTP_PORT = '8080';
       const config = configModule.getConfig();
       expect(config.server.httpPort).toBe(8080);
     });
 
     it('rejects non-integer', () => {
-      process.env.ONEAGENT_HTTP_PORT = 'abc';
+      process.env.SCHRUTE_HTTP_PORT = 'abc';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
       expect(() => configModule.getConfig()).toThrow(/Invalid port value/);
     });
 
     it('rejects port 0', () => {
-      process.env.ONEAGENT_HTTP_PORT = '0';
+      process.env.SCHRUTE_HTTP_PORT = '0';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
     });
 
     it('rejects port > 65535', () => {
-      process.env.ONEAGENT_HTTP_PORT = '70000';
+      process.env.SCHRUTE_HTTP_PORT = '70000';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
     });
 
     it('rejects float', () => {
-      process.env.ONEAGENT_HTTP_PORT = '3000.5';
+      process.env.SCHRUTE_HTTP_PORT = '3000.5';
       expect(() => configModule.getConfig()).toThrow(configModule.ConfigError);
     });
   });
 
   describe('missing env var', () => {
     it('leaves config unchanged when env var is not set', () => {
-      // Use loadConfig with nonexistent path to get clean defaults (avoids real ~/.oneagent/config.json)
+      // Use loadConfig with nonexistent path to get clean defaults (avoids real ~/.schrute/config.json)
       const config = configModule.loadConfig('/nonexistent/path/config.json');
       expect(config.server.network).toBe(false);
       expect(config.logLevel).toBe('info');
@@ -163,9 +163,9 @@ describe('config env overrides', () => {
 
   describe('env overlay isolation', () => {
     it('env overrides do not persist to disk via setConfigValue', () => {
-      process.env.ONEAGENT_AUTH_TOKEN = 'env-secret';
+      process.env.SCHRUTE_AUTH_TOKEN = 'env-secret';
 
-      const tmpDir = `/tmp/oneagent-env-test-${Date.now()}`;
+      const tmpDir = `/tmp/schrute-env-test-${Date.now()}`;
       fs.mkdirSync(tmpDir, { recursive: true });
       const tmpPath = path.join(tmpDir, 'config.json');
       fs.writeFileSync(tmpPath, JSON.stringify({ logLevel: 'info' }), 'utf-8');

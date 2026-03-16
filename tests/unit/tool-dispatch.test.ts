@@ -12,7 +12,7 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-dispatch-test',
+    dataDir: '/tmp/schrute-dispatch-test',
     logLevel: 'silent',
     daemon: { port: 19420, autoStart: false },
   }),
@@ -49,29 +49,47 @@ vi.mock('../../src/replay/dry-run.js', () => ({
 // Mock tool-registry
 vi.mock('../../src/server/tool-registry.js', () => ({
   META_TOOLS: [
-    { name: 'oneagent_explore', description: 'Explore', inputSchema: {} },
-    { name: 'oneagent_record', description: 'Record', inputSchema: {} },
-    { name: 'oneagent_stop', description: 'Stop', inputSchema: {} },
-    { name: 'oneagent_sites', description: 'Sites', inputSchema: {} },
-    { name: 'oneagent_skills', description: 'Skills', inputSchema: {} },
-    { name: 'oneagent_status', description: 'Status', inputSchema: {} },
-    { name: 'oneagent_dry_run', description: 'Dry Run', inputSchema: {} },
-    { name: 'oneagent_confirm', description: 'Confirm', inputSchema: {} },
-    { name: 'oneagent_execute', description: 'Execute', inputSchema: {} },
-    { name: 'oneagent_activate', description: 'Activate', inputSchema: {} },
-    { name: 'oneagent_doctor', description: 'Doctor', inputSchema: {} },
-    { name: 'oneagent_export_cookies', description: 'Export Cookies', inputSchema: {} },
+    { name: 'schrute_explore', description: 'Explore', inputSchema: {} },
+    { name: 'schrute_record', description: 'Record', inputSchema: {} },
+    { name: 'schrute_stop', description: 'Stop', inputSchema: {} },
+    { name: 'schrute_sites', description: 'Sites', inputSchema: {} },
+    { name: 'schrute_skills', description: 'Skills', inputSchema: {} },
+    { name: 'schrute_status', description: 'Status', inputSchema: {} },
+    { name: 'schrute_dry_run', description: 'Dry Run', inputSchema: {} },
+    { name: 'schrute_confirm', description: 'Confirm', inputSchema: {} },
+    { name: 'schrute_execute', description: 'Execute', inputSchema: {} },
+    { name: 'schrute_activate', description: 'Activate', inputSchema: {} },
+    { name: 'schrute_doctor', description: 'Doctor', inputSchema: {} },
+    { name: 'schrute_export_cookies', description: 'Export Cookies', inputSchema: {} },
+    { name: 'schrute_revoke', description: 'Revoke', inputSchema: {} },
   ],
   getBrowserToolDefinitions: vi.fn().mockReturnValue([
     { name: 'browser_click', description: 'Click', inputSchema: {} },
   ]),
   rankToolsByIntent: vi.fn((skills) => skills),
   skillToToolName: vi.fn((skill) => `${skill.siteId}.${skill.name}.v${skill.version}`),
-  skillToToolDefinition: vi.fn((skill) => ({
-    name: `${skill.siteId}.${skill.name}.v${skill.version}`,
-    description: skill.description ?? `${skill.method} ${skill.pathTemplate}`,
-    inputSchema: {},
-  })),
+  skillToToolDefinition: vi.fn((skill: any, options?: { maxDescriptionLength?: number }) => {
+    let description = skill.description ?? `${skill.method} ${skill.pathTemplate}`;
+    const maxLen = options?.maxDescriptionLength;
+    if (maxLen !== undefined && description.length > maxLen) {
+      description = description.slice(0, maxLen) + '...';
+    }
+    return {
+      name: `${skill.siteId}.${skill.name}.v${skill.version}`,
+      description,
+      inputSchema: {},
+    };
+  }),
+}));
+
+// Mock doctor (dynamic import in schrute_doctor full=true)
+vi.mock('../../src/doctor.js', () => ({
+  runDoctor: vi.fn().mockResolvedValue({
+    timestamp: Date.now(),
+    version: '0.0.1',
+    checks: [{ name: 'browser', status: 'pass', message: 'OK' }],
+    summary: { pass: 1, fail: 0, warning: 0 },
+  }),
 }));
 
 // Mock browser adapter
@@ -93,14 +111,14 @@ vi.mock('../../src/core/policy.js', () => ({
 
 import { dispatchToolCall, buildToolList } from '../../src/server/tool-dispatch.js';
 import type { ToolDispatchDeps } from '../../src/server/tool-dispatch.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 import { SkillStatus, SideEffectClass } from '../../src/skill/types.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────
 
-function makeConfig(): OneAgentConfig {
+function makeConfig(): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-dispatch-test',
+    dataDir: '/tmp/schrute-dispatch-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -128,7 +146,7 @@ function makeConfig(): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
@@ -201,6 +219,9 @@ function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
         }),
       }),
       getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+      getMetricsRepo: vi.fn().mockReturnValue({
+        getRecentBySkillId: vi.fn().mockReturnValue([]),
+      }),
     } as any,
     skillRepo: {
       getByStatus: vi.fn().mockReturnValue([]),
@@ -275,7 +296,8 @@ describe('tool-dispatch', () => {
 
   describe('confirmation gate', () => {
     it('returns confirmation_required when skill is unconfirmed', async () => {
-      const skill = makeSkill();
+      // Use a POST non-read-only skill so auto-confirm (P2-8) does not bypass the gate
+      const skill = makeSkill({ method: 'POST', sideEffectClass: 'non-idempotent' as any });
       const deps = makeDeps({
         skillRepo: {
           getByStatus: vi.fn().mockReturnValue([skill]),
@@ -294,9 +316,10 @@ describe('tool-dispatch', () => {
       });
 
       const result = await dispatchToolCall('example.com.get_users.v1', { page: 1 }, deps);
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
       const data = JSON.parse(result.content[0].text);
       expect(data.status).toBe('confirmation_required');
+      expect(data.message).toBe('Call schrute_confirm with the token below.');
       expect(data.confirmationToken).toBe('confirm-abc');
       expect(data.skillId).toBe(skill.id);
     });
@@ -326,51 +349,51 @@ describe('tool-dispatch', () => {
 
       const result = await dispatchToolCall('example.com.get_users.v1', { page: 1 }, deps);
       expect(result.isError).toBeUndefined();
-      expect(mockExecuteSkill).toHaveBeenCalledWith(skill.id, { page: 1 });
+      expect(mockExecuteSkill).toHaveBeenCalledWith(skill.id, { page: 1 }, undefined, undefined);
     });
   });
 
   // ─── Missing Required Arguments ────────────────────────────────
 
   describe('missing required arguments', () => {
-    it('oneagent_explore returns error when url is missing', async () => {
+    it('schrute_explore returns error when url is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {}, deps);
+      const result = await dispatchToolCall('schrute_explore', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('url is required');
     });
 
-    it('oneagent_record returns error when name is missing', async () => {
+    it('schrute_record returns error when name is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_record', {}, deps);
+      const result = await dispatchToolCall('schrute_record', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required');
     });
 
-    it('oneagent_confirm returns error when confirmationToken is missing', async () => {
+    it('schrute_confirm returns error when confirmationToken is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_confirm', {}, deps);
+      const result = await dispatchToolCall('schrute_confirm', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('confirmationToken is required');
     });
 
-    it('oneagent_confirm returns error when approve is missing', async () => {
+    it('schrute_confirm returns error when approve is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_confirm', { confirmationToken: 'tok-1' }, deps);
+      const result = await dispatchToolCall('schrute_confirm', { confirmationToken: 'tok-1' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('approve must be a boolean');
     });
 
-    it('oneagent_confirm returns error when approve is not a boolean', async () => {
+    it('schrute_confirm returns error when approve is not a boolean', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_confirm', { confirmationToken: 'tok-1', approve: 'yes' }, deps);
+      const result = await dispatchToolCall('schrute_confirm', { confirmationToken: 'tok-1', approve: 'yes' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('approve must be a boolean');
     });
 
-    it('oneagent_dry_run returns error when skillId is missing', async () => {
+    it('schrute_dry_run returns error when skillId is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_dry_run', {}, deps);
+      const result = await dispatchToolCall('schrute_dry_run', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     });
@@ -383,10 +406,10 @@ describe('tool-dispatch', () => {
       const deps = makeDeps();
       const tools = buildToolList(deps);
       const names = tools.map(t => t.name);
-      expect(names).toContain('oneagent_explore');
-      expect(names).toContain('oneagent_record');
-      expect(names).toContain('oneagent_stop');
-      expect(names).toContain('oneagent_confirm');
+      expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_record');
+      expect(names).toContain('schrute_stop');
+      expect(names).toContain('schrute_confirm');
     });
 
     it('includes browser tools', () => {
@@ -425,6 +448,26 @@ describe('tool-dispatch', () => {
       // At least meta + browser + skill
       expect(tools.length).toBeGreaterThanOrEqual(10); // 8 meta + 1 browser + 1 skill
     });
+
+    it('admin caller dynamic skills have descriptions trimmed to maxDescriptionLength', () => {
+      const longDescription = 'X'.repeat(300);
+      const skill = makeSkill({ description: longDescription });
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+      });
+
+      const tools = buildToolList(deps);
+      const skillTool = tools.find(t => t.name === 'example.com.get_users.v1');
+      expect(skillTool).toBeDefined();
+      // Description should be trimmed: 200 chars + '...' = 203 max
+      expect(skillTool!.description.length).toBeLessThanOrEqual(203);
+      expect(skillTool!.description.endsWith('...')).toBe(true);
+    });
   });
 
   // ─── Unknown Tool Fallback ─────────────────────────────────────
@@ -442,40 +485,41 @@ describe('tool-dispatch', () => {
   // ─── Meta Tool Routing ─────────────────────────────────────────
 
   describe('meta tool routing', () => {
-    it('routes oneagent_explore to router.explore', async () => {
+    it('routes schrute_explore to router.explore', async () => {
       const deps = makeDeps();
-      await dispatchToolCall('oneagent_explore', { url: 'https://example.com' }, deps);
+      await dispatchToolCall('schrute_explore', { url: 'https://example.com' }, deps);
       expect(mockRouter.explore).toHaveBeenCalledWith('https://example.com', undefined);
     });
 
-    it('routes oneagent_record to router.startRecording', async () => {
+    it('routes schrute_record to router.startRecording', async () => {
       const deps = makeDeps();
-      await dispatchToolCall('oneagent_record', { name: 'my-recording', inputs: { key: 'val' } }, deps);
+      await dispatchToolCall('schrute_record', { name: 'my-recording', inputs: { key: 'val' } }, deps);
       expect(mockRouter.startRecording).toHaveBeenCalledWith('my-recording', { key: 'val' });
     });
 
-    it('routes oneagent_stop to router.stopRecording', async () => {
+    it('routes schrute_stop to router.stopRecording', async () => {
       const deps = makeDeps();
-      await dispatchToolCall('oneagent_stop', {}, deps);
+      await dispatchToolCall('schrute_stop', {}, deps);
       expect(mockRouter.stopRecording).toHaveBeenCalled();
     });
 
-    it('routes oneagent_sites to router.listSites', async () => {
+    it('routes schrute_sites to router.listSites', async () => {
       const deps = makeDeps();
-      await dispatchToolCall('oneagent_sites', {}, deps);
+      await dispatchToolCall('schrute_sites', {}, deps);
       expect(mockRouter.listSites).toHaveBeenCalled();
     });
 
-    it('routes oneagent_status to router.getStatus', async () => {
+    it('routes schrute_status to engine.getStatus', async () => {
       const deps = makeDeps();
-      await dispatchToolCall('oneagent_status', {}, deps);
-      expect(mockRouter.getStatus).toHaveBeenCalled();
+      const result = await dispatchToolCall('schrute_status', {}, deps);
+      expect(result.content[0].text).toBeDefined();
+      expect(deps.engine.getStatus).toHaveBeenCalled();
     });
 
     it('returns isError when router returns failure', async () => {
       mockRouter.explore.mockResolvedValue({ success: false, error: 'Connection failed' });
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', { url: 'https://bad.example.com' }, deps);
+      const result = await dispatchToolCall('schrute_explore', { url: 'https://bad.example.com' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('Connection failed');
     });
@@ -487,7 +531,7 @@ describe('tool-dispatch', () => {
     it('catches and wraps exceptions thrown during dispatch', async () => {
       mockRouter.explore.mockRejectedValue(new Error('Unexpected crash'));
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', { url: 'https://example.com' }, deps);
+      const result = await dispatchToolCall('schrute_explore', { url: 'https://example.com' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('Unexpected crash');
     });
@@ -495,10 +539,10 @@ describe('tool-dispatch', () => {
 
   // ─── Strict Input Validation ──────────────────────────────────
 
-  describe('oneagent_explore strict validation', () => {
+  describe('schrute_explore strict validation', () => {
     it('rejects non-string proxy.bypass', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://proxy:8080', bypass: 123 },
       }, deps);
@@ -508,7 +552,7 @@ describe('tool-dispatch', () => {
 
     it('rejects non-string proxy.username', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://proxy:8080', username: true },
       }, deps);
@@ -518,7 +562,7 @@ describe('tool-dispatch', () => {
 
     it('rejects non-string proxy.password', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://proxy:8080', password: 42 },
       }, deps);
@@ -528,7 +572,7 @@ describe('tool-dispatch', () => {
 
     it('rejects non-number geolocation.accuracy', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 0, longitude: 0, accuracy: 'high' } },
       }, deps);
@@ -538,7 +582,7 @@ describe('tool-dispatch', () => {
 
     it('rejects proxy.server with path', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://proxy:8080/path' },
       }, deps);
@@ -548,7 +592,7 @@ describe('tool-dispatch', () => {
 
     it('rejects proxy.server with credentials in URL', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         proxy: { server: 'http://user:pass@proxy:8080' },
       }, deps);
@@ -594,25 +638,26 @@ describe('tool-dispatch', () => {
     });
   });
 
-  // ─── oneagent_execute ─────────────────────────────────────────
+  // ─── schrute_execute ─────────────────────────────────────────
 
-  describe('oneagent_execute', () => {
+  describe('schrute_execute', () => {
     it('returns error when skillId is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_execute', {}, deps);
+      const result = await dispatchToolCall('schrute_execute', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     });
 
     it('returns error when skill is not found', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_execute', { skillId: 'nonexistent' }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: 'nonexistent' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("skill 'nonexistent' not found");
     });
 
     it('returns confirmation_required when skill is unconfirmed', async () => {
-      const skill = makeSkill();
+      // Use a POST non-read-only skill so auto-confirm (P2-8) does not bypass the gate
+      const skill = makeSkill({ method: 'POST', sideEffectClass: 'non-idempotent' as any });
       const deps = makeDeps({
         skillRepo: {
           getByStatus: vi.fn().mockReturnValue([skill]),
@@ -632,9 +677,11 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id }, deps);
+      expect(result.isError).toBe(true);
       const data = JSON.parse(result.content[0].text);
       expect(data.status).toBe('confirmation_required');
+      expect(data.message).toBe('Call schrute_confirm with the token below.');
       expect(data.confirmationToken).toBe('exec-token');
     });
 
@@ -662,15 +709,46 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id, params: { page: 1 } }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id, params: { page: 1 } }, deps);
       expect(result.isError).toBeUndefined();
-      expect(mockExecute).toHaveBeenCalledWith(skill.id, { page: 1 });
+      expect(mockExecute).toHaveBeenCalledWith(skill.id, { page: 1 }, undefined, { skipMetrics: false });
+    });
+
+    it('returns isError when skill execution fails (success === false)', async () => {
+      const skill = makeSkill();
+      const mockExecute = vi.fn().mockResolvedValue({ success: false, error: 'timeout' });
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle' }),
+          executeSkill: mockExecute,
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({}),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+        } as any,
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+        confirmation: {
+          isSkillConfirmed: vi.fn().mockReturnValue(true),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id }, deps);
+      expect(result.isError).toBe(true);
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('timeout');
     });
   });
 
   // ─── Grouped skills output ────────────────────────────────────
 
-  describe('oneagent_skills grouped output', () => {
+  describe('schrute_skills grouped output', () => {
     it('returns skills grouped by site when no siteId given', async () => {
       const skill1 = makeSkill({ id: 's1', siteId: 'site-a.com', name: 'get_users' });
       const skill2 = makeSkill({ id: 's2', siteId: 'site-a.com', name: 'create_order' });
@@ -685,7 +763,7 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_skills', {}, deps);
+      const result = await dispatchToolCall('schrute_skills', {}, deps);
       const data = JSON.parse(result.content[0].text);
       expect(data.totalSkills).toBe(3);
       expect(data.sites['site-a.com'].count).toBe(2);
@@ -694,9 +772,9 @@ describe('tool-dispatch', () => {
     });
   });
 
-  // ─── oneagent_doctor ──────────────────────────────────────────
+  // ─── schrute_doctor ──────────────────────────────────────────
 
-  describe('oneagent_doctor', () => {
+  describe('schrute_doctor', () => {
     it('returns diagnostics object', async () => {
       const skill = makeSkill();
       const deps = makeDeps({
@@ -709,7 +787,7 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_doctor', {}, deps);
+      const result = await dispatchToolCall('schrute_doctor', {}, deps);
       expect(result.isError).toBeUndefined();
       const data = JSON.parse(result.content[0].text);
       expect(data.diagnostics).toBeDefined();
@@ -724,16 +802,16 @@ describe('tool-dispatch', () => {
   // ─── Negative Paths ──────────────────────────────────────────
 
   describe('negative paths', () => {
-    it('oneagent_execute with non-existent skill ID returns error', async () => {
+    it('schrute_execute with non-existent skill ID returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_execute', { skillId: 'nonexistent' }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: 'nonexistent' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("skill 'nonexistent' not found");
     });
 
-    it('oneagent_execute with empty string skillId returns error', async () => {
+    it('schrute_execute with empty string skillId returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_execute', { skillId: '' }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: '' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     });
@@ -751,7 +829,7 @@ describe('tool-dispatch', () => {
         error: 'Confirmation failed: token expired',
       });
 
-      const result = await dispatchToolCall('oneagent_confirm', {
+      const result = await dispatchToolCall('schrute_confirm', {
         confirmationToken: 'stale-token-xyz',
         approve: true,
       }, deps);
@@ -761,7 +839,7 @@ describe('tool-dispatch', () => {
 
     it('latitude out of range (-90 to 90) returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 91, longitude: 0 } },
       }, deps);
@@ -771,7 +849,7 @@ describe('tool-dispatch', () => {
 
     it('longitude out of range (-180 to 180) returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 0, longitude: -181 } },
       }, deps);
@@ -781,7 +859,7 @@ describe('tool-dispatch', () => {
 
     it('negative latitude out of range returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: -91, longitude: 0 } },
       }, deps);
@@ -791,7 +869,7 @@ describe('tool-dispatch', () => {
 
     it('longitude at positive boundary overflow returns error', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_explore', {
+      const result = await dispatchToolCall('schrute_explore', {
         url: 'https://example.com',
         geo: { geolocation: { latitude: 0, longitude: 181 } },
       }, deps);
@@ -800,60 +878,60 @@ describe('tool-dispatch', () => {
     });
   });
 
-  describe('oneagent_connect_cdp strict validation', () => {
+  describe('schrute_connect_cdp strict validation', () => {
     it('rejects non-string name', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 123 }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 123 }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('name is required and must be a string');
     });
 
     it('rejects non-integer port', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', port: 'abc' }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', port: 'abc' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('port must be an integer');
     });
 
     it('rejects non-string wsEndpoint', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', wsEndpoint: 42 }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', wsEndpoint: 42 }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('wsEndpoint must be a string');
     });
 
     it('rejects non-string host', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', host: true }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', host: true }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('host must be a string');
     });
 
     it('rejects non-string siteId', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', siteId: 99 }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', siteId: 99 }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('siteId must be a string');
     });
 
     it('rejects non-array domains', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', domains: 'example.com' }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', domains: 'example.com' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('domains must be an array');
     });
 
     it('rejects domains with non-string elements', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_connect_cdp', { name: 'test', domains: ['ok.com', 42] }, deps);
+      const result = await dispatchToolCall('schrute_connect_cdp', { name: 'test', domains: ['ok.com', 42] }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('domains must be an array of strings');
     });
   });
 
-  // ─── oneagent_activate ─────────────────────────────────────────
+  // ─── schrute_activate ─────────────────────────────────────────
 
-  describe('oneagent_activate', () => {
+  describe('schrute_activate', () => {
     it('activates a DRAFT skill and calls skillRepo.update', async () => {
       const skill = makeSkill({ status: SkillStatus.DRAFT });
       const updateFn = vi.fn();
@@ -868,7 +946,7 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_activate', { skillId: skill.id }, deps);
+      const result = await dispatchToolCall('schrute_activate', { skillId: skill.id }, deps);
       expect(result.isError).toBeUndefined();
       const data = JSON.parse(result.content[0].text);
       expect(data.activated).toBe(true);
@@ -892,7 +970,7 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_activate', { skillId: skill.id }, deps);
+      const result = await dispatchToolCall('schrute_activate', { skillId: skill.id }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("status is 'active'");
       expect(result.content[0].text).toContain("must be 'draft'");
@@ -900,23 +978,144 @@ describe('tool-dispatch', () => {
 
     it('returns error when skillId is missing', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_activate', {}, deps);
+      const result = await dispatchToolCall('schrute_activate', {}, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skillId is required');
     });
 
     it('returns error when skill is not found', async () => {
       const deps = makeDeps();
-      const result = await dispatchToolCall('oneagent_activate', { skillId: 'nonexistent' }, deps);
+      const result = await dispatchToolCall('schrute_activate', { skillId: 'nonexistent' }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("skill 'nonexistent' not found");
     });
   });
 
-  // ─── oneagent_execute draft hint ───────────────────────────────
+  // ─── Admin Gate (Multi-User Mode) ───────────────────────────────
 
-  describe('oneagent_execute draft hint message', () => {
-    it('shows oneagent_activate hint when executing a DRAFT skill', async () => {
+  describe('admin gate (multi-user mode)', () => {
+    function makeNetworkConfig(): SchruteConfig {
+      return { ...makeConfig(), server: { network: true } };
+    }
+
+    function makeNetworkDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
+      return makeDeps({ config: makeNetworkConfig(), ...overrides });
+    }
+
+    it('MCP HTTP caller calling schrute_explore when server.network=true returns error', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('schrute_explore', { url: 'https://example.com' }, deps, 'mcp-session-123');
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('admin');
+    });
+
+    it('callerId=stdio calling schrute_explore when server.network=true succeeds', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('schrute_explore', { url: 'https://example.com' }, deps, 'stdio');
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.siteId).toBe('example.com');
+    });
+
+    it('no callerId calling schrute_explore succeeds (backward compat)', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('schrute_explore', { url: 'https://example.com' }, deps);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.siteId).toBe('example.com');
+    });
+
+    it('MCP HTTP caller calling browser_navigate when server.network=true returns error', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('browser_navigate', { url: 'https://example.com' }, deps, 'mcp-session-123');
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('admin');
+      expect(result.content[0].text).toContain('Browser tools');
+    });
+
+    it('buildToolList for MCP HTTP caller when server.network=true excludes browser and admin tools', () => {
+      const deps = makeNetworkDeps();
+      const tools = buildToolList(deps, 'mcp-session-123');
+      const names = tools.map(t => t.name);
+
+      // Should NOT include browser tools
+      expect(names).not.toContain('browser_click');
+
+      // Should NOT include admin-only meta tools
+      expect(names).not.toContain('schrute_explore');
+      expect(names).not.toContain('schrute_record');
+      expect(names).not.toContain('schrute_stop');
+      expect(names).not.toContain('schrute_import_cookies');
+      expect(names).not.toContain('schrute_export_cookies');
+      expect(names).not.toContain('schrute_connect_cdp');
+      expect(names).not.toContain('schrute_webmcp_call');
+
+      // Should still include non-admin meta tools
+      expect(names).toContain('schrute_status');
+      expect(names).toContain('schrute_execute');
+    });
+
+    it('buildToolList for stdio caller when server.network=true includes all tools', () => {
+      const deps = makeNetworkDeps();
+      const tools = buildToolList(deps, 'stdio');
+      const names = tools.map(t => t.name);
+
+      // Should include admin meta tools
+      expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_record');
+      expect(names).toContain('schrute_stop');
+
+      // Should include browser tools
+      expect(names).toContain('browser_click');
+    });
+
+    it('buildToolList for MCP HTTP caller when server.network=false includes all tools', () => {
+      const deps = makeDeps(); // default config has server.network=false
+      const tools = buildToolList(deps, 'mcp-session-123');
+      const names = tools.map(t => t.name);
+
+      // In single-user mode, everyone gets all tools
+      expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_record');
+      expect(names).toContain('browser_click');
+    });
+
+    it('non-admin caller schrute_close_session with name=default when server.network=true returns error', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('schrute_close_session', { name: 'default' }, deps, 'mcp-session-123');
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Cannot close default session');
+      expect(result.content[0].text).toContain('Admin');
+    });
+
+    it('non-admin caller schrute_sessions returns empty list when server.network=true', async () => {
+      const multiMock = makeMultiSessionMock();
+      // Override list to return empty for non-admin callers
+      multiMock.list = vi.fn().mockReturnValue([]);
+      const deps = makeNetworkDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle', activeSession: null }),
+          executeSkill: vi.fn(),
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({
+              hasContext: vi.fn().mockReturnValue(false),
+            }),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(multiMock),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_sessions', {}, deps, 'mcp-session-123');
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual([]);
+      expect(multiMock.list).toHaveBeenCalledWith('mcp-session-123', expect.objectContaining({ server: { network: true } }));
+    });
+  });
+
+  // ─── schrute_execute draft hint ───────────────────────────────
+
+  describe('schrute_execute draft hint message', () => {
+    it('shows schrute_activate hint when executing a DRAFT skill', async () => {
       const skill = makeSkill({ status: SkillStatus.DRAFT });
       const deps = makeDeps({
         skillRepo: {
@@ -928,9 +1127,9 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id }, deps);
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('oneagent_activate');
+      expect(result.content[0].text).toContain('schrute_activate');
       expect(result.content[0].text).toContain('not active');
       expect(result.content[0].text).toContain('draft');
     });
@@ -947,10 +1146,103 @@ describe('tool-dispatch', () => {
         } as any,
       });
 
-      const result = await dispatchToolCall('oneagent_execute', { skillId: skill.id }, deps);
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id }, deps);
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('not active');
-      expect(result.content[0].text).toContain('oneagent_activate');
+      expect(result.content[0].text).toContain('schrute_activate');
+    });
+  });
+
+  // ─── schrute_delete_skill ──────────────────────────────────────
+
+  describe('schrute_delete_skill', () => {
+    it('removes skill and returns confirmation', async () => {
+      const skill = makeSkill();
+      const deleteFn = vi.fn();
+      const deps = makeDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([]),
+          delete: deleteFn,
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_delete_skill', { skillId: 'test-id' }, deps);
+      expect(deleteFn).toHaveBeenCalledWith('test-id');
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.deleted).toBe(true);
+      expect(data.skillId).toBe('test-id');
+      expect(data.name).toBe(skill.name);
+    });
+
+    it('returns error for missing skill', async () => {
+      const deps = makeDeps(); // default getById returns undefined
+      const result = await dispatchToolCall('schrute_delete_skill', { skillId: 'nonexistent' }, deps);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("skill 'nonexistent' not found");
+    });
+  });
+
+  // ─── schrute_doctor full=true ─────────────────────────────────
+
+  describe('schrute_doctor full=true', () => {
+    it('returns DoctorReport when full=true and caller is admin', async () => {
+      const deps = makeDeps(); // default config has server.network=false → isAdmin=true
+      const result = await dispatchToolCall('schrute_doctor', { full: true }, deps);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.checks).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.summary.pass).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // ─── schrute_amendments ────────────────────────────────────────
+
+  describe('schrute_amendments', () => {
+    it('returns parsed snapshotFields', async () => {
+      const mockAmendmentRepo = {
+        getBySkillId: vi.fn().mockReturnValue([{
+          id: 'amend-1',
+          skillId: 'test-skill',
+          snapshotFields: '{"key":"value"}',
+          reason: 'drift',
+          createdAt: Date.now(),
+        }]),
+      };
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle', activeSession: null }),
+          executeSkill: vi.fn(),
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({
+              hasContext: vi.fn().mockReturnValue(false),
+              getOrCreateContext: vi.fn(),
+              getCapabilities: vi.fn().mockReturnValue(null),
+              getBrowser: vi.fn().mockReturnValue(null),
+              isCdpConnected: vi.fn().mockReturnValue(false),
+              supportsHarRecording: vi.fn().mockReturnValue(true),
+              exportCookies: vi.fn().mockResolvedValue([]),
+            }),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+          getMetricsRepo: vi.fn().mockReturnValue({
+            getRecentBySkillId: vi.fn().mockReturnValue([]),
+          }),
+          getAmendmentRepo: vi.fn().mockReturnValue(mockAmendmentRepo),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_amendments', { skillId: 'test-skill' }, deps);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toHaveLength(1);
+      expect(data[0].snapshotFields).toEqual({ key: 'value' });
+      expect(typeof data[0].snapshotFields).toBe('object');
     });
   });
 });

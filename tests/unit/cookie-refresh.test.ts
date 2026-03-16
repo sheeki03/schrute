@@ -12,11 +12,11 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-cookie-test',
+    dataDir: '/tmp/schrute-cookie-test',
     logLevel: 'silent',
   }),
-  getBrowserDataDir: () => '/tmp/oneagent-cookie-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-cookie-test/tmp',
+  getBrowserDataDir: () => '/tmp/schrute-cookie-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-cookie-test/tmp',
 }));
 
 // Mock cookie jar

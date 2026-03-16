@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { canPromote, promoteSkill, demoteSkill } from '../../src/core/promotion.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 import { SkillStatus, SideEffectClass } from '../../src/skill/types.js';
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent',
+    dataDir: '/tmp/test-schrute',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -34,7 +34,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {

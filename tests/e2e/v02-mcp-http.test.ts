@@ -28,14 +28,14 @@ describe('v0.2 MCP HTTP — Tool Registry Parity', () => {
     const { META_TOOLS } = await import('../../src/server/tool-registry.js');
     const names = META_TOOLS.map(t => t.name);
 
-    expect(names).toContain('oneagent_explore');
-    expect(names).toContain('oneagent_record');
-    expect(names).toContain('oneagent_stop');
-    expect(names).toContain('oneagent_sites');
-    expect(names).toContain('oneagent_skills');
-    expect(names).toContain('oneagent_status');
-    expect(names).toContain('oneagent_dry_run');
-    expect(names).toContain('oneagent_confirm');
+    expect(names).toContain('schrute_explore');
+    expect(names).toContain('schrute_record');
+    expect(names).toContain('schrute_stop');
+    expect(names).toContain('schrute_sites');
+    expect(names).toContain('schrute_skills');
+    expect(names).toContain('schrute_status');
+    expect(names).toContain('schrute_dry_run');
+    expect(names).toContain('schrute_confirm');
   });
 
   it('all META_TOOLS have required schema fields', async () => {
@@ -72,7 +72,7 @@ describe('v0.2 MCP HTTP — Tool Registry Parity', () => {
     // Both mcp-stdio.ts and mcp-http.ts import META_TOOLS from tool-registry.ts
     // This is a structural parity check — same import, same data
     const { META_TOOLS } = await import('../../src/server/tool-registry.js');
-    expect(META_TOOLS.length).toBe(18);
+    expect(META_TOOLS.length).toBe(30);
   });
 });
 

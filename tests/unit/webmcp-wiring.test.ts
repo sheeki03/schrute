@@ -189,13 +189,13 @@ describe('webmcp-wiring', () => {
   // ─── checkCapability policy tests ──────────────────────────────
 
   describe('checkCapability', () => {
-    it('blocks BROWSER_MODEL_CONTEXT by default', () => {
+    it('BROWSER_MODEL_CONTEXT requires site grant (no longer disabled by default)', () => {
       const result = checkCapability('example.com', Capability.BROWSER_MODEL_CONTEXT);
       expect(result.allowed).toBe(false);
-      expect(result.rule).toBe('capability.disabled_by_default');
+      expect(result.rule).toBe('capability.not_granted');
     });
 
-    it('allows with opt-in + site grant', () => {
+    it('allows with site grant (no longer requires opt-in)', () => {
       // Set up site policy with the capability
       setSitePolicy({
         siteId: 'example.com',
@@ -209,15 +209,9 @@ describe('webmcp-wiring', () => {
         capabilities: [Capability.BROWSER_MODEL_CONTEXT] as CapabilityName[],
       });
 
-      const config = {
-        capabilities: {
-          enabled: [Capability.BROWSER_MODEL_CONTEXT] as CapabilityName[],
-        },
-      } as SchruteConfig;
-
-      const result = checkCapability('example.com', Capability.BROWSER_MODEL_CONTEXT, config);
+      const result = checkCapability('example.com', Capability.BROWSER_MODEL_CONTEXT);
       expect(result.allowed).toBe(true);
-      expect(result.rule).toBe('capability.opted_in');
+      expect(result.rule).toBe('capability.site_allowed');
     });
 
     it('blocks with opt-in but no site grant', () => {
@@ -245,8 +239,8 @@ describe('webmcp-wiring', () => {
       expect(result.rule).toBe('capability.not_granted');
     });
 
-    it('BROWSER_MODEL_CONTEXT is in DISABLED_BY_DEFAULT list', () => {
-      expect(DISABLED_BY_DEFAULT_CAPABILITIES).toContain(Capability.BROWSER_MODEL_CONTEXT);
+    it('BROWSER_MODEL_CONTEXT is NOT in DISABLED_BY_DEFAULT list', () => {
+      expect(DISABLED_BY_DEFAULT_CAPABILITIES).not.toContain(Capability.BROWSER_MODEL_CONTEXT);
     });
   });
 

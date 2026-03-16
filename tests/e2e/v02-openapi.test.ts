@@ -51,7 +51,7 @@ describe('v0.2 OpenAPI — Spec Structure', () => {
 
     expect(spec.openapi).toBe('3.1.0');
     expect(spec.info).toBeDefined();
-    expect(spec.info.title).toBe('OneAgent API');
+    expect(spec.info.title).toBe('Schrute API');
     expect(spec.info.version).toBe('0.2.0');
     expect(spec.servers).toBeDefined();
     expect(spec.servers.length).toBeGreaterThan(0);

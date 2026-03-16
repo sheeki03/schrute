@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createHash, randomBytes, createHmac } from 'node:crypto';
-import type { ConfirmationToken, OneAgentConfig } from '../../src/skill/types.js';
+import type { ConfirmationToken, SchruteConfig } from '../../src/skill/types.js';
 
 // Re-implement the confirmation token logic from mcp-stdio.ts for testing,
 // since those functions are module-private. This tests the same algorithm.
@@ -8,9 +8,9 @@ import type { ConfirmationToken, OneAgentConfig } from '../../src/skill/types.js
 const HMAC_SECRET = randomBytes(32);
 const pendingConfirmations = new Map<string, ConfirmationToken>();
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent-confirm',
+    dataDir: '/tmp/test-schrute-confirm',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -38,14 +38,14 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function generateConfirmationToken(
   skillId: string,
   params: Record<string, unknown>,
   tier: string,
-  config: OneAgentConfig,
+  config: SchruteConfig,
 ): ConfirmationToken {
   const nonce = randomBytes(16).toString('hex');
   const paramsHash = createHash('sha256')
@@ -145,26 +145,26 @@ describe('confirmation flow integration', () => {
   });
 
   it('rejects expired confirmation token', () => {
-    // Create a config with very short expiry
-    const config = makeConfig({ confirmationExpiryMs: 1 });
-    const token = generateConfirmationToken(
-      'example.get_users.v1',
-      {},
-      'tier_1',
-      config,
-    );
+    vi.useFakeTimers();
+    try {
+      // Create a config with short expiry
+      const config = makeConfig({ confirmationExpiryMs: 100 });
+      const token = generateConfirmationToken(
+        'example.get_users.v1',
+        {},
+        'tier_1',
+        config,
+      );
 
-    // Wait for expiry (token was created with 1ms expiry)
-    // The token should expire immediately since expiresAt = now + 1ms
-    // Use a small delay to ensure we pass the expiry time
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        const verification = verifyConfirmationToken(token.nonce);
-        expect(verification.valid).toBe(false);
-        expect(verification.error).toBe('Token expired');
-        resolve();
-      }, 10);
-    });
+      // Advance past expiry
+      vi.advanceTimersByTime(200);
+
+      const verification = verifyConfirmationToken(token.nonce);
+      expect(verification.valid).toBe(false);
+      expect(verification.error).toBe('Token expired');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('different params produce different token IDs', () => {

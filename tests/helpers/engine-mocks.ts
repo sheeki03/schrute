@@ -19,7 +19,7 @@
  */
 
 import { vi } from 'vitest';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
 
 // ─── Mock Database ──────────────────────────────────────────────
 
@@ -72,6 +72,8 @@ export function createMockBrowserManager() {
     touchActivity: vi.fn(),
     releaseActivity: vi.fn(),
     isIdle: vi.fn().mockReturnValue(true),
+    setAuthIntegration: vi.fn(),
+    snapshotAuth: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -80,10 +82,12 @@ export function createMockBrowserManager() {
 export function createMockSessionFns() {
   return {
     mockSessionCreate: vi.fn().mockResolvedValue({
-      id: 'sess-1',
-      siteId: 'example.com',
-      url: 'https://example.com',
-      createdAt: Date.now(),
+      session: {
+        id: 'sess-1',
+        siteId: 'example.com',
+        url: 'https://example.com',
+        createdAt: Date.now(),
+      },
     }),
     mockSessionResume: vi.fn().mockResolvedValue({
       id: 'sess-1',
@@ -98,11 +102,11 @@ export function createMockSessionFns() {
 
 // ─── Config Factory ─────────────────────────────────────────────
 
-export function makeConfig(): OneAgentConfig {
+export function makeConfig(): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-engine-test',
+    dataDir: '/tmp/schrute-engine-test',
     logLevel: 'silent',
-    features: { webmcp: false, httpTransport: false },
+    features: { webmcp: false, httpTransport: false, discoveryImport: false, respectRobotsTxt: true },
     toolBudget: {
       maxToolCallsPerTask: 50,
       maxConcurrentCalls: 3,
@@ -119,6 +123,7 @@ export function makeConfig(): OneAgentConfig {
     audit: { strictMode: true, rootHashExport: true },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
     server: { network: false },
+    paramLimits: { maxStringLength: 10_000, maxDepth: 5, maxProperties: 50 },
     daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,
@@ -128,16 +133,16 @@ export function makeConfig(): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 // ─── Config Mock Factory (for vi.mock callback) ─────────────────
 
 export function getConfigMockValue() {
   return {
-    dataDir: '/tmp/oneagent-engine-test',
+    dataDir: '/tmp/schrute-engine-test',
     logLevel: 'silent',
-    features: { webmcp: false, httpTransport: false },
+    features: { webmcp: false, httpTransport: false, discoveryImport: false, respectRobotsTxt: true },
     toolBudget: {
       maxToolCallsPerTask: 50,
       maxConcurrentCalls: 3,
@@ -154,6 +159,7 @@ export function getConfigMockValue() {
     audit: { strictMode: true, rootHashExport: true },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
     server: { network: false },
+    paramLimits: { maxStringLength: 10_000, maxDepth: 5, maxProperties: 50 },
     daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,

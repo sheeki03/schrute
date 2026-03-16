@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Engine } from '../../src/core/engine.js';
 import { executeSkill } from '../../src/replay/executor.js';
-import type { OneAgentConfig, SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
+import type { SchruteConfig, SkillSpec, SealedFetchRequest, SealedFetchResponse } from '../../src/skill/types.js';
 import { Capability } from '../../src/skill/types.js';
 import { createRestMockServer } from '../fixtures/mock-sites/rest-mock-server.js';
 import { setSitePolicy } from '../../src/core/policy.js';
@@ -17,6 +17,98 @@ vi.mock('../../src/core/policy.js', async (importOriginal) => {
     resolveAndValidate: vi.fn().mockResolvedValue({ ip: '127.0.0.1', allowed: true, category: 'unicast' }),
   };
 });
+
+// Mock browser modules to avoid requiring real Playwright installation
+const mockContext = {
+  pages: vi.fn().mockReturnValue([]),
+  newPage: vi.fn().mockResolvedValue({
+    goto: vi.fn().mockResolvedValue(undefined),
+    url: vi.fn().mockReturnValue('https://example.com'),
+    evaluate: vi.fn().mockResolvedValue('America/New_York'),
+    close: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    off: vi.fn(),
+  }),
+  on: vi.fn(),
+  off: vi.fn(),
+};
+
+const mockBrowserManager = {
+  launchBrowser: vi.fn().mockResolvedValue({}),
+  getOrCreateContext: vi.fn().mockResolvedValue(mockContext),
+  hasContext: vi.fn().mockReturnValue(true),
+  tryGetContext: vi.fn().mockReturnValue(mockContext),
+  closeContext: vi.fn().mockResolvedValue(undefined),
+  closeBrowser: vi.fn().mockResolvedValue(undefined),
+  closeAll: vi.fn().mockResolvedValue(undefined),
+  getHarPath: vi.fn().mockReturnValue(null),
+  getCapabilities: vi.fn().mockReturnValue(null),
+  getHandlerTimeoutMs: vi.fn().mockReturnValue(30000),
+  supportsHarRecording: vi.fn().mockReturnValue(true),
+  isCdpConnected: vi.fn().mockReturnValue(false),
+  setSuppressIdleTimeout: vi.fn(),
+  withLease: vi.fn().mockImplementation(async (fn: () => Promise<unknown>) => fn()),
+  touchActivity: vi.fn(),
+  releaseActivity: vi.fn(),
+  isIdle: vi.fn().mockReturnValue(true),
+  getBrowser: vi.fn().mockReturnValue(null),
+  importCookies: vi.fn().mockResolvedValue(3),
+  exportCookies: vi.fn().mockResolvedValue([]),
+  setAuthIntegration: vi.fn(),
+};
+
+vi.mock('../../src/browser/manager.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/browser/manager.js')>();
+  return {
+    ...actual,
+    BrowserManager: vi.fn().mockImplementation(() => mockBrowserManager),
+  };
+});
+
+vi.mock('../../src/browser/multi-session.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/browser/multi-session.js')>();
+  return {
+    ...actual,
+    MultiSessionManager: vi.fn().mockImplementation(() => ({
+      getOrCreate: vi.fn().mockReturnValue({ name: 'default', siteId: '', browserManager: mockBrowserManager, isCdp: false, createdAt: Date.now() }),
+      get: vi.fn().mockReturnValue({ name: 'default', siteId: '', browserManager: mockBrowserManager, isCdp: false, createdAt: Date.now() }),
+      getActive: vi.fn().mockReturnValue('default'),
+      close: vi.fn().mockResolvedValue(undefined),
+      closeAll: vi.fn().mockResolvedValue(undefined),
+      updateSiteId: vi.fn(),
+      updateContextOverrides: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+      setActive: vi.fn(),
+      setOnSessionChanged: vi.fn(),
+      setAuthIntegration: vi.fn(),
+      sweepIdleSessions: vi.fn().mockReturnValue(0),
+    })),
+  };
+});
+
+vi.mock('../../src/browser/auth-store.js', () => ({
+  BrowserAuthStore: vi.fn().mockImplementation(() => ({
+    getCredentials: vi.fn().mockReturnValue(null),
+    setCredentials: vi.fn(),
+    deleteCredentials: vi.fn(),
+  })),
+}));
+vi.mock('../../src/browser/auth-coordinator.js', () => ({
+  AuthCoordinator: vi.fn().mockImplementation(() => ({
+    coordinate: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+vi.mock('../../src/browser/agent-browser-backend.js', () => ({
+  AgentBrowserBackend: vi.fn().mockImplementation(() => ({
+    setAuthCoordinator: vi.fn(),
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
+vi.mock('../../src/browser/live-chrome-backend.js', () => ({
+  LiveChromeBackend: vi.fn().mockImplementation(() => ({
+    execute: vi.fn().mockResolvedValue({ success: true }),
+  })),
+}));
 
 // Mock the database module to avoid better-sqlite3 native module issues
 vi.mock('../../src/storage/database.js', () => {
@@ -44,8 +136,8 @@ vi.mock('../../src/storage/database.js', () => {
   };
 });
 
-function makeTestConfig(): OneAgentConfig {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneagent-e2e-full-'));
+function makeTestConfig(): SchruteConfig {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'schrute-e2e-full-'));
   return {
     dataDir: tmpDir,
     logLevel: 'silent',
@@ -84,7 +176,7 @@ function loadSkillFixture(name: string): SkillSpec {
 }
 
 describe('Full Loop E2E', () => {
-  let config: OneAgentConfig;
+  let config: SchruteConfig;
   let engine: Engine;
 
   beforeEach(() => {
@@ -143,6 +235,9 @@ describe('Full Loop E2E', () => {
     let status = engine.getStatus();
     expect(status.mode).toBe('recording');
     expect(status.currentRecording).not.toBeNull();
+
+    // Set up HAR path for stopRecording
+    mockBrowserManager.getHarPath.mockReturnValue('/tmp/test.har');
 
     const stopped = await engine.stopRecording();
     expect(stopped.name).toBe('get-users');

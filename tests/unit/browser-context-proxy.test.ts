@@ -13,12 +13,12 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-ctx-test',
+    dataDir: '/tmp/schrute-ctx-test',
     logLevel: 'silent',
     daemon: { port: 19420, autoStart: false },
   }),
-  getBrowserDataDir: () => '/tmp/oneagent-ctx-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-ctx-test/tmp',
+  getBrowserDataDir: () => '/tmp/schrute-ctx-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-ctx-test/tmp',
 }));
 
 vi.mock('node:fs', async () => {
@@ -38,7 +38,7 @@ vi.mock('../../src/browser/engine.js', () => ({
 
 import { BrowserManager, ContextOverrideMismatchError, stableStringify, safeProxyUrl } from '../../src/browser/manager.js';
 import type { ContextOverrides } from '../../src/browser/manager.js';
-import type { OneAgentConfig, ProxyConfig, GeoEmulationConfig } from '../../src/skill/types.js';
+import type { SchruteConfig, ProxyConfig, GeoEmulationConfig } from '../../src/skill/types.js';
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -65,9 +65,9 @@ function createMockBrowser() {
   };
 }
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-ctx-test',
+    dataDir: '/tmp/schrute-ctx-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -96,7 +96,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -358,8 +358,8 @@ describe('browser context proxy/geo overrides', () => {
     });
   });
 
-  describe('full lifecycle: create → mismatch → force-close → recreate', () => {
-    it('create context with overrides → attempt second with different overrides → ContextOverrideMismatchError → force-close → recreate with new overrides → success', async () => {
+  describe('full lifecycle: create -> mismatch -> force-close -> recreate', () => {
+    it('create context with overrides -> attempt second with different overrides -> ContextOverrideMismatchError -> force-close -> recreate with new overrides -> success', async () => {
       const manager = new BrowserManager(makeConfig());
       injectBrowser(manager);
 
@@ -371,7 +371,7 @@ describe('browser context proxy/geo overrides', () => {
       const proxyA = { server: 'http://proxy-a:8080' };
       await manager.getOrCreateContext('site-lifecycle', { proxy: proxyA });
 
-      // Step 2: Attempt with proxy B → should throw
+      // Step 2: Attempt with proxy B -> should throw
       const proxyB = { server: 'http://proxy-b:9090' };
       await expect(
         manager.getOrCreateContext('site-lifecycle', { proxy: proxyB }),
@@ -380,7 +380,7 @@ describe('browser context proxy/geo overrides', () => {
       // Step 3: Force-close (close context for that site)
       await manager.closeContext('site-lifecycle');
 
-      // Step 4: Recreate with proxy B → should succeed
+      // Step 4: Recreate with proxy B -> should succeed
       const ctx = await manager.getOrCreateContext('site-lifecycle', { proxy: proxyB });
       expect(ctx).toBe(mockCtx2);
       expect(mockBrowser.newContext).toHaveBeenCalledTimes(2);
@@ -400,6 +400,109 @@ describe('browser context proxy/geo overrides', () => {
           proxy: { server: 'http://proxy:8080', username: 'user', password: 'pass' },
         });
       }).not.toThrow();
+    });
+  });
+
+  // ─── Proxy Placeholder Detection ──────────────────────────────
+
+  describe('proxy placeholder detection', () => {
+    it('placeholder proxy (example.com) is silently ignored', async () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      const mockCtx = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx);
+
+      // example.com matches PLACEHOLDER_PROXY_RE -- should be silently dropped
+      await manager.getOrCreateContext('site-placeholder', {
+        proxy: { server: 'http://proxy.example.com:8080' },
+      });
+
+      const callArgs = mockBrowser.newContext.mock.calls[0][0];
+      expect(callArgs.proxy).toBeUndefined();
+    });
+
+    it('placeholder proxy (localhost:0) is silently ignored', async () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      const mockCtx = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx);
+
+      await manager.getOrCreateContext('site-localhost0', {
+        proxy: { server: 'http://localhost:0' },
+      });
+
+      const callArgs = mockBrowser.newContext.mock.calls[0][0];
+      expect(callArgs.proxy).toBeUndefined();
+    });
+
+    it('placeholder proxy (placeholder keyword) is silently ignored', async () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      const mockCtx = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx);
+
+      await manager.getOrCreateContext('site-ph', {
+        proxy: { server: 'http://placeholder:8080' },
+      });
+
+      const callArgs = mockBrowser.newContext.mock.calls[0][0];
+      expect(callArgs.proxy).toBeUndefined();
+    });
+
+    it('non-placeholder proxy is passed through', async () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      const mockCtx = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx);
+
+      await manager.getOrCreateContext('site-real', {
+        proxy: { server: 'socks5://real-proxy.corp.net:1080' },
+      });
+
+      const callArgs = mockBrowser.newContext.mock.calls[0][0];
+      expect(callArgs.proxy).toBeDefined();
+      expect(callArgs.proxy.server).toBe('socks5://real-proxy.corp.net:1080');
+    });
+  });
+
+  // ─── discardContext ────────────────────────────────────────────
+
+  describe('discardContext', () => {
+    it('removes context from manager and calls close()', async () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      const mockCtx = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx);
+
+      // Create a context
+      await manager.getOrCreateContext('site-discard');
+
+      // Discard it
+      manager.discardContext('site-discard');
+
+      // Context should have been closed
+      expect(mockCtx.close).toHaveBeenCalled();
+
+      // A new getOrCreateContext should create a fresh context
+      const mockCtx2 = createMockContext();
+      mockBrowser.newContext.mockResolvedValue(mockCtx2);
+
+      const newCtx = await manager.getOrCreateContext('site-discard');
+      expect(newCtx).toBe(mockCtx2);
+      expect(mockBrowser.newContext).toHaveBeenCalledTimes(2);
+    });
+
+    it('is a no-op for nonexistent site', () => {
+      const manager = new BrowserManager(makeConfig());
+      injectBrowser(manager);
+
+      // Should not throw
+      expect(() => manager.discardContext('nonexistent-site')).not.toThrow();
     });
   });
 });

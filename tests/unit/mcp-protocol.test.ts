@@ -41,7 +41,7 @@ vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
 // ─── Mock tool dispatch ──────────────────────────────────────────
 const mockBuildToolList = vi.fn().mockReturnValue([
   {
-    name: 'oneagent_explore',
+    name: 'schrute_explore',
     description: 'Start exploring a website',
     inputSchema: { type: 'object', properties: { url: { type: 'string' } } },
   },
@@ -171,9 +171,9 @@ describe('mcp-protocol', () => {
 
       expect(result.resources).toHaveLength(3);
       const uris = result.resources.map((r: any) => r.uri);
-      expect(uris).toContain('oneagent://status');
-      expect(uris).toContain('oneagent://skills');
-      expect(uris).toContain('oneagent://sites');
+      expect(uris).toContain('schrute://status');
+      expect(uris).toContain('schrute://skills');
+      expect(uris).toContain('schrute://sites');
 
       // All should have application/json MIME type
       for (const resource of result.resources) {
@@ -183,11 +183,11 @@ describe('mcp-protocol', () => {
       await handle.close();
     });
 
-    it('ReadResource(oneagent://status) returns engine status', async () => {
+    it('ReadResource(schrute://status) returns engine status', async () => {
       const handle = await startMcpServer(deps);
       const handler = getHandler('read_resource');
 
-      const result = await handler({ params: { uri: 'oneagent://status' } });
+      const result = await handler({ params: { uri: 'schrute://status' } });
 
       expect(result.contents).toHaveLength(1);
       expect(result.contents[0].mimeType).toBe('application/json');
@@ -198,7 +198,7 @@ describe('mcp-protocol', () => {
       await handle.close();
     });
 
-    it('ReadResource(oneagent://skills) returns redacted skill summaries', async () => {
+    it('ReadResource(schrute://skills) returns redacted skill summaries', async () => {
       const testSkill = makeTestSkill();
       (deps.skillRepo.getByStatus as any).mockImplementation((status: string) => {
         if (status === SkillStatus.ACTIVE) return [testSkill];
@@ -208,7 +208,7 @@ describe('mcp-protocol', () => {
       const handle = await startMcpServer(deps);
       const handler = getHandler('read_resource');
 
-      const result = await handler({ params: { uri: 'oneagent://skills' } });
+      const result = await handler({ params: { uri: 'schrute://skills' } });
 
       expect(result.contents).toHaveLength(1);
       const data = JSON.parse(result.contents[0].text);
@@ -235,7 +235,7 @@ describe('mcp-protocol', () => {
       await handle.close();
     });
 
-    it('ReadResource(oneagent://sites) returns site summaries', async () => {
+    it('ReadResource(schrute://sites) returns site summaries', async () => {
       const site: SiteManifest = {
         id: 'example.com',
         displayName: 'Example',
@@ -251,7 +251,7 @@ describe('mcp-protocol', () => {
       const handle = await startMcpServer(deps);
       const handler = getHandler('read_resource');
 
-      const result = await handler({ params: { uri: 'oneagent://sites' } });
+      const result = await handler({ params: { uri: 'schrute://sites' } });
 
       const data = JSON.parse(result.contents[0].text);
       expect(data.total).toBe(1);
@@ -267,7 +267,7 @@ describe('mcp-protocol', () => {
       const handle = await startMcpServer(deps);
       const handler = getHandler('read_resource');
 
-      const result = await handler({ params: { uri: 'oneagent://unknown' } });
+      const result = await handler({ params: { uri: 'schrute://unknown' } });
 
       expect(result.contents).toHaveLength(1);
       expect(result.contents[0].mimeType).toBe('text/plain');
@@ -284,7 +284,7 @@ describe('mcp-protocol', () => {
       const handle = await startMcpServer(deps);
       const handler = getHandler('read_resource');
 
-      const result = await handler({ params: { uri: 'oneagent://status' } });
+      const result = await handler({ params: { uri: 'schrute://status' } });
 
       expect(result.contents).toHaveLength(1);
       expect(result.contents[0].mimeType).toBe('text/plain');
@@ -323,7 +323,7 @@ describe('mcp-protocol', () => {
       expect(result.messages).toHaveLength(1);
       expect(result.messages[0].role).toBe('user');
       expect(result.messages[0].content.text).toContain('https://example.com');
-      expect(result.messages[0].content.text).toContain('oneagent_explore');
+      expect(result.messages[0].content.text).toContain('schrute_explore');
 
       await handle.close();
     });
@@ -342,7 +342,7 @@ describe('mcp-protocol', () => {
       expect(result.messages).toHaveLength(1);
       expect(result.messages[0].content.text).toContain('https://example.com');
       expect(result.messages[0].content.text).toContain('search');
-      expect(result.messages[0].content.text).toContain('oneagent_record');
+      expect(result.messages[0].content.text).toContain('schrute_record');
 
       await handle.close();
     });

@@ -12,14 +12,14 @@ vi.mock('../../src/core/logger.js', () => ({
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-browser-test',
+    dataDir: '/tmp/schrute-browser-test',
     logLevel: 'silent',
     payloadLimits: {
       harCaptureMaxBodyBytes: 50 * 1024 * 1024,
     },
   }),
-  getBrowserDataDir: () => '/tmp/oneagent-browser-test/browser-data',
-  getTmpDir: () => '/tmp/oneagent-browser-test/tmp',
+  getBrowserDataDir: () => '/tmp/schrute-browser-test/browser-data',
+  getTmpDir: () => '/tmp/schrute-browser-test/tmp',
 }));
 
 // ─── Mock Engine Factory ────────────────────────────────────────
@@ -71,17 +71,17 @@ vi.mock('node:fs', async () => {
 
 import { BrowserManager } from '../../src/browser/manager.js';
 import { launchBrowserEngine } from '../../src/browser/engine.js';
-import type { OneAgentConfig } from '../../src/skill/types.js';
+import type { SchruteConfig } from '../../src/skill/types.js';
 
-function makeConfig(): OneAgentConfig {
+function makeConfig(): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-browser-test',
+    dataDir: '/tmp/schrute-browser-test',
     logLevel: 'silent',
     payloadLimits: {
       harCaptureMaxBodyBytes: 50 * 1024 * 1024,
     },
     daemon: { port: 19420, autoStart: false },
-  } as unknown as OneAgentConfig;
+  } as unknown as SchruteConfig;
 }
 
 describe('BrowserManager', () => {
@@ -167,7 +167,7 @@ describe('BrowserManager', () => {
         ...makeConfig(),
         browser: { engine: 'camoufox' as const },
       };
-      const mgr = new BrowserManager(config as unknown as OneAgentConfig);
+      const mgr = new BrowserManager(config as unknown as SchruteConfig);
       await mgr.launchBrowser();
       expect(launchBrowserEngine).toHaveBeenCalledWith('camoufox', { headless: true });
     });

@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { AuditLog } from '../../src/replay/audit-log.js';
-import type { OneAgentConfig, PolicyDecision, AuditEntry } from '../../src/skill/types.js';
+import type { SchruteConfig, PolicyDecision, AuditEntry } from '../../src/skill/types.js';
 
-function makeConfig(dataDir: string): OneAgentConfig {
+function makeConfig(dataDir: string): SchruteConfig {
   return {
     dataDir,
     logLevel: 'silent',
@@ -35,7 +35,7 @@ function makeConfig(dataDir: string): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makePolicyDecision(): PolicyDecision {
@@ -67,7 +67,7 @@ function makeEntryData(skillId: string, overrides: Record<string, unknown> = {})
 let tempDir: string;
 
 beforeEach(() => {
-  tempDir = mkdtempSync(join(tmpdir(), 'oneagent-audit-test-'));
+  tempDir = mkdtempSync(join(tmpdir(), 'schrute-audit-test-'));
 });
 
 afterEach(() => {

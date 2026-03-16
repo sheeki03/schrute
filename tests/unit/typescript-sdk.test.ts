@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OneAgentClient, OneAgentError } from '../../src/client/typescript/index.js';
+import { SchruteClient, SchruteError } from '../../src/client/typescript/index.js';
 
 // ─── Mock fetch ─────────────────────────────────────────────────────
 
@@ -24,12 +24,12 @@ function mockResponse(data: unknown, status = 200): Response {
 
 // ─── Tests ──────────────────────────────────────────────────────────
 
-describe('OneAgentClient', () => {
-  const client = new OneAgentClient({ baseUrl: 'http://localhost:3000' });
+describe('SchruteClient', () => {
+  const client = new SchruteClient({ baseUrl: 'http://localhost:3000' });
 
   describe('constructor', () => {
     it('strips trailing slash from baseUrl', () => {
-      const c = new OneAgentClient({ baseUrl: 'http://localhost:3000/' });
+      const c = new SchruteClient({ baseUrl: 'http://localhost:3000/' });
       mockFetch.mockResolvedValueOnce(mockResponse({ status: 'ok' }));
       c.getHealth();
       expect(mockFetch).toHaveBeenCalledWith(
@@ -39,7 +39,7 @@ describe('OneAgentClient', () => {
     });
 
     it('adds Authorization header when apiKey is provided', () => {
-      const c = new OneAgentClient({
+      const c = new SchruteClient({
         baseUrl: 'http://localhost:3000',
         apiKey: 'test-key',
       });
@@ -85,7 +85,7 @@ describe('OneAgentClient', () => {
       );
     });
 
-    it('throws OneAgentError on 404', async () => {
+    it('throws SchruteError on 404', async () => {
       mockFetch.mockResolvedValueOnce(
         mockResponse({ error: "Site 'unknown' not found" }, 404),
       );
@@ -94,9 +94,9 @@ describe('OneAgentClient', () => {
         await client.getSite('unknown');
         expect.fail('Should have thrown');
       } catch (err) {
-        expect(err).toBeInstanceOf(OneAgentError);
-        expect((err as OneAgentError).statusCode).toBe(404);
-        expect((err as OneAgentError).message).toBe("Site 'unknown' not found");
+        expect(err).toBeInstanceOf(SchruteError);
+        expect((err as SchruteError).statusCode).toBe(404);
+        expect((err as SchruteError).message).toBe("Site 'unknown' not found");
       }
     });
   });
@@ -244,7 +244,7 @@ describe('OneAgentClient', () => {
 
   describe('getOpenApiSpec', () => {
     it('returns OpenAPI spec', async () => {
-      const spec = { openapi: '3.1.0', info: { title: 'OneAgent API' } };
+      const spec = { openapi: '3.1.0', info: { title: 'Schrute API' } };
       mockFetch.mockResolvedValueOnce(mockResponse(spec));
 
       const result = await client.getOpenApiSpec();
@@ -253,7 +253,7 @@ describe('OneAgentClient', () => {
   });
 
   describe('error handling', () => {
-    it('throws OneAgentError with status code and body', async () => {
+    it('throws SchruteError with status code and body', async () => {
       mockFetch.mockResolvedValueOnce(
         mockResponse({ error: 'Server error' }, 500),
       );
@@ -262,8 +262,8 @@ describe('OneAgentClient', () => {
         await client.getHealth();
         expect.fail('Should have thrown');
       } catch (err) {
-        expect(err).toBeInstanceOf(OneAgentError);
-        const oaErr = err as OneAgentError;
+        expect(err).toBeInstanceOf(SchruteError);
+        const oaErr = err as SchruteError;
         expect(oaErr.statusCode).toBe(500);
         expect(oaErr.message).toBe('Server error');
         expect(oaErr.body).toEqual({ error: 'Server error' });
@@ -283,8 +283,8 @@ describe('OneAgentClient', () => {
         await client.getHealth();
         expect.fail('Should have thrown');
       } catch (err) {
-        expect(err).toBeInstanceOf(OneAgentError);
-        expect((err as OneAgentError).statusCode).toBe(502);
+        expect(err).toBeInstanceOf(SchruteError);
+        expect((err as SchruteError).statusCode).toBe(502);
       }
     });
   });

@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { pruneSkills, getShortlist } from '../../src/skill/pruner.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 import { SkillStatus } from '../../src/skill/types.js';
 
-function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
+function makeConfig(overrides?: Partial<SchruteConfig>): SchruteConfig {
   return {
-    dataDir: '/tmp/test-oneagent',
+    dataDir: '/tmp/test-schrute',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -34,7 +34,7 @@ function makeConfig(overrides?: Partial<OneAgentConfig>): OneAgentConfig {
     maxToolsPerSite: 20,
     toolShortlistK: 10,
     ...overrides,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 function makeSkill(overrides: Partial<SkillSpec> = {}): SkillSpec {
@@ -97,7 +97,7 @@ describe('pruner', () => {
     });
 
     it('caps visible skills per site', () => {
-      const smallCapConfig = makeConfig({ maxToolsPerSite: 3 } as Partial<OneAgentConfig>);
+      const smallCapConfig = makeConfig({ maxToolsPerSite: 3 } as Partial<SchruteConfig>);
       const skills = Array.from({ length: 5 }, (_, i) =>
         makeSkill({
           id: `skill-${i}`,
@@ -125,7 +125,7 @@ describe('pruner', () => {
 
   describe('getShortlist', () => {
     it('returns top K skills', () => {
-      const smallK = makeConfig({ toolShortlistK: 2 } as Partial<OneAgentConfig>);
+      const smallK = makeConfig({ toolShortlistK: 2 } as Partial<SchruteConfig>);
       const skills = Array.from({ length: 5 }, (_, i) =>
         makeSkill({
           id: `skill-${i}`,
