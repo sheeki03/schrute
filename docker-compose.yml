@@ -1,16 +1,16 @@
 version: '3.8'
 services:
-  oneagent:
+  schrute:
     build: .
     ports:
       - "3000:3000"
       - "3001:3001"
     environment:
-      - ONEAGENT_AUTH_TOKEN=${ONEAGENT_AUTH_TOKEN:?ONEAGENT_AUTH_TOKEN is required}
-      - ONEAGENT_NETWORK=true
-      - ONEAGENT_HTTP_TRANSPORT=true
+      - SCHRUTE_AUTH_TOKEN=${SCHRUTE_AUTH_TOKEN:?SCHRUTE_AUTH_TOKEN is required}
+      - SCHRUTE_NETWORK=true
+      - SCHRUTE_HTTP_TRANSPORT=true
     volumes:
-      - oneagent-data:/data
+      - schrute-data:/data
 
 volumes:
-  oneagent-data:
+  schrute-data:

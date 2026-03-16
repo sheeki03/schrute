@@ -2,11 +2,11 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in OneAgent, please report it responsibly.
+If you discover a security vulnerability in Schrute, please report it responsibly.
 
 ### How to Report
 
-1. **GitHub Security Advisories** (preferred): Use [GitHub Security Advisories](https://github.com/user/oneagent/security/advisories/new) to privately report the vulnerability.
+1. **GitHub Security Advisories** (preferred): Use [GitHub Security Advisories](https://github.com/user/schrute/security/advisories/new) to privately report the vulnerability.
 
 2. **Email**: Send details to the repository maintainers via the email listed in the GitHub profile.
 
@@ -37,14 +37,14 @@ If you discover a security vulnerability in OneAgent, please report it responsib
 
 ### Out of Scope
 
-- Denial of service (OneAgent is a local tool)
+- Denial of service (Schrute is a local tool)
 - Issues requiring physical access
 - Social engineering
 - Issues in dependencies (report upstream)
 
 ## Security Architecture
 
-OneAgent's security model is documented in `CLAUDE.md`. Key protections:
+Schrute's security model is documented in `CLAUDE.md`. Key protections:
 
 - **9 policy gates** on every skill execution
 - **Fail-closed auth** for network mode (HTTP transport)

@@ -1,4 +1,4 @@
-# OneAgent — Claude Code Project Instructions
+# Schrute — Claude Code Project Instructions
 
 Read `AGENTS.md` for full project documentation (architecture, build commands, testing patterns, MCP tools, security model).
 
@@ -9,7 +9,7 @@ This project is also a Claude Code plugin. These files are only active when load
 ```
 .claude-plugin/plugin.json  — Plugin manifest
 .mcp.json                   — MCP server registration
-commands/                   — Slash commands (/oneagent:explore, etc.)
+commands/                   — Slash commands (/schrute:explore, etc.)
 skills/                     — Knowledge skills
 agents/                     — Autonomous sub-agents
 hooks/                      — Event-driven hooks

@@ -1,6 +1,6 @@
-# Contributing to OneAgent
+# Contributing to Schrute
 
-Thank you for your interest in contributing to OneAgent!
+Thank you for your interest in contributing to Schrute!
 
 ## Getting Started
 
@@ -12,8 +12,8 @@ Thank you for your interest in contributing to OneAgent!
 ### Setup
 
 ```bash
-git clone https://github.com/user/oneagent.git
-cd oneagent
+git clone https://github.com/user/schrute.git
+cd schrute
 npm install
 npx playwright install chromium
 npm run build

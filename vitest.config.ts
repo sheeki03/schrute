@@ -19,7 +19,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@oneagent': path.resolve(__dirname, 'src'),
+      '@schrute': path.resolve(__dirname, 'src'),
     },
   },
 });

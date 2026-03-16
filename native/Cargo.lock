@@ -328,23 +328,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
-name = "oneagent-native"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "idna",
- "ipnet",
- "napi",
- "napi-build",
- "napi-derive",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "url",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -405,6 +388,23 @@ name = "regex-syntax"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
+
+[[package]]
+name = "schrute-native"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "idna",
+ "ipnet",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
 
 [[package]]
 name = "semver"

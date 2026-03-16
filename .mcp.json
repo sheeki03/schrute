@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "node",
       "args": ["./dist/index.js", "serve"]
     }

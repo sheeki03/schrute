@@ -2,7 +2,7 @@
 
 ## Tier Architecture
 
-OneAgent skills execute through a 4-tier cascading system. Each tier represents a different execution strategy with varying latency, reliability, and capability tradeoffs.
+Schrute skills execute through a 4-tier cascading system. Each tier represents a different execution strategy with varying latency, reliability, and capability tradeoffs.
 
 ### Tier 1: Direct HTTP Fetch
 - **Latency**: 1-50ms

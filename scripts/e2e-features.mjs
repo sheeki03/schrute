@@ -20,8 +20,8 @@ const root = path.resolve(dir, '..');
 // Use a temp data dir
 const dataDir = path.join(root, '.e2e-tmp');
 fs.mkdirSync(dataDir, { recursive: true });
-process.env.ONEAGENT_DATA_DIR = dataDir;
-process.env.ONEAGENT_LOG_LEVEL = 'silent';
+process.env.SCHRUTE_DATA_DIR = dataDir;
+process.env.SCHRUTE_LOG_LEVEL = 'silent';
 
 let passed = 0;
 let failed = 0;

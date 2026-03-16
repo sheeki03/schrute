@@ -1,14 +1,14 @@
-# OneAgent — Universal Self-Learning Browser Agent
+# Schrute — Universal Self-Learning Browser Agent
 
 ## What This Is
 
-OneAgent is an MCP server that learns API behaviors by observing browser interactions and generates replayable "skills." It records HAR traffic during browser sessions, extracts API patterns, and replays them with progressive tier optimization (full browser → direct HTTP).
+Schrute is an MCP server that learns API behaviors by observing browser interactions and generates replayable "skills." It records HAR traffic during browser sessions, extracts API patterns, and replays them with progressive tier optimization (full browser → direct HTTP).
 
 ## Prerequisites
 
 - **Node.js >= 22** (required)
 - **Playwright Chromium**: `npx playwright install chromium`
-- Data directories (`~/.oneagent/`) are auto-created on first run
+- Data directories (`~/.schrute/`) are auto-created on first run
 
 ## Architecture
 
@@ -57,7 +57,7 @@ npx vitest run tests/unit/engine.test.ts  # Run specific test
 
 ### Database
 
-SQLite via better-sqlite3. Schema in `src/storage/database.ts`. Migrations run automatically. Data directory: `~/.oneagent/data/`.
+SQLite via better-sqlite3. Schema in `src/storage/database.ts`. Migrations run automatically. Data directory: `~/.schrute/data/`.
 
 ### Testing Patterns
 
@@ -67,7 +67,7 @@ SQLite via better-sqlite3. Schema in `src/storage/database.ts`. Migrations run a
 
 ## MCP Tools
 
-**Meta**: `oneagent_explore`, `oneagent_record`, `oneagent_stop`, `oneagent_sites`, `oneagent_skills`, `oneagent_status`, `oneagent_dry_run`, `oneagent_confirm`
+**Meta**: `schrute_explore`, `schrute_record`, `schrute_stop`, `schrute_sites`, `schrute_skills`, `schrute_status`, `schrute_dry_run`, `schrute_confirm`
 
 **Browser** (19 allowed): `browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_drag`, `browser_select_option`, `browser_file_upload`, `browser_handle_dialog`, `browser_tabs`, `browser_take_screenshot`, `browser_wait_for`, `browser_close`, `browser_resize`, `browser_console_messages`, `browser_network_requests`, `browser_navigate_back`
 
@@ -77,9 +77,9 @@ SQLite via better-sqlite3. Schema in `src/storage/database.ts`. Migrations run a
 
 | URI | Description |
 |-----|-------------|
-| `oneagent://status` | Engine mode, uptime, active session |
-| `oneagent://skills` | Redacted skill catalog (no credentials) |
-| `oneagent://sites` | Known sites with mastery level |
+| `schrute://status` | Engine mode, uptime, active session |
+| `schrute://skills` | Redacted skill catalog (no credentials) |
+| `schrute://sites` | Known sites with mastery level |
 
 ## MCP Prompts
 
@@ -90,18 +90,18 @@ SQLite via better-sqlite3. Schema in `src/storage/database.ts`. Migrations run a
 
 ## Configuration
 
-Config file: `~/.oneagent/config.json`
+Config file: `~/.schrute/config.json`
 
 Environment variable overrides (take precedence over config file):
 
 | Variable | Config Key | Example |
 |----------|-----------|---------|
-| `ONEAGENT_DATA_DIR` | `dataDir` | `/custom/data` |
-| `ONEAGENT_LOG_LEVEL` | `logLevel` | `debug` |
-| `ONEAGENT_AUTH_TOKEN` | `server.authToken` | `secret-token` |
-| `ONEAGENT_NETWORK` | `server.network` | `true` or `false` |
-| `ONEAGENT_HTTP_PORT` | `server.httpPort` | `8080` |
-| `ONEAGENT_HTTP_TRANSPORT` | `features.httpTransport` | `true` or `false` |
+| `SCHRUTE_DATA_DIR` | `dataDir` | `/custom/data` |
+| `SCHRUTE_LOG_LEVEL` | `logLevel` | `debug` |
+| `SCHRUTE_AUTH_TOKEN` | `server.authToken` | `secret-token` |
+| `SCHRUTE_NETWORK` | `server.network` | `true` or `false` |
+| `SCHRUTE_HTTP_PORT` | `server.httpPort` | `8080` |
+| `SCHRUTE_HTTP_TRANSPORT` | `features.httpTransport` | `true` or `false` |
 
 ## Dual Nature
 
@@ -109,6 +109,6 @@ This project serves two roles:
 
 1. **MCP Server** (universal) — The core MCP server (`src/server/`) works with any MCP client: Claude Desktop, Cursor, Windsurf, Cline, Continue, or any other client that supports the Model Context Protocol. It exposes tools, resources, and prompts via stdio or HTTP transport.
 
-2. **Claude Code Plugin** (Claude-specific) — The plugin layer (`.claude-plugin/`, `commands/`, `skills/`, `agents/`, `hooks/`, `prompts/`) adds Claude Code-specific UX: slash commands, autonomous agents, knowledge skills, and event-driven hooks. These are only active when OneAgent is loaded as a Claude Code plugin.
+2. **Claude Code Plugin** (Claude-specific) — The plugin layer (`.claude-plugin/`, `commands/`, `skills/`, `agents/`, `hooks/`, `prompts/`) adds Claude Code-specific UX: slash commands, autonomous agents, knowledge skills, and event-driven hooks. These are only active when Schrute is loaded as a Claude Code plugin.
 
-The MCP server layer has zero dependency on the plugin layer. You can use OneAgent with any MCP client without the plugin files.
+The MCP server layer has zero dependency on the plugin layer. You can use Schrute with any MCP client without the plugin files.

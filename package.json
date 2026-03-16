@@ -1,22 +1,27 @@
 {
-  "name": "oneagent",
+  "name": "schrute",
   "version": "0.1.0",
   "description": "Universal Self-Learning Browser Agent — UI automation for the first run, API-level replay for the 100th run",
   "type": "module",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
   "exports": {
-    ".": { "import": "./dist/lib.js", "types": "./dist/lib.d.ts" },
-    "./cli": { "import": "./dist/index.js" }
+    ".": {
+      "import": "./dist/lib.js",
+      "types": "./dist/lib.d.ts"
+    },
+    "./cli": {
+      "import": "./dist/index.js"
+    }
   },
   "bin": {
-    "oneagent": "dist/index.js"
+    "schrute": "dist/index.js"
   },
   "scripts": {
     "prebuild": "node scripts/sync-version.js",
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "node scripts/sync-version.js && npm run build",
-    "build:native": "cd native && cargo build --release && cp target/release/liboneagent_native.dylib index.node 2>/dev/null; cp target/release/oneagent_native.dll index.node 2>/dev/null; cp target/release/liboneagent_native.so index.node 2>/dev/null; echo 'Native build complete'",
+    "build:native": "cd native && cargo build --release && cp target/release/libschrute_native.dylib index.node 2>/dev/null; cp target/release/schrute_native.dll index.node 2>/dev/null; cp target/release/libschrute_native.so index.node 2>/dev/null; echo 'Native build complete'",
     "dev": "tsc -w -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -37,8 +42,10 @@
     "commander": "^13.1.0",
     "fastify": "^5.2.1",
     "ipaddr.js": "^2.2.0",
+    "js-yaml": "^4.1.1",
     "keytar": "^7.9.0",
     "patchright": "^1.57.0",
+    "pdf-parse": "^2.4.5",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "playwright": "^1.58.2",
@@ -52,10 +59,12 @@
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.13.4",
+    "@types/pdf-parse": "^1.1.5",
     "@types/pngjs": "^6.0.0",
-    "typescript": "^5.7.3",
     "@yao-pkg/pkg": "^6.0.0",
+    "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   },
   "engines": {
@@ -64,7 +73,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/oneagent"
+    "url": "https://github.com/user/schrute"
   },
   "keywords": [
     "mcp",
@@ -73,7 +82,7 @@
     "api-replay",
     "playwright",
     "skill-learning",
-    "oneagent"
+    "schrute"
   ],
   "files": [
     "dist/",

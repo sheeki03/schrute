@@ -1,0 +1,29 @@
+{
+  "id": "schrute",
+  "version": "0.1.0",
+  "name": "Schrute Browser Agent",
+  "description": "Self-learning browser agent — record browser actions, learn API patterns, replay as optimized MCP tools",
+  "documentationURL": "https://github.com/user/schrute",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "description": "Schrute version to install (npm version or 'latest')"
+    },
+    "installBrowser": {
+      "type": "boolean",
+      "default": true,
+      "description": "Install Playwright Chromium for browser automation"
+    },
+    "browserEngine": {
+      "type": "string",
+      "enum": ["playwright", "patchright", "camoufox"],
+      "default": "playwright",
+      "description": "Browser engine to install"
+    }
+  },
+  "containerEnv": {
+    "SCHRUTE_DATA_DIR": "/home/vscode/.schrute"
+  },
+  "installsAfter": ["ghcr.io/devcontainers/features/node:1"]
+}

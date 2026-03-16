@@ -1,21 +1,40 @@
-name: Release Binary
+name: Release
 
 on:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  # ─── npm publish ─────────────────────────────────────────────────
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ─── Standalone binaries → GitHub Releases ───────────────────────
+  binary:
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: node22-linux-x64
-            artifact: oneagent-linux-x64
+            artifact: schrute-linux-x64
           - os: macos-latest
             target: node22-macos-arm64
-            artifact: oneagent-macos-arm64
+            artifact: schrute-macos-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -26,10 +45,72 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run build
-      - run: npx pkg dist/index.js --target ${{ matrix.target }} --output build/bin/oneagent --config pkg.config.json
+      - name: Build standalone binary
+        env:
+          PKG_TARGET: ${{ matrix.target }}
+        run: npx @yao-pkg/pkg dist/index.js --target "$PKG_TARGET" --output build/bin/schrute --config pkg.config.json
       - run: bash scripts/package-binary.sh
-      - run: tar -czf ${{ matrix.artifact }}.tar.gz -C build/bin .
+      - name: Create tarball
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact }}
+        run: tar -czf "${ARTIFACT_NAME}.tar.gz" -C build/bin .
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
+
+  # ─── Create GitHub Release with binaries ─────────────────────────
+  release:
+    needs: [npm, binary]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Python SDK → PyPI via uv ───────────────────────────────────
+  pypi:
+    needs: [npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Build and publish Python SDK
+        working-directory: src/client/python
+        run: |
+          uv build
+          uv publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+  # ─── Homebrew tap update ─────────────────────────────────────────
+  homebrew:
+    needs: [npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: user/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Update formula
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          SHA256=$(curl -sL "https://registry.npmjs.org/schrute/-/schrute-${VERSION}.tgz" | shasum -a 256 | cut -d' ' -f1)
+          sed -i "s|url \".*\"|url \"https://registry.npmjs.org/schrute/-/schrute-${VERSION}.tgz\"|" Formula/schrute.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/schrute.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/schrute.rb
+          git commit -m "schrute ${VERSION}"
+          git push

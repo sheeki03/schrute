@@ -1,10 +1,10 @@
-# OneAgent
+# Schrute
 
 Universal Self-Learning Browser Agent — record browser interactions, learn API patterns, and replay them as optimized MCP tools.
 
 ## What It Does
 
-1. **Record** — Open a browser, perform actions, and OneAgent captures the underlying API calls
+1. **Record** — Open a browser, perform actions, and Schrute captures the underlying API calls
 2. **Learn** — The capture pipeline extracts parameters, detects auth patterns, and generates replayable skills
 3. **Replay** — Skills execute through a 4-tier optimization system, starting at browser-proxied and promoting to direct HTTP
 
@@ -12,11 +12,11 @@ Universal Self-Learning Browser Agent — record browser interactions, learn API
 
 ```bash
 # Run directly with npx
-npx oneagent serve
+npx schrute serve
 
 # Or install globally
-npm install -g oneagent
-oneagent serve
+npm install -g schrute
+schrute serve
 ```
 
 ## Installation
@@ -24,21 +24,21 @@ oneagent serve
 ### npm (recommended)
 
 ```bash
-npm install -g oneagent
-oneagent setup  # Installs Playwright Chromium
+npm install -g schrute
+schrute setup  # Installs Playwright Chromium
 ```
 
 ### npx (no install)
 
 ```bash
-npx oneagent serve
+npx schrute serve
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/user/oneagent.git
-cd oneagent
+git clone https://github.com/user/schrute.git
+cd schrute
 npm install
 npx playwright install chromium
 npm run build
@@ -47,7 +47,7 @@ node dist/index.js serve
 
 ## Multi-Client Setup
 
-OneAgent works with any MCP client. Configure your preferred client:
+Schrute works with any MCP client. Configure your preferred client:
 
 ### Claude Code
 
@@ -56,9 +56,9 @@ Add to your project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "npx",
-      "args": ["-y", "oneagent", "serve"]
+      "args": ["-y", "schrute", "serve"]
     }
   }
 }
@@ -73,9 +73,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 ```json
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "npx",
-      "args": ["-y", "oneagent", "serve"]
+      "args": ["-y", "schrute", "serve"]
     }
   }
 }
@@ -88,9 +88,9 @@ Add to `.cursor/mcp.json` in your project:
 ```json
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "npx",
-      "args": ["-y", "oneagent", "serve"]
+      "args": ["-y", "schrute", "serve"]
     }
   }
 }
@@ -103,9 +103,9 @@ Add to `.codeium/windsurf/mcp_config.json`:
 ```json
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "npx",
-      "args": ["-y", "oneagent", "serve"]
+      "args": ["-y", "schrute", "serve"]
     }
   }
 }
@@ -118,9 +118,9 @@ Add to `cline_mcp_settings.json`:
 ```json
 {
   "mcpServers": {
-    "oneagent": {
+    "schrute": {
       "command": "npx",
-      "args": ["-y", "oneagent", "serve"]
+      "args": ["-y", "schrute", "serve"]
     }
   }
 }
@@ -128,7 +128,7 @@ Add to `cline_mcp_settings.json`:
 
 ### Generic (any MCP client)
 
-Use stdio transport with the command: `npx -y oneagent serve`
+Use stdio transport with the command: `npx -y schrute serve`
 
 ## MCP Tools
 
@@ -136,14 +136,14 @@ Use stdio transport with the command: `npx -y oneagent serve`
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `oneagent_explore` | Start a browser session on a URL | `url` (required) |
-| `oneagent_record` | Begin recording an action | `name` (required), `inputs` (optional) |
-| `oneagent_stop` | Stop recording and process captures | — |
-| `oneagent_skills` | List learned skills | `site` (optional filter) |
-| `oneagent_sites` | List known sites | — |
-| `oneagent_status` | Engine status and session info | — |
-| `oneagent_dry_run` | Preview a skill execution | `skill_id` (required), `params` (optional) |
-| `oneagent_confirm` | Approve a pending skill confirmation | `token` (required), `approve` (boolean) |
+| `schrute_explore` | Start a browser session on a URL | `url` (required) |
+| `schrute_record` | Begin recording an action | `name` (required), `inputs` (optional) |
+| `schrute_stop` | Stop recording and process captures | — |
+| `schrute_skills` | List learned skills | `site` (optional filter) |
+| `schrute_sites` | List known sites | — |
+| `schrute_status` | Engine status and session info | — |
+| `schrute_dry_run` | Preview a skill execution | `skill_id` (required), `params` (optional) |
+| `schrute_confirm` | Approve a pending skill confirmation | `token` (required), `approve` (boolean) |
 
 ### Browser Tools (19 available)
 
@@ -153,15 +153,15 @@ Use stdio transport with the command: `npx -y oneagent serve`
 
 ### Dynamic Skill Tools
 
-As you record actions, OneAgent generates new MCP tools automatically. These appear with names like `oneagent_skill_<site>_<action>` and can be called with their discovered parameters.
+As you record actions, Schrute generates new MCP tools automatically. These appear with names like `schrute_skill_<site>_<action>` and can be called with their discovered parameters.
 
 ## MCP Resources
 
 | URI | Description |
 |-----|-------------|
-| `oneagent://status` | Engine mode, uptime, active session info |
-| `oneagent://skills` | Skill catalog with redacted summaries |
-| `oneagent://sites` | Known sites with visit history |
+| `schrute://status` | Engine mode, uptime, active session info |
+| `schrute://skills` | Skill catalog with redacted summaries |
+| `schrute://sites` | Known sites with visit history |
 
 ## MCP Prompts
 
@@ -176,20 +176,20 @@ As you record actions, OneAgent generates new MCP tools automatically. These app
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ONEAGENT_DATA_DIR` | Data directory path | `~/.oneagent` |
-| `ONEAGENT_LOG_LEVEL` | Log level | `info` |
-| `ONEAGENT_AUTH_TOKEN` | Auth token for HTTP transport | — |
-| `ONEAGENT_NETWORK` | Enable network mode (`true`/`false`) | `false` |
-| `ONEAGENT_HTTP_TRANSPORT` | Enable HTTP transport (`true`/`false`) | `false` |
-| `ONEAGENT_HTTP_PORT` | HTTP server port | `3000` |
+| `SCHRUTE_DATA_DIR` | Data directory path | `~/.schrute` |
+| `SCHRUTE_LOG_LEVEL` | Log level | `info` |
+| `SCHRUTE_AUTH_TOKEN` | Auth token for HTTP transport | — |
+| `SCHRUTE_NETWORK` | Enable network mode (`true`/`false`) | `false` |
+| `SCHRUTE_HTTP_TRANSPORT` | Enable HTTP transport (`true`/`false`) | `false` |
+| `SCHRUTE_HTTP_PORT` | HTTP server port | `3000` |
 
 ### Config File
 
-Settings persist in `~/.oneagent/config.json`. Manage with:
+Settings persist in `~/.schrute/config.json`. Manage with:
 
 ```bash
-oneagent config set server.authToken my-secret
-oneagent config get server
+schrute config set server.authToken my-secret
+schrute config get server
 ```
 
 ### Precedence
@@ -198,7 +198,7 @@ CLI flags > Environment variables > Config file > Defaults
 
 ## Security Model
 
-OneAgent enforces 9 security gates on every skill execution:
+Schrute enforces 9 security gates on every skill execution:
 
 1. **Capability check** — Is the tier's capability enabled?
 2. **Domain allowlist** — Is the target domain permitted?
@@ -220,11 +220,11 @@ When used as a Claude Code plugin, additional features are available:
 
 | Command | Description |
 |---------|-------------|
-| `/oneagent:explore <url>` | Start browser exploration |
-| `/oneagent:record` | Record an action |
-| `/oneagent:skills` | List skills |
-| `/oneagent:doctor` | Run health diagnostics |
-| `/oneagent:status` | Check engine status |
+| `/schrute:explore <url>` | Start browser exploration |
+| `/schrute:record` | Record an action |
+| `/schrute:skills` | List skills |
+| `/schrute:doctor` | Run health diagnostics |
+| `/schrute:status` | Check engine status |
 
 ### Agents
 
@@ -234,7 +234,7 @@ When used as a Claude Code plugin, additional features are available:
 
 ### Skills
 
-- **oneagent-usage** — Comprehensive usage guide
+- **schrute-usage** — Comprehensive usage guide
 - **browser-tool-selection** — Decision guide for choosing browser approach
 
 ## Development

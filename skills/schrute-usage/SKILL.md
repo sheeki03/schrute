@@ -1,39 +1,39 @@
 ---
-name: oneagent-usage
-description: Comprehensive guide to OneAgent's self-learning browser agent workflow, covering skill recording, execution tiers, tier promotion, confirmation system, and security model. Use when user asks "how does oneagent work", "record a skill", "oneagent tiers", "skill execution", "oneagent workflow", "how do I use oneagent", or needs help understanding the explore-record-replay cycle.
+name: schrute-usage
+description: Comprehensive guide to Schrute's self-learning browser agent workflow, covering skill recording, execution tiers, tier promotion, confirmation system, and security model. Use when user asks "how does schrute work", "record a skill", "schrute tiers", "skill execution", "schrute workflow", "how do I use schrute", or needs help understanding the explore-record-replay cycle.
 user-invocable: true
 argument-hint: "[topic]"
-allowed-tools: ["mcp__oneagent__oneagent_status", "mcp__oneagent__oneagent_skills", "mcp__oneagent__oneagent_sites"]
+allowed-tools: ["mcp__schrute__schrute_status", "mcp__schrute__schrute_skills", "mcp__schrute__schrute_sites"]
 metadata:
-  author: OneAgent Contributors
+  author: Schrute Contributors
   version: 0.1.0
-  mcp-server: oneagent
+  mcp-server: schrute
 ---
 
-# OneAgent Usage Guide
+# Schrute Usage Guide
 
 ## Core Workflow
 
-OneAgent learns API behaviors by observing browser interactions and generates replayable "skills."
+Schrute learns API behaviors by observing browser interactions and generates replayable "skills."
 
 ### Step 1: Explore
 Start a browser session on a target site:
 ```
-/oneagent:explore https://api.example.com
+/schrute:explore https://api.example.com
 ```
 This opens a Playwright browser context and begins monitoring network traffic.
 
 ### Step 2: Record
 Name the action and perform it in the browser:
 ```
-/oneagent:record search-products --input query=laptop
+/schrute:record search-products --input query=laptop
 ```
 All network requests during recording are captured in a HAR file.
 
 ### Step 3: Stop & Generate
 Stop recording to process the capture:
 ```
-/oneagent:record  (then say "stop" when done)
+/schrute:record  (then say "stop" when done)
 ```
 The capture pipeline: HAR parsing → noise filtering → auth detection → parameter discovery → chain detection → endpoint clustering → skill generation.
 
@@ -51,7 +51,7 @@ Skills start at Tier 3 and promote to Tier 1 after 5 consecutive successful vali
 
 ## Confirmation System
 
-ALL newly-activated skills require one-time confirmation before first execution, regardless of their side-effect class. Use `oneagent_confirm` with the provided token to approve or deny.
+ALL newly-activated skills require one-time confirmation before first execution, regardless of their side-effect class. Use `schrute_confirm` with the provided token to approve or deny.
 
 ## Side-Effect Classes
 
@@ -63,11 +63,11 @@ ALL newly-activated skills require one-time confirmation before first execution,
 
 | Command | Purpose |
 |---------|---------|
-| `/oneagent:explore <url>` | Start browser session |
-| `/oneagent:record <name>` | Record an action |
-| `/oneagent:skills` | List all skills |
-| `/oneagent:doctor` | Health diagnostics |
-| `/oneagent:status` | Engine/daemon status |
+| `/schrute:explore <url>` | Start browser session |
+| `/schrute:record <name>` | Record an action |
+| `/schrute:skills` | List all skills |
+| `/schrute:doctor` | Health diagnostics |
+| `/schrute:status` | Engine/daemon status |
 
 ## Browser Tools
 
@@ -91,7 +91,7 @@ Blocked for security: `browser_evaluate`, `browser_run_code`, `browser_install`.
 
 ## Configuration
 
-Config file: `~/.oneagent/config.json`
+Config file: `~/.schrute/config.json`
 
 Key settings:
 - `toolShortlistK`: Max tools exposed at once (default: 10)

@@ -1,0 +1,25 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      dataDir:
+        type: string
+        description: "Data directory path (default: ~/.schrute)"
+      logLevel:
+        type: string
+        enum: ["debug", "info", "warn", "error"]
+        default: "info"
+      browserEngine:
+        type: string
+        enum: ["playwright", "patchright", "camoufox"]
+        default: "playwright"
+    additionalProperties: false
+  commandFunction: |-
+    (config) => {
+      const env = {};
+      if (config.dataDir) env.SCHRUTE_DATA_DIR = config.dataDir;
+      if (config.logLevel) env.SCHRUTE_LOG_LEVEL = config.logLevel;
+      if (config.browserEngine) env.SCHRUTE_BROWSER_ENGINE = config.browserEngine;
+      return { command: "npx", args: ["-y", "schrute", "serve"], env };
+    }

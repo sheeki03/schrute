@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 
 /**
- * OneAgent 3-Site Benchmark Script
+ * Schrute 3-Site Benchmark Script
  *
  * Starts 3 mock Fastify servers (REST, GraphQL, Auth), executes skills
  * against each at different tiers, and reports latency/success metrics.
@@ -146,7 +146,7 @@ async function runBenchmark(
 // ─── Main ─────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('=== OneAgent 3-Site Benchmark ===\n');
+  console.log('=== Schrute 3-Site Benchmark ===\n');
   console.log(`Iterations per test: ${ITERATIONS}\n`);
 
   // Start all 3 mock servers

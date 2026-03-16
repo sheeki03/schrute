@@ -1,12 +1,12 @@
 ---
 name: browser-tool-selection
-description: Decision guide for choosing between OneAgent skill recording and direct browser automation. Compares approaches based on task repeatability, latency needs, and API extraction goals. Use when user asks "which browser tool", "automate this website", "should I use oneagent", "browser automation options", or needs help deciding how to approach a browser task.
+description: Decision guide for choosing between Schrute skill recording and direct browser automation. Compares approaches based on task repeatability, latency needs, and API extraction goals. Use when user asks "which browser tool", "automate this website", "should I use schrute", "browser automation options", or needs help deciding how to approach a browser task.
 user-invocable: true
 argument-hint: "[task-description]"
 metadata:
-  author: OneAgent Contributors
+  author: Schrute Contributors
   version: 0.1.0
-  mcp-server: oneagent
+  mcp-server: schrute
 ---
 
 # Browser Tool Selection Guide
@@ -15,7 +15,7 @@ When a task requires browser interaction, choose the right approach based on the
 
 ## Decision Framework
 
-### Use OneAgent When:
+### Use Schrute When:
 - **Repeated API calls**: The same action will be performed multiple times
 - **Learning patterns**: You want to record and optimize browser interactions
 - **Progressive optimization**: Start with browser automation, automatically promote to direct HTTP
@@ -33,24 +33,24 @@ When a task requires browser interaction, choose the right approach based on the
 
 | Question | Yes → | No → |
 |----------|-------|------|
-| Will this action be repeated? | OneAgent | Direct browser |
-| Do I need to optimize latency? | OneAgent | Either |
+| Will this action be repeated? | Schrute | Direct browser |
+| Do I need to optimize latency? | Schrute | Either |
 | Am I just looking at the page? | Direct browser | Either |
-| Do I want to learn the API? | OneAgent | Direct browser |
-| Is this a one-time data extraction? | Direct browser | OneAgent |
-| Will I reuse this across sessions? | OneAgent | Direct browser |
+| Do I want to learn the API? | Schrute | Direct browser |
+| Is this a one-time data extraction? | Direct browser | Schrute |
+| Will I reuse this across sessions? | Schrute | Direct browser |
 
-## OneAgent Workflow
+## Schrute Workflow
 
-1. **Explore**: `oneagent_explore` with the target URL to start a browser session
+1. **Explore**: `schrute_explore` with the target URL to start a browser session
 2. **Navigate**: Use browser tools to interact with the page
-3. **Record**: `oneagent_record` to capture an action (names the API interaction)
-4. **Stop**: `oneagent_stop` to process the recording into a skill
+3. **Record**: `schrute_record` to capture an action (names the API interaction)
+4. **Stop**: `schrute_stop` to process the recording into a skill
 5. **Replay**: The generated skill appears as an MCP tool for future use
 
 ## Execution Tiers
 
-OneAgent skills start at Tier 3 (browser-proxied) and can promote to Tier 1 (direct HTTP) after validation:
+Schrute skills start at Tier 3 (browser-proxied) and can promote to Tier 1 (direct HTTP) after validation:
 
 | Tier | Method | Latency | Promotion Criteria |
 |------|--------|---------|-------------------|
@@ -63,5 +63,5 @@ OneAgent skills start at Tier 3 (browser-proxied) and can promote to Tier 1 (dir
 
 You can use both approaches together:
 - Start with direct browser tools to explore a site
-- Switch to OneAgent recording when you identify repeatable actions
+- Switch to Schrute recording when you identify repeatable actions
 - Use recorded skills for subsequent calls while using browser tools for new exploration

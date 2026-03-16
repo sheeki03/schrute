@@ -5,13 +5,13 @@ Record skills for searching repositories and viewing user profiles on GitHub.
 
 ## Step 1: Start Exploring
 ```
-/oneagent:explore https://github.com
+/schrute:explore https://github.com
 ```
 This opens a browser session on GitHub and begins network monitoring.
 
 ## Step 2: Record Search Repos
 ```
-/oneagent:record search-repos --input query=typescript
+/schrute:record search-repos --input query=typescript
 ```
 
 Now perform the action in the browser:
@@ -23,7 +23,7 @@ Now perform the action in the browser:
 All API calls (e.g., `GET /search/repositories?q=typescript`) are captured.
 
 ## Step 3: Stop and Generate
-Say "stop" or run `/oneagent:record` again.
+Say "stop" or run `/schrute:record` again.
 
 The capture pipeline processes the HAR:
 - Filters out noise (analytics, tracking, static assets)
@@ -42,7 +42,7 @@ It starts at Tier 3 (browser proxied) and promotes to Tier 1 after 5 successful 
 ## Step 5: Record Another Skill
 Without closing the browser:
 ```
-/oneagent:record get-user --input username=octocat
+/schrute:record get-user --input username=octocat
 ```
 Navigate to github.com/octocat, stop recording. Now you have two skills.
 

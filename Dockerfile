@@ -24,9 +24,9 @@ COPY package.json ./
 # Install Chromium for Playwright
 RUN npx playwright install chromium
 
-ENV ONEAGENT_NETWORK=true
-ENV ONEAGENT_HTTP_TRANSPORT=true
-ENV ONEAGENT_DATA_DIR=/data
+ENV SCHRUTE_NETWORK=true
+ENV SCHRUTE_HTTP_TRANSPORT=true
+ENV SCHRUTE_DATA_DIR=/data
 
 VOLUME /data
 EXPOSE 3000 3001

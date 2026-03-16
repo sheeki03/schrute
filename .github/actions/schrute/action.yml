@@ -1,0 +1,96 @@
+name: 'Schrute Browser Agent'
+description: 'Run Schrute skills in CI — API testing, regression checks, and skill validation'
+branding:
+  icon: 'globe'
+  color: 'blue'
+
+inputs:
+  command:
+    description: 'Schrute CLI command to run (e.g., "execute site.get_users.v1", "doctor", "skills list")'
+    required: true
+  params:
+    description: 'Space-separated key=value parameters for execute/dry-run commands'
+    required: false
+    default: ''
+  data-dir:
+    description: 'Data directory (default: .schrute in workspace)'
+    required: false
+    default: '${{ github.workspace }}/.schrute'
+  auto-approve:
+    description: 'Auto-approve skill confirmations (adds --yes flag to execute)'
+    required: false
+    default: 'true'
+  json-output:
+    description: 'Output results as JSON'
+    required: false
+    default: 'true'
+  node-version:
+    description: 'Node.js version to use'
+    required: false
+    default: '22'
+  import-skills:
+    description: 'Path to skills JSON bundle to import before running command'
+    required: false
+    default: ''
+
+outputs:
+  result:
+    description: 'Command output (JSON if json-output is true)'
+    value: ${{ steps.run.outputs.result }}
+  exit-code:
+    description: 'Exit code from Schrute CLI'
+    value: ${{ steps.run.outputs.exit_code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install Schrute
+      shell: bash
+      run: npm install -g schrute
+
+    - name: Install browser
+      shell: bash
+      run: schrute setup 2>/dev/null || npx playwright install chromium
+
+    - name: Import skills bundle
+      if: inputs.import-skills != ''
+      shell: bash
+      env:
+        SCHRUTE_DATA_DIR: ${{ inputs.data-dir }}
+      run: schrute import "${{ inputs.import-skills }}"
+
+    - name: Run Schrute
+      id: run
+      shell: bash
+      env:
+        SCHRUTE_DATA_DIR: ${{ inputs.data-dir }}
+      run: |
+        FLAGS=""
+        if [ "${{ inputs.json-output }}" = "true" ]; then FLAGS="$FLAGS --json"; fi
+        if [[ "${{ inputs.command }}" == execute* ]] && [ "${{ inputs.auto-approve }}" = "true" ]; then
+          FLAGS="$FLAGS --yes"
+        fi
+
+        PARAMS="${{ inputs.params }}"
+
+        set +e
+        OUTPUT=$(schrute ${{ inputs.command }} $PARAMS $FLAGS 2>&1)
+        EXIT_CODE=$?
+        set -e
+
+        echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+        # Handle multiline output
+        {
+          echo "result<<SCHRUTE_EOF"
+          echo "$OUTPUT"
+          echo "SCHRUTE_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "$OUTPUT"
+        exit $EXIT_CODE

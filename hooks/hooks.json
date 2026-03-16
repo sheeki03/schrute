@@ -3,20 +3,20 @@
     {
       "event": "PreToolUse",
       "type": "prompt",
-      "matcher": "mcp__oneagent__oneagent_explore",
+      "matcher": "mcp__schrute__schrute_explore",
       "prompt": "Before exploring a new site, verify the URL is well-formed and uses HTTPS. If the URL uses HTTP, warn the user that credentials may be exposed over an unencrypted connection and ask if they want to proceed."
     },
     {
       "event": "PostToolUse",
       "type": "prompt",
-      "matcher": "mcp__oneagent__oneagent_stop",
+      "matcher": "mcp__schrute__schrute_stop",
       "prompt": "Recording has stopped and skills have been generated. Suggest the user validate the new skills by saying 'validate skills' or running the skill-validator agent. Briefly mention how many skills were generated if that info is available in the tool output."
     },
     {
       "event": "PreToolUse",
       "type": "prompt",
-      "matcher": "mcp__oneagent__oneagent_record",
-      "prompt": "Before starting a recording, verify there is an active explore session. If the user hasn't explored a site yet, remind them to run /oneagent:explore first."
+      "matcher": "mcp__schrute__schrute_record",
+      "prompt": "Before starting a recording, verify there is an active explore session. If the user hasn't explored a site yet, remind them to run /schrute:explore first."
     }
   ]
 }

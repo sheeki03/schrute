@@ -1,11 +1,11 @@
 {
-  "name": "oneagent",
+  "name": "schrute",
   "version": "0.1.0",
   "description": "Universal Self-Learning Browser Agent — record browser interactions, generate API skills, and replay them via MCP tools with progressive tier optimization.",
   "author": {
-    "name": "OneAgent Contributors"
+    "name": "Schrute Contributors"
   },
-  "repository": "https://github.com/user/oneagent",
+  "repository": "https://github.com/user/schrute",
   "license": "MIT",
   "keywords": [
     "mcp",

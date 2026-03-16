@@ -1,4 +1,4 @@
-# OneAgent Codebase Audit Report
+# Schrute Codebase Audit Report
 
 **Date:** 2026-02-17 (Session 2)
 **Scope:** Full codebase review across `src/` (~95 TypeScript files)
@@ -44,7 +44,7 @@
 ### CR-02: `loadConfig` Untrusted JSON Without Full Schema Validation — ACCEPTABLE
 **File:** `src/core/config.ts:246-258`
 
-Config cast via `as unknown as OneAgentConfig` without full schema validation. Critical fields (server, daemon, payloadLimits, logLevel, httpPort) ARE validated. Non-critical fields silently accept wrong types but `deepMerge` with `DEFAULT_CONFIG` ensures sensible defaults. Input is a local file requiring filesystem access to tamper.
+Config cast via `as unknown as SchruteConfig` without full schema validation. Critical fields (server, daemon, payloadLimits, logLevel, httpPort) ARE validated. Non-critical fields silently accept wrong types but `deepMerge` with `DEFAULT_CONFIG` ensures sensible defaults. Input is a local file requiring filesystem access to tamper.
 
 ### CR-03: Audit Log `loadLastHash` Resets Hash Chain on Corruption — VALID
 **File:** `src/replay/audit-log.ts:284-312`
@@ -300,7 +300,7 @@ Comment: "Mock request-builder to work around upperMethod bug in source." Entire
 ### TC-13: Missing `daemon` Field in Test Config — VALID
 **File:** `tests/e2e/security-invariants.test.ts:12-43`
 
-`daemon` is required in `OneAgentConfig` (no `?` marker) but `makeTestConfig` omits it. Violates CLAUDE.md convention: "Config objects in tests must include `daemon: { port: 19420, autoStart: false }`."
+`daemon` is required in `SchruteConfig` (no `?` marker) but `makeTestConfig` omits it. Violates CLAUDE.md convention: "Config objects in tests must include `daemon: { port: 19420, autoStart: false }`."
 
 **Fix:** Add `daemon: { port: 19420, autoStart: false }` to the test config.
 

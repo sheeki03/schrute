@@ -38,7 +38,7 @@ ALL newly-activated skills require one-time human confirmation before first exec
 Confirmation flow:
 1. Skill activation triggers a confirmation prompt with a unique token
 2. User reviews the skill's method, URL pattern, and domains
-3. User calls `oneagent_confirm` with the token to approve or deny
+3. User calls `schrute_confirm` with the token to approve or deny
 4. Confirmation is persisted in the database — one-time per skill
 
 ## Credential Handling

@@ -1,4 +1,4 @@
-# OneAgent Codebase Review — Verified Findings
+# Schrute Codebase Review — Verified Findings
 
 Generated: 2026-03-04
 Verified: 2026-03-04 — each finding checked against actual code. False positives, design decisions, and non-issues removed.
@@ -106,7 +106,7 @@ Confirmed: `{ proxy: request.body.proxy as any, geo: request.body.geo as any }` 
 
 Confirmed: `resolvedIp` is passed to `directFetch` but NOT to `browserProvider.evaluateFetch(request)`. The browser does its own DNS resolution. This is a real TOCTOU window for Tier 3/4.
 
-#### 9. `oneagent_webmcp_call` lacks `toolName` validation
+#### 9. `schrute_webmcp_call` lacks `toolName` validation
 **File:** `src/server/tool-dispatch.ts:679`
 **Confidence:** 0.84
 
@@ -124,7 +124,7 @@ Confirmed: `Buffer.byteLength(response.body)` for check, `response.body.slice(0,
 
 Confirmed: Five instances of `.catch(() => {})`. Notification system failures are invisible. Should at minimum be `.catch(err => log.debug({ err }, '...'))`.
 
-#### 12. `oneagent_status` WebMCP catch returns fake data
+#### 12. `schrute_status` WebMCP catch returns fake data
 **File:** `src/server/tool-dispatch.ts:357-359`
 **Confidence:** HIGH
 

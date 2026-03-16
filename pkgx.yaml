@@ -1,0 +1,22 @@
+distributable:
+  url: https://registry.npmjs.org/schrute/-/schrute-{{version}}.tgz
+  strip-components: 1
+
+versions:
+  npm: schrute
+
+dependencies:
+  nodejs.org: '>=22'
+
+build:
+  dependencies:
+    npmjs.com: '*'
+  script:
+    npm install --global schrute@{{version}}
+
+provides:
+  - bin/schrute
+
+test:
+  script:
+    schrute --version

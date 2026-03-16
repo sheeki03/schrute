@@ -14,7 +14,7 @@ fi
 
 # Check if the path contains spaces (node-gyp bug trigger)
 if [[ "$PROJECT_DIR" == *" "* ]]; then
-  LINK="/tmp/oneagent-rebuild-$$"
+  LINK="/tmp/schrute-rebuild-$$"
   ln -sfn "$PROJECT_DIR" "$LINK"
   trap 'rm -f "$LINK"' EXIT
 
