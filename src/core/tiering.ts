@@ -8,27 +8,28 @@ import type {
   TemporaryDemotion,
   FieldVolatility,
   FailureCauseName,
-  OneAgentConfig,
+  ExecutionTierName,
+  SchruteConfig,
 } from '../skill/types.js';
-import { TierState, FailureCause } from '../skill/types.js';
+import { TierState, ExecutionTier, FailureCause } from '../skill/types.js';
 
 const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface PromotionCheckResult {
+interface PromotionCheckResult {
   promote: boolean;
   lock?: TierLock;
   reason?: string;
 }
 
-export interface FailureHandleResult {
+interface FailureHandleResult {
   newTier: TierStateName;
   tierLock: TierLock;
   reason: string;
 }
 
-export interface SemanticResult {
+interface SemanticResult {
   match: boolean;
   hasDynamicRequiredFields: boolean;
 }
@@ -36,7 +37,7 @@ export interface SemanticResult {
 // ─── Tier State Machine ─────────────────────────────────────────
 
 /**
- * Two tier values (tier_1, tier_3) with optional lock discriminator (manual | auto):
+ * Two tier values (tier_1, tier_3) with optional lock discriminator (permanent | temporary_demotion):
  *   TIER_3_DEFAULT           — initial state, browser-proxied replay
  *   TIER_1_PROMOTED          — direct fetch, fast path
  * Lock discriminators (applied via TierLock):
@@ -50,8 +51,8 @@ export interface SemanticResult {
  * Check if a skill should be promoted from Tier 3 to Tier 1.
  *
  * Requirements:
- * - 5 consecutive Tier 1 validations (configurable)
- * - Volatility < 0.2 for all fields (configurable)
+ * - configurable consecutive validations (promotionConsecutivePasses)
+ * - volatility below configurable threshold
  * - Semantic match in latest validation
  * - No dynamic required fields detected
  */
@@ -59,10 +60,16 @@ export function checkPromotion(
   skill: SkillSpec,
   volatilityScores: FieldVolatility[],
   semanticResult: SemanticResult,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
+  siteRecommendedTier?: ExecutionTierName,
 ): PromotionCheckResult {
   const cfg = config ?? getConfig();
-  const requiredPasses = cfg.promotionConsecutivePasses;
+  let requiredPasses = cfg.promotionConsecutivePasses;
+
+  // Lower threshold when site recommends direct tier
+  if (siteRecommendedTier === ExecutionTier.DIRECT) {
+    requiredPasses = Math.min(requiredPasses, 1);
+  }
   const volatilityThreshold = cfg.promotionVolatilityThreshold;
 
   // Already at Tier 1
@@ -150,7 +157,7 @@ export function checkPromotion(
 /**
  * Handle a validation failure and determine the new tier state.
  *
- * Transient failures: temporary demotion (can re-promote after 5 more passes)
+ * Transient failures: temporary demotion (can re-promote after configurable threshold (promotionConsecutivePasses) more passes)
  * Structural failures: permanent lock (js_computed_field, protocol_sensitivity, signed_payload)
  */
 export function handleFailure(

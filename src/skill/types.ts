@@ -22,7 +22,6 @@ export const V01_DEFAULT_CAPABILITIES: CapabilityName[] = [
 ];
 
 export const DISABLED_BY_DEFAULT_CAPABILITIES: CapabilityName[] = [
-  Capability.BROWSER_MODEL_CONTEXT,
   Capability.EXPORT_SKILLS,
 ];
 
@@ -30,6 +29,7 @@ export const DISABLED_BY_DEFAULT_CAPABILITIES: CapabilityName[] = [
 // Evaluated in STRICT PRECEDENCE ORDER — first match wins, disjoint
 export const FailureCause = {
   RATE_LIMITED: 'rate_limited',
+  BUDGET_DENIED: 'budget_denied',
   ENDPOINT_REMOVED: 'endpoint_removed',
   POLICY_DENIED: 'policy_denied',
   JS_COMPUTED_FIELD: 'js_computed_field',
@@ -38,13 +38,15 @@ export const FailureCause = {
   SCHEMA_DRIFT: 'schema_drift',
   AUTH_EXPIRED: 'auth_expired',
   COOKIE_REFRESH: 'cookie_refresh',
+  FETCH_ERROR: 'fetch_error',
   UNKNOWN: 'unknown',
 } as const;
 
 export type FailureCauseName = (typeof FailureCause)[keyof typeof FailureCause];
 
-export const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
+const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
   FailureCause.RATE_LIMITED,
+  FailureCause.BUDGET_DENIED,
   FailureCause.ENDPOINT_REMOVED,
   FailureCause.POLICY_DENIED,
   FailureCause.JS_COMPUTED_FIELD,
@@ -53,8 +55,16 @@ export const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
   FailureCause.SCHEMA_DRIFT,
   FailureCause.AUTH_EXPIRED,
   FailureCause.COOKIE_REFRESH,
+  FailureCause.FETCH_ERROR,
   FailureCause.UNKNOWN,
 ];
+
+export const INFRA_FAILURE_CAUSES = new Set<FailureCauseName>([
+  FailureCause.POLICY_DENIED,
+  FailureCause.RATE_LIMITED,
+  FailureCause.BUDGET_DENIED,
+  FailureCause.FETCH_ERROR,
+]);
 
 // ─── Tier States ───────────────────────────────────────────────────
 export const TierState = {
@@ -66,7 +76,7 @@ export type TierStateName = (typeof TierState)[keyof typeof TierState];
 
 export interface PermanentTierLock {
   type: 'permanent';
-  reason: 'js_computed_field' | 'protocol_sensitivity' | 'signed_payload';
+  reason: 'js_computed_field' | 'protocol_sensitivity' | 'signed_payload' | 'webmcp_requires_browser';
   evidence: string;
 }
 
@@ -89,13 +99,13 @@ export const SkillStatus = {
 export type SkillStatusName = (typeof SkillStatus)[keyof typeof SkillStatus];
 
 // ─── Confirmation States ───────────────────────────────────────────
-export const ConfirmationStatus = {
+const ConfirmationStatus = {
   PENDING: 'pending',
   APPROVED: 'approved',
   DENIED: 'denied',
 } as const;
 
-export type ConfirmationStatusName = (typeof ConfirmationStatus)[keyof typeof ConfirmationStatus];
+type ConfirmationStatusName = (typeof ConfirmationStatus)[keyof typeof ConfirmationStatus];
 
 // ─── Side Effect Classification ────────────────────────────────────
 export const SideEffectClass = {
@@ -158,6 +168,7 @@ export interface SealedModelContextRequest {
 export interface SealedModelContextResponse {
   result: unknown;
   error?: string;
+  hasStructuredResponse?: boolean;
 }
 
 // ─── Browser Provider Interface ────────────────────────────────────
@@ -206,6 +217,7 @@ export interface BrowserProvider {
   screenshot(): Promise<Buffer>;
   networkRequests(): Promise<NetworkEntry[]>;
   evaluateModelContext?(req: SealedModelContextRequest): Promise<SealedModelContextResponse>;
+  listModelContextTools?(): Promise<SealedModelContextResponse>;
   getCurrentUrl(): string;
 }
 
@@ -232,6 +244,7 @@ export const ALLOWED_BROWSER_TOOLS = [
   'browser_network_requests',
   'browser_batch_actions',
   'browser_snapshot_with_screenshot',
+  'browser_debug_trace',
 ] as const;
 
 export const BLOCKED_BROWSER_TOOLS = [
@@ -315,7 +328,7 @@ export interface RequestChain {
 // ─── Auth Recipe ───────────────────────────────────────────────────
 export type AuthType = 'bearer' | 'cookie' | 'api_key' | 'oauth2';
 export type RefreshTrigger = '401' | '403' | 'redirect_to_login' | 'token_expired_field';
-export type RefreshMethod = 'browser_relogin' | 'oauth_refresh' | 'manual_user_login';
+type RefreshMethod = 'browser_relogin' | 'oauth_refresh' | 'manual_user_login';
 
 export interface AuthRecipe {
   type: AuthType;
@@ -342,6 +355,12 @@ export interface SkillParameter {
   type: string;
   source: 'user_input' | 'extracted' | 'constant';
   evidence: string[];
+  required?: boolean;
+}
+
+export function isParamRequired(p: SkillParameter): boolean {
+  if (p.required !== undefined) return p.required;
+  return p.source === 'user_input';
 }
 
 export interface SkillValidation {
@@ -396,6 +415,17 @@ export interface SkillSpec {
   lastUsed?: number;
   // Typed as number without range constraint — TypeScript lacks built-in ranged numeric types. Values constrained to [0,1] at creation/update boundaries.
   successRate: number;
+  avgLatencyMs?: number;
+  lastSuccessfulTier?: string;
+
+  // Canary probe fields (WS-4)
+  directCanaryEligible?: boolean;
+  directCanaryAttempts?: number;
+  validationsSinceLastCanary?: number;
+  lastCanaryErrorType?: string;
+
+  reviewRequired?: boolean;
+
   createdAt: number;
   updatedAt: number;
 }
@@ -410,6 +440,8 @@ export interface SiteManifest {
   recommendedTier: ExecutionTierName;
   totalRequests: number;
   successfulRequests: number;
+  lighthouseScore?: number;
+  lighthouseAccessibility?: number;
   defaultOverrides?: { proxy?: { server: string }; geo?: GeoEmulationConfig };
 }
 
@@ -424,6 +456,8 @@ export interface SitePolicy {
   domainAllowlist: string[];
   redactionRules: string[];
   capabilities: CapabilityName[];
+  executionBackend?: 'playwright' | 'agent-browser' | 'live-chrome';  // override global default for this site
+  executionSessionName?: string;                       // for hard-site shared Playwright
 }
 
 // ─── Tool Budget ───────────────────────────────────────────────────
@@ -432,6 +466,12 @@ export interface ToolBudgetConfig {
   maxConcurrentCalls: number;       // default 3 (global cap)
   crossDomainCalls: boolean;        // default false (denied)
   secretsToNonAllowlisted: false;   // hard deny, never overridable
+}
+
+export interface ParamLimits {
+  maxStringLength: number;    // default 10_000
+  maxDepth: number;           // default 5
+  maxProperties: number;      // default 50
 }
 
 export interface PayloadLimits {
@@ -464,7 +504,7 @@ export interface ActionFrame {
   skillCount: number;
 }
 
-export interface ActionFrameEntry {
+interface ActionFrameEntry {
   id?: number;
   frameId: string;
   requestHash: string;
@@ -520,7 +560,7 @@ export interface EvidenceReport {
 export type BrowserEngine = 'playwright' | 'patchright' | 'camoufox';
 
 // ─── Browser Feature Flags (config shape) ─────────────────────────
-export interface BrowserFeatureFlagsConfig {
+interface BrowserFeatureFlagsConfig {
   snapshotMode?: 'annotated' | 'full' | 'none';
   incrementalDiffs?: boolean;
   modalTracking?: boolean;
@@ -528,6 +568,10 @@ export interface BrowserFeatureFlagsConfig {
   batchActions?: boolean;
   screenshotFormat?: 'jpeg' | 'png';
   screenshotQuality?: number;
+  fingerprintProfile?: boolean;
+  referrerSpoofing?: boolean;
+  humanCursor?: boolean;
+  assetBlocking?: boolean;
 }
 
 // ─── Proxy & Geo Emulation ──────────────────────────────────────────
@@ -542,15 +586,31 @@ export interface GeoEmulationConfig {
   geolocation?: { latitude: number; longitude: number; accuracy?: number };
   timezoneId?: string;
   locale?: string;
+  userAgent?: string;
+  viewport?: { width: number; height: number };
 }
 
 // ─── Config ────────────────────────────────────────────────────────
-export interface OneAgentConfig {
-  dataDir: string;               // ~/.oneagent
+export interface SchruteConfig {
+  dataDir: string;               // ~/.schrute
   logLevel: string;              // default: 'info'
   features: {
     webmcp: boolean;             // default: false
     httpTransport: boolean;      // default: false (v0.2+)
+    discoveryImport: boolean;    // default: false — gates cold-start → DRAFT skill creation
+    respectRobotsTxt: boolean;   // default: true — honor robots.txt during discovery
+    sitemapDiscovery: boolean;   // default: true — discover URLs from sitemap.xml
+    adaptivePathTrie: boolean;   // default: true — learn variable path segments from cardinality
+  };
+  browserPool?: {
+    endpoints: { wsEndpoint: string; maxSessions?: number }[];
+  };
+  managedCrawl?: {
+    provider: 'cloudflare';
+    accountId: string;
+    apiToken: string;
+    maxPages?: number;
+    render?: boolean;
   };
   browser?: {
     engine?: BrowserEngine;
@@ -559,11 +619,16 @@ export interface OneAgentConfig {
     handlerTimeoutMs?: number;
     proxy?: ProxyConfig;
     geo?: GeoEmulationConfig;
+    execution?: {
+      backend?: 'playwright' | 'agent-browser' | 'live-chrome';  // default: 'agent-browser'
+      engine?: string;                            // which browser engine the backend runs
+    };
   };
   capabilities?: {
     enabled?: CapabilityName[];
   };
   toolBudget: ToolBudgetConfig;
+  paramLimits: ParamLimits;
   payloadLimits: PayloadLimits;
   audit: {
     strictMode: boolean;         // default: true
@@ -591,6 +656,7 @@ export interface OneAgentConfig {
   promotionVolatilityThreshold: number; // default: 0.2
   maxToolsPerSite: number;       // default: 20
   toolShortlistK: number;        // default: 10
+  slimMode?: boolean;
 }
 
 // ─── Redaction Modes ───────────────────────────────────────────────
@@ -613,7 +679,7 @@ const executionTierValues = Object.values(ExecutionTier) as [string, ...string[]
 const failureCauseValues = Object.values(FailureCause) as [string, ...string[]];
 const capabilityValues = Object.values(Capability) as [string, ...string[]];
 
-export const PolicyDecisionSchema = z.object({
+const PolicyDecisionSchema = z.object({
   proposed: z.string(),
   policyResult: z.enum(['allowed', 'blocked', 'confirmed']),
   policyRule: z.string(),
@@ -714,7 +780,7 @@ export const TRACKING_PARAMS = [
 ];
 
 // ─── Enforced Non-Goals (v0.1) ─────────────────────────────────────
-export const UNSUPPORTED_PROTOCOLS = {
+const UNSUPPORTED_PROTOCOLS = {
   websocket: 'This endpoint uses WebSockets. Browser-only.',
   sse: 'This endpoint uses Server-Sent Events. Browser-only.',
   binary: 'This endpoint uses binary data. Browser-only.',

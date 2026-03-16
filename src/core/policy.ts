@@ -1,13 +1,13 @@
 import * as dns from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
 import { getLogger } from './logger.js';
-import { getConfig } from './config.js';
 import { getDatabase } from '../storage/database.js';
+import { BoundedMap } from '../shared/bounded-map.js';
 import type {
   CapabilityName,
   SideEffectClassName,
   SitePolicy,
-  OneAgentConfig,
+  SchruteConfig,
 } from '../skill/types.js';
 import {
   Capability,
@@ -22,7 +22,7 @@ import {
 
 // ─── Result Types ─────────────────────────────────────────────────
 
-export interface PolicyResult {
+interface PolicyResult {
   allowed: boolean;
   rule: string;
   reason?: string;
@@ -55,16 +55,16 @@ const DEFAULT_SITE_POLICY: Omit<SitePolicy, 'siteId'> = {
 const POLICY_CACHE_TTL_MS = 300_000; // 5 minutes
 // Module-level singleton — intentional for process-scoped daemon state
 // Cache key = "dataDir:siteId" to isolate policies across config contexts
-const sitePolicies = new Map<string, { policy: SitePolicy; cachedAt: number }>();
+const sitePolicies = new BoundedMap<string, SitePolicy>({ maxSize: 500, ttlMs: POLICY_CACHE_TTL_MS });
 
-function policyCacheKey(siteId: string, config?: OneAgentConfig): string {
+function policyCacheKey(siteId: string, config?: SchruteConfig): string {
   const dataDir = config?.dataDir ?? '';
   return dataDir ? `${dataDir}:${siteId}` : siteId;
 }
 
 // ─── Policy Store ─────────────────────────────────────────────────
 
-function loadPolicyFromDb(siteId: string, config?: OneAgentConfig): SitePolicy | null {
+function loadPolicyFromDb(siteId: string, config?: SchruteConfig): SitePolicy | null {
   try {
     const db = getDatabase(config);
     const row = db.get<{
@@ -77,6 +77,8 @@ function loadPolicyFromDb(siteId: string, config?: OneAgentConfig): SitePolicy |
       domain_allowlist: string | null;
       redaction_rules: string;
       capabilities: string;
+      execution_backend: string | null;
+      execution_session_name: string | null;
     }>('SELECT * FROM policies WHERE site_id = ?', siteId);
 
     if (!row) return null;
@@ -91,6 +93,8 @@ function loadPolicyFromDb(siteId: string, config?: OneAgentConfig): SitePolicy |
       domainAllowlist: row.domain_allowlist ? JSON.parse(row.domain_allowlist) : [],
       redactionRules: JSON.parse(row.redaction_rules),
       capabilities: JSON.parse(row.capabilities),
+      executionBackend: (row.execution_backend as SitePolicy['executionBackend']) ?? undefined,
+      executionSessionName: row.execution_session_name ?? undefined,
     };
   } catch (err) {
     const policyLog = getLogger();
@@ -102,26 +106,36 @@ function loadPolicyFromDb(siteId: string, config?: OneAgentConfig): SitePolicy |
   }
 }
 
-export function getSitePolicy(siteId: string, config?: OneAgentConfig): SitePolicy {
+export function getSitePolicy(siteId: string, config?: SchruteConfig): SitePolicy {
   const key = policyCacheKey(siteId, config);
   const cached = sitePolicies.get(key);
-  if (cached && (Date.now() - cached.cachedAt) < POLICY_CACHE_TTL_MS) {
-    return cached.policy;
+  if (cached) {
+    return cached;
   }
 
   // Try loading from DB
   const dbPolicy = loadPolicyFromDb(siteId, config);
   if (dbPolicy) {
-    sitePolicies.set(key, { policy: dbPolicy, cachedAt: Date.now() });
+    sitePolicies.set(key, dbPolicy);
     return dbPolicy;
   }
 
   return { siteId, ...DEFAULT_SITE_POLICY };
 }
 
-export function setSitePolicy(policy: SitePolicy, config?: OneAgentConfig): void {
+export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): void {
+  // Validate: executionSessionName requires executionBackend='playwright'
+  if (policy.executionSessionName
+      && policy.executionBackend !== 'playwright'
+      && policy.executionBackend !== 'live-chrome') {
+    throw new Error(
+      `executionSessionName requires executionBackend='playwright' or 'live-chrome'. ` +
+      `Got executionBackend='${policy.executionBackend ?? 'undefined'}'.`,
+    );
+  }
+
   const key = policyCacheKey(policy.siteId, config);
-  sitePolicies.set(key, { policy, cachedAt: Date.now() });
+  sitePolicies.set(key, policy);
 
   try {
     const db = getDatabase(config);
@@ -136,12 +150,14 @@ export function setSitePolicy(policy: SitePolicy, config?: OneAgentConfig): void
     );
     db.run(
       `INSERT OR REPLACE INTO policies (site_id, allowed_methods, max_qps, max_concurrent, read_only_default,
-         require_confirmation, domain_allowlist, redaction_rules, capabilities)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         require_confirmation, domain_allowlist, redaction_rules, capabilities,
+         execution_backend, execution_session_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       policy.siteId, JSON.stringify(policy.allowedMethods), policy.maxQps, policy.maxConcurrent,
       policy.readOnlyDefault ? 1 : 0, JSON.stringify(policy.requireConfirmation),
       JSON.stringify(policy.domainAllowlist), JSON.stringify(policy.redactionRules),
       JSON.stringify(policy.capabilities),
+      policy.executionBackend ?? null, policy.executionSessionName ?? null,
     );
   } catch (err) {
     const log = getLogger();
@@ -149,7 +165,7 @@ export function setSitePolicy(policy: SitePolicy, config?: OneAgentConfig): void
   }
 }
 
-export function invalidatePolicyCache(siteId?: string, config?: OneAgentConfig): void {
+export function invalidatePolicyCache(siteId?: string, config?: SchruteConfig): void {
   if (siteId) {
     sitePolicies.delete(policyCacheKey(siteId, config));
   } else {
@@ -157,10 +173,25 @@ export function invalidatePolicyCache(siteId?: string, config?: OneAgentConfig):
   }
 }
 
+export function mergeSitePolicy(
+  siteId: string,
+  overlay: Partial<Omit<SitePolicy, 'siteId'>>,
+  config?: SchruteConfig,
+): { merged: SitePolicy; prior: Partial<SitePolicy> } {
+  const existing = getSitePolicy(siteId, config);
+  const prior: Partial<SitePolicy> = {};
+  for (const key of Object.keys(overlay) as (keyof typeof overlay)[]) {
+    (prior as Record<string, unknown>)[key as string] = (existing as unknown as Record<string, unknown>)[key as string];
+  }
+  const merged = { ...existing, ...overlay };
+  setSitePolicy(merged, config);
+  return { merged, prior };
+}
+
 // ─── Capabilities ─────────────────────────────────────────────────
 
 // Capabilities that can be enabled via config.capabilities.enabled
-const OPT_IN_ALLOWED: readonly string[] = [Capability.BROWSER_MODEL_CONTEXT];
+const OPT_IN_ALLOWED: readonly string[] = [];
 
 /**
  * Check if a capability is allowed for a site.
@@ -172,7 +203,7 @@ const OPT_IN_ALLOWED: readonly string[] = [Capability.BROWSER_MODEL_CONTEXT];
 export function checkCapability(
   siteId: string,
   capability: CapabilityName,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): PolicyResult {
   if ((DISABLED_BY_DEFAULT_CAPABILITIES as readonly string[]).includes(capability)) {
     if (OPT_IN_ALLOWED.includes(capability) && config?.capabilities?.enabled?.includes(capability)) {
@@ -231,7 +262,7 @@ export function normalizeDomain(domain: string): string {
 export function enforceDomainAllowlist(
   siteId: string,
   targetDomain: string,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): PolicyResult {
   const policy = getSitePolicy(siteId, config);
   const normalizedTarget = normalizeDomain(targetDomain);
@@ -370,7 +401,7 @@ export function isPublicIp(ip: string): boolean {
   return range === 'unicast';
 }
 
-const DNS_CACHE = new Map<string, { result: IpValidationResult; expiresAt: number }>();
+const DNS_CACHE = new BoundedMap<string, { result: IpValidationResult; expiresAt: number }>({ maxSize: 2000 });
 const DNS_CACHE_TTL_MS = 60_000;        // 60s for confirmed blocks
 const DNS_FAILURE_CACHE_TTL_MS = 10_000; // 10s for resolution failures
 
@@ -425,6 +456,7 @@ export async function resolveAndValidate(
 const pathAllowlist = new Set<string>();
 
 export function addPathAllowlistEntry(path: string): void {
+  if (pathAllowlist.size >= 10_000) return;
   pathAllowlist.add(path.toLowerCase());
 }
 
@@ -435,7 +467,7 @@ export function removePathAllowlistEntry(path: string): void {
 export function checkPathRisk(method: string, path: string): PathRiskResult {
   const normalizedPath = path.toLowerCase();
 
-  // Check user-configured allowlist overrides
+  // Check programmatic runtime allowlist overrides
   if (pathAllowlist.has(normalizedPath)) {
     return { blocked: false };
   }
@@ -525,7 +557,7 @@ export function checkMethodAllowed(
   siteId: string,
   method: string,
   sideEffectClass?: SideEffectClassName,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): boolean {
   const upperMethod = method.toUpperCase();
   const policy = getSitePolicy(siteId, config);
@@ -554,7 +586,7 @@ export function checkRedirectAllowed(
   siteId: string,
   targetUrl: string,
   baseUrl?: string,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): PolicyResult {
   try {
     const url = baseUrl ? new URL(targetUrl, baseUrl) : new URL(targetUrl);

@@ -1,12 +1,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getLogger } from './logger.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import { writeFileAtomically } from '../shared/atomic-write.js';
+import type { SchruteConfig } from '../skill/types.js';
 import { Capability } from '../skill/types.js';
 import { VALID_SNAPSHOT_MODES } from '../browser/feature-flags.js';
 
 // Re-export for convenience
-export type { OneAgentConfig } from '../skill/types.js';
+export type { SchruteConfig } from '../skill/types.js';
 
 // ─── ConfigError ────────────────────────────────────────────────────
 
@@ -21,16 +22,20 @@ export class ConfigError extends Error {
 
 const DEFAULT_DATA_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || '~',
-  '.oneagent',
+  '.schrute',
 );
 
 // Daemon config merged into default config alongside all other settings.
-const DEFAULT_CONFIG: OneAgentConfig & { daemon: { port: number; autoStart: boolean } } = {
+const DEFAULT_CONFIG: SchruteConfig & { daemon: { port: number; autoStart: boolean } } = {
   dataDir: DEFAULT_DATA_DIR,
   logLevel: 'info',
   features: {
-    webmcp: false,
+    webmcp: true,
     httpTransport: false,
+    discoveryImport: false,
+    respectRobotsTxt: true,
+    sitemapDiscovery: true,
+    adaptivePathTrie: true,
   },
   capabilities: { enabled: [] },
   toolBudget: {
@@ -38,6 +43,11 @@ const DEFAULT_CONFIG: OneAgentConfig & { daemon: { port: number; autoStart: bool
     maxConcurrentCalls: 3,
     crossDomainCalls: false,
     secretsToNonAllowlisted: false,
+  },
+  paramLimits: {
+    maxStringLength: 10_000,
+    maxDepth: 5,
+    maxProperties: 50,
   },
   payloadLimits: {
     maxResponseBodyBytes: 10 * 1024 * 1024,  // 10MB
@@ -75,6 +85,7 @@ const DEFAULT_CONFIG: OneAgentConfig & { daemon: { port: number; autoStart: bool
   promotionVolatilityThreshold: 0.2,
   maxToolsPerSite: 20,
   toolShortlistK: 10,
+  slimMode: false,
 };
 
 const NUMERIC_CONFIG_KEYS = new Set([
@@ -240,30 +251,32 @@ const ENV_OVERRIDES: Array<{
   key: string;
   parse: (v: string) => unknown;
 }> = [
-  { env: 'ONEAGENT_DATA_DIR',       key: 'dataDir',                parse: String },
-  { env: 'ONEAGENT_LOG_LEVEL',      key: 'logLevel',               parse: String },
-  { env: 'ONEAGENT_AUTH_TOKEN',     key: 'server.authToken',       parse: String },
-  { env: 'ONEAGENT_NETWORK',        key: 'server.network',         parse: parseStrictBool },
-  { env: 'ONEAGENT_HTTP_TRANSPORT', key: 'features.httpTransport', parse: parseStrictBool },
-  { env: 'ONEAGENT_HTTP_PORT',      key: 'server.httpPort',        parse: parseStrictInt },
-  { env: 'ONEAGENT_BROWSER_ENGINE', key: 'browser.engine',                parse: parseBrowserEngine },
-  { env: 'ONEAGENT_SNAPSHOT_MODE',  key: 'browser.features.snapshotMode', parse: parseSnapshotMode },
-  { env: 'ONEAGENT_INCREMENTAL_DIFFS', key: 'browser.features.incrementalDiffs', parse: parseStrictBool },
-  { env: 'ONEAGENT_MODAL_TRACKING', key: 'browser.features.modalTracking', parse: parseStrictBool },
-  { env: 'ONEAGENT_SCREENSHOT_RESIZE', key: 'browser.features.screenshotResize', parse: parseStrictBool },
-  { env: 'ONEAGENT_SCREENSHOT_FORMAT', key: 'browser.features.screenshotFormat', parse: parseScreenshotFormat },
-  { env: 'ONEAGENT_SCREENSHOT_QUALITY', key: 'browser.features.screenshotQuality', parse: parseScreenshotQuality },
-  { env: 'ONEAGENT_BATCH_ACTIONS',  key: 'browser.features.batchActions', parse: parseStrictBool },
-  { env: 'ONEAGENT_IDLE_TIMEOUT_MS', key: 'browser.idleTimeoutMs', parse: parseNonNegativeMs },
-  { env: 'ONEAGENT_HANDLER_TIMEOUT_MS', key: 'browser.handlerTimeoutMs', parse: parseNonNegativeMs },
-  { env: 'ONEAGENT_PROXY_SERVER',   key: 'browser.proxy.server',    parse: makeProxyServerParser() },
-  { env: 'ONEAGENT_PROXY_BYPASS',   key: 'browser.proxy.bypass',    parse: String },
-  { env: 'ONEAGENT_PROXY_USERNAME', key: 'browser.proxy.username',  parse: String },
-  { env: 'ONEAGENT_PROXY_PASSWORD', key: 'browser.proxy.password',  parse: String },
-  { env: 'ONEAGENT_GEO_LATITUDE',  key: 'browser.geo.geolocation.latitude',  parse: makeFloatParser('latitude', -90, 90) },
-  { env: 'ONEAGENT_GEO_LONGITUDE', key: 'browser.geo.geolocation.longitude', parse: makeFloatParser('longitude', -180, 180) },
-  { env: 'ONEAGENT_TIMEZONE',      key: 'browser.geo.timezoneId',   parse: makeTimezoneParser() },
-  { env: 'ONEAGENT_LOCALE',        key: 'browser.geo.locale',       parse: makeLocaleParser() },
+  { env: 'SCHRUTE_DATA_DIR',       key: 'dataDir',                parse: String },
+  { env: 'SCHRUTE_LOG_LEVEL',      key: 'logLevel',               parse: String },
+  { env: 'SCHRUTE_AUTH_TOKEN',     key: 'server.authToken',       parse: String },
+  { env: 'SCHRUTE_NETWORK',        key: 'server.network',         parse: parseStrictBool },
+  { env: 'SCHRUTE_HTTP_TRANSPORT', key: 'features.httpTransport', parse: parseStrictBool },
+  { env: 'SCHRUTE_SITEMAP_DISCOVERY', key: 'features.sitemapDiscovery', parse: parseStrictBool },
+  { env: 'SCHRUTE_ADAPTIVE_PATH_TRIE', key: 'features.adaptivePathTrie', parse: parseStrictBool },
+  { env: 'SCHRUTE_HTTP_PORT',      key: 'server.httpPort',        parse: parseStrictInt },
+  { env: 'SCHRUTE_BROWSER_ENGINE', key: 'browser.engine',                parse: parseBrowserEngine },
+  { env: 'SCHRUTE_SNAPSHOT_MODE',  key: 'browser.features.snapshotMode', parse: parseSnapshotMode },
+  { env: 'SCHRUTE_INCREMENTAL_DIFFS', key: 'browser.features.incrementalDiffs', parse: parseStrictBool },
+  { env: 'SCHRUTE_MODAL_TRACKING', key: 'browser.features.modalTracking', parse: parseStrictBool },
+  { env: 'SCHRUTE_SCREENSHOT_RESIZE', key: 'browser.features.screenshotResize', parse: parseStrictBool },
+  { env: 'SCHRUTE_SCREENSHOT_FORMAT', key: 'browser.features.screenshotFormat', parse: parseScreenshotFormat },
+  { env: 'SCHRUTE_SCREENSHOT_QUALITY', key: 'browser.features.screenshotQuality', parse: parseScreenshotQuality },
+  { env: 'SCHRUTE_BATCH_ACTIONS',  key: 'browser.features.batchActions', parse: parseStrictBool },
+  { env: 'SCHRUTE_IDLE_TIMEOUT_MS', key: 'browser.idleTimeoutMs', parse: parseNonNegativeMs },
+  { env: 'SCHRUTE_HANDLER_TIMEOUT_MS', key: 'browser.handlerTimeoutMs', parse: parseNonNegativeMs },
+  { env: 'SCHRUTE_PROXY_SERVER',   key: 'browser.proxy.server',    parse: makeProxyServerParser() },
+  { env: 'SCHRUTE_PROXY_BYPASS',   key: 'browser.proxy.bypass',    parse: String },
+  { env: 'SCHRUTE_PROXY_USERNAME', key: 'browser.proxy.username',  parse: String },
+  { env: 'SCHRUTE_PROXY_PASSWORD', key: 'browser.proxy.password',  parse: String },
+  { env: 'SCHRUTE_GEO_LATITUDE',  key: 'browser.geo.geolocation.latitude',  parse: makeFloatParser('latitude', -90, 90) },
+  { env: 'SCHRUTE_GEO_LONGITUDE', key: 'browser.geo.geolocation.longitude', parse: makeFloatParser('longitude', -180, 180) },
+  { env: 'SCHRUTE_TIMEZONE',      key: 'browser.geo.timezoneId',   parse: makeTimezoneParser() },
+  { env: 'SCHRUTE_LOCALE',        key: 'browser.geo.locale',       parse: makeLocaleParser() },
 ];
 
 function setNestedValue(obj: Record<string, unknown>, keyPath: string, value: unknown): void {
@@ -280,7 +293,7 @@ function setNestedValue(obj: Record<string, unknown>, keyPath: string, value: un
 }
 
 // Env overrides never persist to disk — returns a NEW object with env layered on top
-function applyEnvOverrides(config: OneAgentConfig): OneAgentConfig {
+function applyEnvOverrides(config: SchruteConfig): SchruteConfig {
   const runtime = structuredClone(config);
   for (const { env, key, parse } of ENV_OVERRIDES) {
     const val = process.env[env];
@@ -299,37 +312,37 @@ function applyEnvOverrides(config: OneAgentConfig): OneAgentConfig {
 
 // ─── Module-level singleton ─────────────────────────────────────────
 // Intentional for process-scoped daemon state
-let cachedConfig: OneAgentConfig | null = null;
+let cachedConfig: SchruteConfig | null = null;
 
-export function getDataDir(config?: OneAgentConfig): string {
+export function getDataDir(config?: SchruteConfig): string {
   return (config ?? getConfig()).dataDir;
 }
 
-export function getTmpDir(config?: OneAgentConfig): string {
+export function getTmpDir(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'tmp');
 }
 
-export function getSkillsDir(config?: OneAgentConfig): string {
+export function getSkillsDir(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'skills');
 }
 
-export function getAuditDir(config?: OneAgentConfig): string {
+export function getAuditDir(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'audit');
 }
 
-export function getBrowserDataDir(config?: OneAgentConfig): string {
+export function getBrowserDataDir(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'browser-data');
 }
 
-export function getDbPath(config?: OneAgentConfig): string {
+export function getDbPath(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'data', 'agent.db');
 }
 
-export function getConfigPath(config?: OneAgentConfig): string {
+export function getConfigPath(config?: SchruteConfig): string {
   return path.join(getDataDir(config), 'config.json');
 }
 
-export function ensureDirectories(config?: OneAgentConfig): void {
+export function ensureDirectories(config?: SchruteConfig): void {
   const cfg = config ?? getConfig();
   const dirs = [
     cfg.dataDir,
@@ -347,7 +360,7 @@ export function ensureDirectories(config?: OneAgentConfig): void {
 }
 
 // loadConfig returns persisted config only (file + defaults) — no env overlay
-export function loadConfig(configPath?: string): OneAgentConfig {
+export function loadConfig(configPath?: string): SchruteConfig {
   const cfgPath = configPath ?? path.join(DEFAULT_DATA_DIR, 'config.json');
 
   if (!fs.existsSync(cfgPath)) {
@@ -358,14 +371,14 @@ export function loadConfig(configPath?: string): OneAgentConfig {
     const raw = fs.readFileSync(cfgPath, 'utf-8');
     const parsed = JSON.parse(raw);
 
-    // WARNING: Config loaded from file is not validated against OneAgentConfig schema.
-    // The double-cast (as unknown as OneAgentConfig) means any JSON structure is accepted.
+    // WARNING: Config loaded from file is not validated against SchruteConfig schema.
+    // The double-cast (as unknown as SchruteConfig) means any JSON structure is accepted.
     // Critical sections are validated below (server, daemon, payloadLimits, logLevel, server.network,
     // server.httpPort) but non-critical fields may silently have wrong types.
     const loaded = deepMerge(
       DEFAULT_CONFIG as unknown as Record<string, unknown>,
       parsed as Record<string, unknown>,
-    ) as unknown as OneAgentConfig;
+    ) as unknown as SchruteConfig;
 
     // Runtime validation for critical config sections
     if (typeof loaded.server !== 'object' || loaded.server === null) {
@@ -479,14 +492,14 @@ export function loadConfig(configPath?: string): OneAgentConfig {
   }
 }
 
-export function saveConfig(config: OneAgentConfig): void {
+export function saveConfig(config: SchruteConfig): void {
   const cfgPath = getConfigPath(config);
   fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  writeFileAtomically(cfgPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 // getConfig = applyEnvOverrides(loadConfig()) — runtime only
-export function getConfig(): OneAgentConfig {
+export function getConfig(): SchruteConfig {
   if (!cachedConfig) {
     cachedConfig = applyEnvOverrides(loadConfig());
   }
@@ -502,34 +515,14 @@ const VALID_TOP_LEVEL_KEYS = new Set([
   'audit', 'storage', 'server', 'daemon', 'browser', 'tempTtlMs', 'gcIntervalMs',
   'confirmationTimeoutMs', 'confirmationExpiryMs', 'promotionConsecutivePasses',
   'promotionVolatilityThreshold', 'maxToolsPerSite', 'toolShortlistK',
+  'browserPool', 'managedCrawl', 'slimMode',
 ]);
 
-// setConfigValue loads from file (no env), mutates, saves — env values never leak to disk
-export function setConfigValue(keyPath: string, value: unknown): OneAgentConfig {
-  const topKey = keyPath.split('.')[0];
-  if (!VALID_TOP_LEVEL_KEYS.has(topKey)) {
-    throw new Error(`Unknown config key: ${topKey}. Valid keys: ${[...VALID_TOP_LEVEL_KEYS].join(', ')}`);
-  }
-
-  const fileConfig = loadConfig(); // raw persisted config — no env overlay
-  const keys = keyPath.split('.');
-  let current: Record<string, unknown> = fileConfig as unknown as Record<string, unknown>;
-
-  for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i];
-    if (typeof current[key] !== 'object' || current[key] === null) {
-      current[key] = {};
-    }
-    current = current[key] as Record<string, unknown>;
-  }
-
-  const lastKey = keys[keys.length - 1];
-  if (value === 'true') value = true;
-  else if (value === 'false') value = false;
-  else if (typeof value === 'string' && !isNaN(Number(value)) && NUMERIC_CONFIG_KEYS.has(keyPath)) {
-    value = Number(value);
-  }
-
+/**
+ * Validate a config value for a given keyPath.
+ * Throws on invalid values. Coercion (string→boolean/number) stays inline in callers.
+ */
+function validateConfigValue(keyPath: string, value: unknown): void {
   // Validate browser.engine
   if (keyPath === 'browser.engine' && typeof value === 'string') {
     if (!VALID_BROWSER_ENGINES.has(value)) {
@@ -627,6 +620,35 @@ export function setConfigValue(keyPath: string, value: unknown): OneAgentConfig 
       }
     }
   }
+}
+
+// setConfigValue loads from file (no env), mutates, saves — env values never leak to disk
+export function setConfigValue(keyPath: string, value: unknown): SchruteConfig {
+  const topKey = keyPath.split('.')[0];
+  if (!VALID_TOP_LEVEL_KEYS.has(topKey)) {
+    throw new Error(`Unknown config key: ${topKey}. Valid keys: ${[...VALID_TOP_LEVEL_KEYS].join(', ')}`);
+  }
+
+  const fileConfig = loadConfig(); // raw persisted config — no env overlay
+  const keys = keyPath.split('.');
+  let current: Record<string, unknown> = fileConfig as unknown as Record<string, unknown>;
+
+  for (let i = 0; i < keys.length - 1; i++) {
+    const key = keys[i];
+    if (typeof current[key] !== 'object' || current[key] === null) {
+      current[key] = {};
+    }
+    current = current[key] as Record<string, unknown>;
+  }
+
+  const lastKey = keys[keys.length - 1];
+  if (value === 'true') value = true;
+  else if (value === 'false') value = false;
+  else if (typeof value === 'string' && !isNaN(Number(value)) && NUMERIC_CONFIG_KEYS.has(keyPath)) {
+    value = Number(value);
+  }
+
+  validateConfigValue(keyPath, value);
 
   current[lastKey] = value;
   saveConfig(fileConfig);
@@ -634,7 +656,7 @@ export function setConfigValue(keyPath: string, value: unknown): OneAgentConfig 
   return cachedConfig;
 }
 
-export function setConfigValueInMemory(keyPath: string, value: unknown): OneAgentConfig {
+export function setConfigValueInMemory(keyPath: string, value: unknown): SchruteConfig {
   const topKey = keyPath.split('.')[0];
   if (!VALID_TOP_LEVEL_KEYS.has(topKey)) {
     throw new Error(`Unknown config key: ${topKey}. Valid keys: ${[...VALID_TOP_LEVEL_KEYS].join(', ')}`);
@@ -660,99 +682,31 @@ export function setConfigValueInMemory(keyPath: string, value: unknown): OneAgen
     value = Number(value);
   }
 
-  // Apply same validations as setConfigValue
-  if (keyPath === 'browser.engine' && typeof value === 'string') {
-    if (!VALID_BROWSER_ENGINES.has(value)) {
-      throw new Error(
-        `Invalid value for browser.engine: "${value}". ` +
-        `Must be one of: ${[...VALID_BROWSER_ENGINES].join(', ')}.`,
-      );
-    }
-  }
-  if (keyPath === 'browser.features.snapshotMode' && typeof value === 'string') {
-    if (!VALID_SNAPSHOT_MODES.has(value)) {
-      throw new Error(
-        `Invalid value for browser.features.snapshotMode: "${value}". ` +
-        `Must be one of: ${[...VALID_SNAPSHOT_MODES].join(', ')}.`,
-      );
-    }
-  }
-  if (keyPath === 'browser.features.screenshotFormat') {
-    if (value !== 'jpeg' && value !== 'png') {
-      throw new Error(
-        `Invalid value for browser.features.screenshotFormat: "${value}". Must be 'jpeg' or 'png'.`,
-      );
-    }
-  }
-  if (keyPath === 'browser.features.screenshotQuality') {
-    const num = typeof value === 'number' ? value : Number(value);
-    if (!Number.isFinite(num) || num < 1 || num > 100) {
-      throw new Error(
-        `Invalid value for browser.features.screenshotQuality: must be a number between 1 and 100. Got: ${value}.`,
-      );
-    }
-  }
-  if (keyPath === 'browser.idleTimeoutMs' || keyPath === 'browser.handlerTimeoutMs') {
-    if (typeof value === 'number' && (value < 0 || !Number.isInteger(value))) {
-      throw new Error(`Invalid value for ${keyPath}: must be a non-negative integer (milliseconds).`);
-    }
-  }
-  if (keyPath === 'browser.proxy.server' && typeof value === 'string') {
-    try {
-      makeProxyServerParser()(value);
-    } catch (err) {
-      throw new Error(err instanceof Error ? err.message : String(err));
-    }
-  }
-  if (keyPath === 'browser.geo.geolocation.latitude' && typeof value === 'number') {
-    if (!Number.isFinite(value) || value < -90 || value > 90) {
-      throw new Error(`Invalid config: latitude must be between -90 and 90. Got: ${value}.`);
-    }
-  }
-  if (keyPath === 'browser.geo.geolocation.longitude' && typeof value === 'number') {
-    if (!Number.isFinite(value) || value < -180 || value > 180) {
-      throw new Error(`Invalid config: longitude must be between -180 and 180. Got: ${value}.`);
-    }
-  }
-  if (keyPath === 'browser.geo.timezoneId' && typeof value === 'string') {
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: value });
-    } catch {
-      throw new Error(`Invalid config: '${value}' is not a valid IANA timezone.`);
-    }
-  }
-  if (keyPath === 'browser.geo.locale' && typeof value === 'string') {
-    try {
-      Intl.getCanonicalLocales(value);
-    } catch {
-      throw new Error(`Invalid config: '${value}' is not a valid locale.`);
-    }
-  }
-  if (keyPath === 'capabilities.enabled') {
-    if (!Array.isArray(value)) throw new Error('capabilities.enabled must be an array');
-    const validCapabilities = Object.values(Capability);
-    for (const cap of value as string[]) {
-      if (!(validCapabilities as string[]).includes(cap)) {
-        throw new Error(`Invalid capability '${cap}'. Valid: ${validCapabilities.join(', ')}`);
-      }
-    }
-  }
+  validateConfigValue(keyPath, value);
 
   current[lastKey] = value;
   cachedConfig = applyEnvOverrides(modified);
   return cachedConfig;
 }
 
-export function getDaemonSocketPath(config: OneAgentConfig): string {
-  return path.join(config.dataDir, 'daemon.sock');
+function normalizeDataDir(dataDir: string): string {
+  try {
+    return fs.realpathSync(dataDir);
+  } catch {
+    return path.resolve(dataDir);
+  }
 }
 
-export function getDaemonPidPath(config: OneAgentConfig): string {
-  return path.join(config.dataDir, 'daemon.pid');
+export function getDaemonSocketPath(config: SchruteConfig): string {
+  return path.join(normalizeDataDir(config.dataDir), 'daemon.sock');
 }
 
-export function getDaemonTokenPath(config: OneAgentConfig): string {
-  return path.join(config.dataDir, 'daemon.token');
+export function getDaemonPidPath(config: SchruteConfig): string {
+  return path.join(normalizeDataDir(config.dataDir), 'daemon.pid');
+}
+
+export function getDaemonTokenPath(config: SchruteConfig): string {
+  return path.join(normalizeDataDir(config.dataDir), 'daemon.token');
 }
 
 function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
