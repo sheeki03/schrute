@@ -1,6 +1,8 @@
 import * as crypto from 'node:crypto';
 import {
   ANALYTICS_DOMAINS,
+  AD_NETWORK_DOMAINS,
+  CDN_INFRASTRUCTURE_DOMAINS,
   FEATURE_FLAG_DOMAINS,
   STATIC_ASSET_EXTENSIONS,
   type RequestClassificationName,
@@ -14,7 +16,10 @@ const log = getLogger();
 // ─── Domain Sets ─────────────────────────────────────────────────────
 
 const ANALYTICS_SET = new Set(ANALYTICS_DOMAINS);
+const AD_NETWORK_SET = new Set(AD_NETWORK_DOMAINS);
+const CDN_INFRA_SET = new Set(CDN_INFRASTRUCTURE_DOMAINS);
 const FEATURE_FLAG_SET = new Set(FEATURE_FLAG_DOMAINS);
+const STATIC_RESOURCE_TYPE_SET = buildStaticResourceTypeSet();
 
 // ─── Filter Result ───────────────────────────────────────────────────
 
@@ -111,6 +116,71 @@ export function filterRequests(
   return { signal, noise, ambiguous };
 }
 
+export function isObviousNoise(
+  url: string,
+  method: string,
+  status: number,
+  siteHost: string,
+  resourceType?: string,
+): { obvious: boolean; reason?: string } {
+  const hostname = extractHostname(url);
+  const urlPath = getUrlPath(url);
+
+  if (hostname) {
+    if (matchesDomainList(hostname, ANALYTICS_SET)) {
+      return { obvious: true, reason: 'analytics' };
+    }
+    if (matchesDomainList(hostname, AD_NETWORK_SET)) {
+      return { obvious: true, reason: 'ad_network' };
+    }
+    if (matchesDomainList(hostname, CDN_INFRA_SET)) {
+      return { obvious: true, reason: 'cdn_infra' };
+    }
+  }
+
+  if (isStaticAsset(urlPath)) {
+    return { obvious: true, reason: 'static_asset' };
+  }
+
+  if (urlPath.toLowerCase().startsWith('/cdn-cgi/')) {
+    return { obvious: true, reason: 'cdn_cgi' };
+  }
+
+  if (resourceType && STATIC_RESOURCE_TYPE_SET.has(resourceType.toLowerCase())) {
+    return { obvious: true, reason: 'resource_type' };
+  }
+
+  if (hostname && siteHost && isCrossOriginNoise(hostname, siteHost)) {
+    return { obvious: true, reason: 'cross_origin' };
+  }
+
+  return { obvious: false };
+}
+
+export function shouldCaptureResponseBody(
+  url: string,
+  method: string,
+  status: number,
+  contentType: string | undefined,
+  siteHost: string,
+  resourceType?: string,
+): boolean {
+  if (isObviousNoise(url, method, status, siteHost, resourceType).obvious) {
+    return false;
+  }
+
+  if (status < 200 || status >= 300) {
+    return false;
+  }
+
+  const normalized = (contentType ?? '').toLowerCase();
+  return (
+    normalized.includes('application/json') ||
+    normalized.includes('+json') ||
+    normalized.includes('text/json')
+  );
+}
+
 // ─── Record Entries to DB ────────────────────────────────────────────
 
 export function recordFilteredEntries(
@@ -186,6 +256,14 @@ function classifyEntry(
     return { classification: 'noise', reason: 'analytics' };
   }
 
+  if (matchesDomainList(hostname, AD_NETWORK_SET)) {
+    return { classification: 'noise', reason: 'ad_network' };
+  }
+
+  if (matchesDomainList(hostname, CDN_INFRA_SET)) {
+    return { classification: 'noise', reason: 'cdn_infra' };
+  }
+
   // Feature flag domains
   if (matchesDomainList(hostname, FEATURE_FLAG_SET)) {
     return { classification: 'noise', reason: 'feature_flag' };
@@ -234,6 +312,62 @@ function matchesDomainList(hostname: string, domainSet: Set<string>): boolean {
   return false;
 }
 
+function buildStaticResourceTypeSet(): Set<string> {
+  const resourceTypes = new Set<string>(['websocket', 'eventsource']);
+
+  for (const ext of STATIC_ASSET_EXTENSIONS) {
+    switch (ext) {
+      case '.js':
+      case '.map':
+        resourceTypes.add('script');
+        break;
+      case '.css':
+        resourceTypes.add('stylesheet');
+        break;
+      case '.png':
+      case '.jpg':
+      case '.jpeg':
+      case '.gif':
+      case '.svg':
+      case '.ico':
+        resourceTypes.add('image');
+        break;
+      case '.woff':
+      case '.woff2':
+      case '.ttf':
+      case '.eot':
+      case '.otf':
+        resourceTypes.add('font');
+        break;
+      default:
+        break;
+    }
+  }
+
+  return resourceTypes;
+}
+
+function extractHostname(url: string): string | null {
+  const schemeIdx = url.indexOf('://');
+  if (schemeIdx >= 0) {
+    const hostStart = schemeIdx + 3;
+    let hostEnd = url.indexOf('/', hostStart);
+    if (hostEnd === -1) hostEnd = url.length;
+    const authEnd = url.lastIndexOf('@', hostEnd);
+    const rawHost = url.slice(authEnd >= hostStart ? authEnd + 1 : hostStart, hostEnd);
+    const host = rawHost.startsWith('[')
+      ? rawHost.slice(0, rawHost.indexOf(']') + 1)
+      : rawHost.split(':', 1)[0];
+    if (host) return host.toLowerCase();
+  }
+
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function getUrlPath(url: string): string {
   try {
     return new URL(url).pathname;
@@ -242,9 +376,42 @@ function getUrlPath(url: string): string {
   }
 }
 
+function getRootDomain(hostname: string): string {
+  const normalized = hostname.replace(/^\[|\]$/g, '');
+  const parts = normalized.split('.').filter(Boolean);
+  if (parts.length <= 2) return normalized.toLowerCase();
+  return parts.slice(-2).join('.').toLowerCase();
+}
+
 function isStaticAsset(urlPath: string): boolean {
   const lowerPath = urlPath.toLowerCase();
   return STATIC_ASSET_EXTENSIONS.some(ext => lowerPath.endsWith(ext));
+}
+
+function isCrossOriginNoise(hostname: string, siteHost: string): boolean {
+  const normalizedHost = hostname.toLowerCase();
+  const normalizedSiteHost = siteHost.toLowerCase();
+
+  if (
+    normalizedHost === normalizedSiteHost ||
+    normalizedHost.endsWith(`.${normalizedSiteHost}`) ||
+    normalizedSiteHost.endsWith(`.${normalizedHost}`)
+  ) {
+    return false;
+  }
+
+  const hostRoot = getRootDomain(normalizedHost);
+  const siteRoot = getRootDomain(normalizedSiteHost);
+  if (hostRoot === siteRoot) {
+    const hostPrefix = normalizedHost.slice(0, normalizedHost.length - hostRoot.length).replace(/\.$/, '');
+    const sitePrefix = normalizedSiteHost.slice(0, normalizedSiteHost.length - siteRoot.length).replace(/\.$/, '');
+    const allowedPrefixes = new Set(['', 'api', 'cdn', 'www']);
+    if (allowedPrefixes.has(hostPrefix) || allowedPrefixes.has(sitePrefix)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function isBeacon(entry: HarEntry): boolean {

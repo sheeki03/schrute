@@ -659,6 +659,7 @@ export interface SchruteConfig {
   promotionConsecutivePasses: number; // default: 5
   promotionVolatilityThreshold: number; // default: 0.2
   maxToolsPerSite: number;       // default: 20
+  maxSkillsPerRecording: number; // default: 15
   toolShortlistK: number;        // default: 10
   slimMode?: boolean;
 }
@@ -749,16 +750,34 @@ export const DESTRUCTIVE_POST_PATTERNS = [
 export const ANALYTICS_DOMAINS = [
   'segment.io', 'segment.com',
   'google-analytics.com', 'analytics.google.com', 'googletagmanager.com',
+  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
   'mixpanel.com',
+  'cdn.mxpnl.com', 'cdn.segment.com',
   'hotjar.com', 'hotjar.io',
   'fullstory.com',
   'amplitude.com',
   'heap.io', 'heapanalytics.com',
+  'facebook.net', 'connect.facebook.net',
+  'clarity.ms', 'bat.bing.com',
+  'cloudflareinsights.com',
   'sentry.io',
   'newrelic.com',
   'datadog-agent',
   'bugsnag.com',
   'logrocket.com',
+];
+
+export const AD_NETWORK_DOMAINS = [
+  'doubleclick.net',
+  'googlesyndication.com',
+  'adnxs.com',
+  'criteo.com',
+  'taboola.com',
+  'outbrain.com',
+];
+
+export const CDN_INFRASTRUCTURE_DOMAINS = [
+  'challenges.cloudflare.com',
 ];
 
 export const FEATURE_FLAG_DOMAINS = [

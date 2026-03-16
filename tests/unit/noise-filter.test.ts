@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { filterRequests } from '../../src/capture/noise-filter.js';
+import {
+  filterRequests,
+  isObviousNoise,
+  shouldCaptureResponseBody,
+} from '../../src/capture/noise-filter.js';
 import type { HarEntry } from '../../src/capture/har-extractor.js';
 
 function makeEntry(overrides: Partial<{
@@ -51,6 +55,111 @@ function makeEntry(overrides: Partial<{
 }
 
 describe('noise-filter', () => {
+  describe('isObviousNoise', () => {
+    it('flags analytics domains as obvious noise', () => {
+      expect(isObviousNoise(
+        'https://api.segment.io/v1/track',
+        'POST',
+        200,
+        'www.example.com',
+      )).toEqual({ obvious: true, reason: 'analytics' });
+    });
+
+    it('flags static assets as obvious noise', () => {
+      expect(isObviousNoise(
+        'https://static.example.com/app.js',
+        'GET',
+        200,
+        'www.example.com',
+        'script',
+      )).toEqual({ obvious: true, reason: 'static_asset' });
+    });
+
+    it('flags cloudflare challenge infrastructure as obvious noise', () => {
+      expect(isObviousNoise(
+        'https://challenges.cloudflare.com/turnstile/v0/api.js',
+        'GET',
+        200,
+        'www.example.com',
+      )).toEqual({ obvious: true, reason: 'cdn_infra' });
+    });
+
+    it('flags unrelated cross-origin requests as obvious noise', () => {
+      expect(isObviousNoise(
+        'https://tracker.evil.net/collect',
+        'GET',
+        200,
+        'www.example.com',
+      )).toEqual({ obvious: true, reason: 'cross_origin' });
+    });
+
+    it('flags websocket resource types as obvious noise', () => {
+      expect(isObviousNoise(
+        'wss://api.example.com/socket',
+        'GET',
+        101,
+        'www.example.com',
+        'websocket',
+      )).toEqual({ obvious: true, reason: 'resource_type' });
+    });
+
+    it('allows same-root API subdomains', () => {
+      expect(isObviousNoise(
+        'https://api.example.com/users',
+        'GET',
+        200,
+        'www.example.com',
+        'fetch',
+      )).toEqual({ obvious: false });
+    });
+  });
+
+  describe('shouldCaptureResponseBody', () => {
+    it('captures successful JSON responses', () => {
+      expect(shouldCaptureResponseBody(
+        'https://api.example.com/users',
+        'GET',
+        200,
+        'application/json; charset=utf-8',
+        'www.example.com',
+        'fetch',
+      )).toBe(true);
+    });
+
+    it('does not capture html responses', () => {
+      expect(shouldCaptureResponseBody(
+        'https://www.example.com/page',
+        'GET',
+        200,
+        'text/html; charset=utf-8',
+        'www.example.com',
+        'document',
+      )).toBe(false);
+    });
+
+    it('does not capture redirects', () => {
+      expect(shouldCaptureResponseBody(
+        'https://api.example.com/login',
+        'POST',
+        302,
+        'application/json',
+        'www.example.com',
+        'fetch',
+      )).toBe(false);
+    });
+
+    it('does not capture obvious noise even if the content is json', () => {
+      expect(shouldCaptureResponseBody(
+        'https://api.segment.io/v1/track',
+        'POST',
+        200,
+        'application/json',
+        'www.example.com',
+        'fetch',
+      )).toBe(false);
+    });
+  });
+
   describe('analytics domains', () => {
     it('filters segment.io', () => {
       const result = filterRequests([makeEntry({ url: 'https://api.segment.io/v1/track' })]);
