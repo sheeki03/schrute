@@ -16,6 +16,10 @@ export interface EndpointCluster {
   bodyShape?: Record<string, string>; // field -> type
 }
 
+export interface ScoredCluster extends EndpointCluster {
+  utilityScore: number;
+}
+
 // ─── Path Parameterization ───────────────────────────────────────────
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,6 +93,78 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
 
   log.debug({ clusterCount: clusters.length }, 'Clustered endpoints');
   return clusters;
+}
+
+// ─── Cluster Utility Ranking ────────────────────────────────────────
+
+const GARBAGE_SEGMENT_HEX_RE = /^[0-9a-f]{16,}$/i;
+const GARBAGE_SEGMENT_TOKEN_RE = /^[A-Za-z0-9_-]{20,}$/;
+
+export function scoreAndRankClusters(
+  clusters: EndpointCluster[],
+  maxClusters: number,
+): ScoredCluster[] {
+  if (maxClusters <= 0 || clusters.length === 0) return [];
+
+  const scored = clusters.map(cluster => {
+    const segments = cluster.pathTemplate.split('/').filter(Boolean);
+    const pathSpecificity = Math.min(segments.length / 5, 1);
+
+    const uniqueBodyFingerprints = new Set(
+      cluster.requests
+        .map(rec => rec.request.body)
+        .filter((body): body is string => typeof body === 'string' && body.length > 0),
+    ).size;
+    const sampleDiversity = Math.min(uniqueBodyFingerprints / 3, 1);
+
+    const methodWeight = methodUtilityWeight(cluster.method);
+
+    const authPresent = cluster.requests.some(rec => {
+      const keys = Object.keys(rec.request.headers);
+      return keys.some(key => {
+        const normalized = key.toLowerCase();
+        return normalized === 'authorization' || normalized === 'cookie';
+      });
+    });
+    const authScore = authPresent ? 1 : 0.5;
+
+    const bodyComplexity = Math.min(Object.keys(cluster.bodyShape ?? {}).length / 5, 1);
+
+    const successful = cluster.requests.filter(rec =>
+      rec.response.status >= 200 && rec.response.status < 300,
+    ).length;
+    const successRate = cluster.requests.length > 0
+      ? successful / cluster.requests.length
+      : 0;
+
+    const rawScore = (
+      pathSpecificity * 0.25 +
+      sampleDiversity * 0.20 +
+      methodWeight * 0.15 +
+      authScore * 0.15 +
+      bodyComplexity * 0.15 +
+      successRate * 0.10
+    );
+
+    const penalty = hasGarbageTerminalSegment(cluster.pathTemplate) ? 0.5 : 1;
+    const utilityScore = Number((rawScore * penalty).toFixed(6));
+
+    return {
+      ...cluster,
+      utilityScore,
+    };
+  });
+
+  scored.sort((a, b) => {
+    if (b.utilityScore !== a.utilityScore) {
+      return b.utilityScore - a.utilityScore;
+    }
+    const aKey = `${a.method}|${a.pathTemplate}`;
+    const bKey = `${b.method}|${b.pathTemplate}`;
+    return aKey.localeCompare(bKey);
+  });
+
+  return scored.slice(0, maxClusters);
 }
 
 // ─── Header Extraction ───────────────────────────────────────────────
@@ -166,4 +242,21 @@ function inferBodyShape(requests: StructuredRequest[]): Record<string, string> |
   }
 
   return shape;
+}
+
+function methodUtilityWeight(method: string): number {
+  const normalized = method.toUpperCase();
+  if (normalized === 'GET') return 1;
+  if (normalized === 'POST') return 0.8;
+  if (normalized === 'PUT' || normalized === 'PATCH') return 0.7;
+  if (normalized === 'DELETE') return 0.6;
+  if (normalized === 'HEAD') return 0.3;
+  return 0.5;
+}
+
+function hasGarbageTerminalSegment(pathTemplate: string): boolean {
+  const segments = pathTemplate.split('/').filter(Boolean);
+  if (segments.length === 0) return false;
+  const last = segments[segments.length - 1];
+  return GARBAGE_SEGMENT_HEX_RE.test(last) || GARBAGE_SEGMENT_TOKEN_RE.test(last);
 }

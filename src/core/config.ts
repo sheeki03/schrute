@@ -83,6 +83,7 @@ const DEFAULT_CONFIG: SchruteConfig = {
   promotionConsecutivePasses: 5,
   promotionVolatilityThreshold: 0.2,
   maxToolsPerSite: 20,
+  maxSkillsPerRecording: 15,
   toolShortlistK: 10,
   slimMode: false,
 };
@@ -109,6 +110,7 @@ const NUMERIC_CONFIG_KEYS = new Set([
   'promotionConsecutivePasses',
   'promotionVolatilityThreshold',
   'maxToolsPerSite',
+  'maxSkillsPerRecording',
   'toolShortlistK',
   'browser.idleTimeoutMs',
   'browser.handlerTimeoutMs',

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parameterizePath,
   clusterEndpoints,
+  scoreAndRankClusters,
   type EndpointCluster,
 } from '../../src/capture/api-extractor.js';
 import type { StructuredRecord } from '../../src/capture/har-extractor.js';
@@ -173,6 +174,97 @@ describe('api-extractor', () => {
       const clusters = clusterEndpoints(records);
       expect(clusters).toHaveLength(1);
       expect(clusters[0].requests).toHaveLength(1);
+    });
+  });
+
+  describe('scoreAndRankClusters', () => {
+    it('returns the top N clusters sorted by utility score', () => {
+      const clusters: EndpointCluster[] = [
+        {
+          method: 'GET',
+          pathTemplate: '/coins/bitcoin',
+          requests: [
+            makeRecord('GET', 'https://api.example.com/coins/bitcoin', { authorization: 'Bearer token' }),
+          ],
+          commonHeaders: { authorization: 'Bearer token' },
+          commonQueryParams: [],
+        },
+        {
+          method: 'POST',
+          pathTemplate: '/user/preferences',
+          requests: [
+            makeRecord('POST', 'https://api.example.com/user/preferences', {}, {}, JSON.stringify({ theme: 'dark', locale: 'en' })),
+            makeRecord('POST', 'https://api.example.com/user/preferences', {}, {}, JSON.stringify({ theme: 'light', locale: 'fr' })),
+          ],
+          commonHeaders: {},
+          commonQueryParams: [],
+          bodyShape: { theme: 'string', locale: 'string' },
+        },
+        {
+          method: 'HEAD',
+          pathTemplate: '/health',
+          requests: [
+            makeRecord('HEAD', 'https://api.example.com/health'),
+          ],
+          commonHeaders: {},
+          commonQueryParams: [],
+        },
+      ];
+
+      const ranked = scoreAndRankClusters(clusters, 2);
+
+      expect(ranked).toHaveLength(2);
+      expect(ranked[0].utilityScore).toBeGreaterThanOrEqual(ranked[1].utilityScore);
+      expect(ranked.map(cluster => cluster.pathTemplate)).toEqual([
+        '/user/preferences',
+        '/coins/bitcoin',
+      ]);
+    });
+
+    it('applies a penalty to garbage terminal segments', () => {
+      const useful: EndpointCluster = {
+        method: 'GET',
+        pathTemplate: '/coins/markets',
+        requests: [makeRecord('GET', 'https://api.example.com/coins/markets')],
+        commonHeaders: {},
+        commonQueryParams: [],
+      };
+      const garbage: EndpointCluster = {
+        method: 'GET',
+        pathTemplate: '/get_b3djqiyguqx6fumTOKENVALUE',
+        requests: [makeRecord('GET', 'https://api.example.com/get_b3djqiyguqx6fumTOKENVALUE')],
+        commonHeaders: {},
+        commonQueryParams: [],
+      };
+
+      const [usefulRank, garbageRank] = scoreAndRankClusters([useful, garbage], 2);
+
+      expect(usefulRank.pathTemplate).toBe('/coins/markets');
+      expect(garbageRank.pathTemplate).toBe('/get_b3djqiyguqx6fumTOKENVALUE');
+      expect(usefulRank.utilityScore).toBeGreaterThan(garbageRank.utilityScore);
+    });
+
+    it('returns deterministic ordering when scores tie', () => {
+      const clusters: EndpointCluster[] = [
+        {
+          method: 'GET',
+          pathTemplate: '/zeta',
+          requests: [makeRecord('GET', 'https://api.example.com/zeta')],
+          commonHeaders: {},
+          commonQueryParams: [],
+        },
+        {
+          method: 'GET',
+          pathTemplate: '/alpha',
+          requests: [makeRecord('GET', 'https://api.example.com/alpha')],
+          commonHeaders: {},
+          commonQueryParams: [],
+        },
+      ];
+
+      const ranked = scoreAndRankClusters(clusters, 2);
+
+      expect(ranked.map(cluster => cluster.pathTemplate)).toEqual(['/alpha', '/zeta']);
     });
   });
 });
