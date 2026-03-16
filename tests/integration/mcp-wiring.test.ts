@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentDatabase } from '../../src/storage/database.js';
-import type { SkillSpec, OneAgentConfig } from '../../src/skill/types.js';
+import type { SkillSpec, SchruteConfig } from '../../src/skill/types.js';
 import { Capability, SkillStatus } from '../../src/skill/types.js';
 import { createFullSchemaDb } from '../helpers.js';
 
@@ -72,16 +72,16 @@ vi.mock('../../src/storage/database.js', async () => {
 
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/oneagent-mcp-wiring-test',
+    dataDir: '/tmp/schrute-mcp-wiring-test',
     logLevel: 'silent',
   }),
   getDbPath: () => ':memory:',
   ensureDirectories: vi.fn(),
-  getBrowserDataDir: () => '/tmp/oneagent-mcp-wiring-test/browser',
-  getTmpDir: () => '/tmp/oneagent-mcp-wiring-test/tmp',
-  getSkillsDir: () => '/tmp/oneagent-mcp-wiring-test/skills',
-  getDataDir: () => '/tmp/oneagent-mcp-wiring-test',
-  getAuditDir: () => '/tmp/oneagent-mcp-wiring-test/audit',
+  getBrowserDataDir: () => '/tmp/schrute-mcp-wiring-test/browser',
+  getTmpDir: () => '/tmp/schrute-mcp-wiring-test/tmp',
+  getSkillsDir: () => '/tmp/schrute-mcp-wiring-test/skills',
+  getDataDir: () => '/tmp/schrute-mcp-wiring-test',
+  getAuditDir: () => '/tmp/schrute-mcp-wiring-test/audit',
 }));
 
 vi.mock('../../src/core/policy.js', async (importOriginal) => {
@@ -119,9 +119,9 @@ import { createRestMockServer } from '../fixtures/mock-sites/rest-mock-server.js
 
 // ─── Test Config ─────────────────────────────────────────────────
 
-function makeTestConfig(): OneAgentConfig {
+function makeTestConfig(): SchruteConfig {
   return {
-    dataDir: '/tmp/oneagent-mcp-wiring-test',
+    dataDir: '/tmp/schrute-mcp-wiring-test',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     toolBudget: {
@@ -149,7 +149,7 @@ function makeTestConfig(): OneAgentConfig {
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
     toolShortlistK: 10,
-  } as OneAgentConfig;
+  } as SchruteConfig;
 }
 
 const DEFAULT_CAPS = [
@@ -163,7 +163,7 @@ const DEFAULT_CAPS = [
 // ─── Tests ───────────────────────────────────────────────────────
 
 describe('MCP wiring integration', () => {
-  let config: OneAgentConfig;
+  let config: SchruteConfig;
   let engine: Engine;
   let skillRepo: SkillRepository;
   let siteRepo: SiteRepository;

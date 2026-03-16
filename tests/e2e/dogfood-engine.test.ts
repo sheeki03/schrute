@@ -39,7 +39,7 @@ vi.mock('../../src/core/config.js', async () => {
   return {
     ...actual,
     getConfig: () => ({
-      dataDir: '/tmp/oneagent-dogfood',
+      dataDir: '/tmp/schrute-dogfood',
       logLevel: 'silent',
       features: { webmcp: false, httpTransport: false },
       toolBudget: {
@@ -70,12 +70,12 @@ vi.mock('../../src/core/config.js', async () => {
     }),
     ensureDirectories: vi.fn(),
     getDbPath: () => ':memory:',
-    getDataDir: () => '/tmp/oneagent-dogfood',
-    getBrowserDataDir: () => '/tmp/oneagent-dogfood/browser-data',
-    getTmpDir: () => '/tmp/oneagent-dogfood/tmp',
-    getAuditDir: () => '/tmp/oneagent-dogfood/audit',
-    getSkillsDir: () => '/tmp/oneagent-dogfood/skills',
-    getConfigPath: () => '/tmp/oneagent-dogfood/config.json',
+    getDataDir: () => '/tmp/schrute-dogfood',
+    getBrowserDataDir: () => '/tmp/schrute-dogfood/browser-data',
+    getTmpDir: () => '/tmp/schrute-dogfood/tmp',
+    getAuditDir: () => '/tmp/schrute-dogfood/audit',
+    getSkillsDir: () => '/tmp/schrute-dogfood/skills',
+    getConfigPath: () => '/tmp/schrute-dogfood/config.json',
   };
 });
 
@@ -509,7 +509,7 @@ import { ContextOverrideMismatchError } from '../../src/browser/manager.js';
 // ─── Test Config ─────────────────────────────────────────────────
 
 const makeConfig = () => ({
-  dataDir: '/tmp/oneagent-dogfood',
+  dataDir: '/tmp/schrute-dogfood',
   logLevel: 'silent',
   features: { webmcp: false, httpTransport: false },
   toolBudget: {
