@@ -4,7 +4,7 @@ import { withTimeout } from '../core/utils.js';
 import type { RedactionMode } from '../skill/types.js';
 import { retrieve, store } from './secrets.js';
 
-const SALT_KEY = '__oneagent_redaction_salt__';
+const SALT_KEY = '__schrute_redaction_salt__';
 let cachedSalt: string | null = null;
 
 async function getSalt(): Promise<string> {
@@ -207,7 +207,7 @@ export interface HarEntry {
   };
 }
 
-export async function redactHarEntry(
+async function redactHarEntry(
   entry: HarEntry,
   timeoutMs = 10000,
 ): Promise<HarEntry> {

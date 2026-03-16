@@ -9,7 +9,6 @@ import type {
   SealedFetchRequest,
   SealedFetchResponse,
 } from './types.js';
-import { TierState } from './types.js';
 
 const log = getLogger();
 
@@ -35,7 +34,7 @@ export interface ExecutionResult {
   latencyMs: number;
 }
 
-export interface ExecutionOptions {
+interface ExecutionOptions {
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>;
   authRecipe?: AuthRecipe;
   timeoutMs?: number;

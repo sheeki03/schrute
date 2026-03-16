@@ -11,7 +11,7 @@ import { getLogger } from '../core/logger.js';
 import { getSkillsDir } from '../core/config.js';
 import type { ToolDispatchDeps } from './tool-dispatch.js';
 import type { SkillSpec } from '../skill/types.js';
-import { SkillStatus } from '../skill/types.js';
+import { SkillStatus, isParamRequired } from '../skill/types.js';
 
 const log = getLogger();
 
@@ -47,7 +47,7 @@ function redactSkill(skill: SkillSpec): SkillSummary {
     sampleCount: skill.sampleCount,
     parameters: skill.parameters.map((p) => ({
       name: p.name,
-      required: p.source === 'user_input',
+      required: isParamRequired(p),
       description: undefined,
     })),
   };
@@ -130,7 +130,7 @@ function listSkillDocResources(deps: ToolDispatchDeps): Array<{
         const hasTmpls = fs.existsSync(path.join(skillDir, 'templates'));
         if (hasRefs || hasTmpls) {
           resources.push({
-            uri: `oneagent://sites/${siteId}/skills/${skillId}/docs`,
+            uri: `schrute://sites/${siteId}/skills/${skillId}/docs`,
             name: `Skill Docs: ${skillId}`,
             mimeType: 'application/json',
             description: `API references and templates for skill ${skillId} on site ${siteId}`,
@@ -151,19 +151,19 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
     return {
       resources: [
         {
-          uri: 'oneagent://status',
+          uri: 'schrute://status',
           name: 'Engine Status',
           mimeType: 'application/json',
           description: 'Engine mode, uptime, and active session info',
         },
         {
-          uri: 'oneagent://skills',
+          uri: 'schrute://skills',
           name: 'Skill Catalog',
           mimeType: 'application/json',
           description: 'Redacted skill summaries',
         },
         {
-          uri: 'oneagent://sites',
+          uri: 'schrute://sites',
           name: 'Known Sites',
           mimeType: 'application/json',
           description: 'Sites with visit history',
@@ -179,7 +179,7 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
 
     try {
       switch (uri) {
-        case 'oneagent://status': {
+        case 'schrute://status': {
           const status = deps.engine.getStatus();
           return {
             contents: [
@@ -192,7 +192,7 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
           };
         }
 
-        case 'oneagent://skills': {
+        case 'schrute://skills': {
           const allSkills = typeof deps.skillRepo.getAll === 'function'
             ? deps.skillRepo.getAll()
             : [
@@ -216,7 +216,7 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
           };
         }
 
-        case 'oneagent://sites': {
+        case 'schrute://sites': {
           const allSites = deps.siteRepo.getAll();
           // Already ordered by lastVisited desc from repository
           const siteSummaries = allSites.map((s) => ({
@@ -238,8 +238,8 @@ export function registerResourceHandlers(server: Server, deps: ToolDispatchDeps)
         }
 
         default: {
-          // Check for skill docs URI: oneagent://sites/{siteId}/skills/{skillId}/docs
-          const docsMatch = uri.match(/^oneagent:\/\/sites\/([^/]+)\/skills\/([^/]+)\/docs$/);
+          // Check for skill docs URI: schrute://sites/{siteId}/skills/{skillId}/docs
+          const docsMatch = uri.match(/^schrute:\/\/sites\/([^/]+)\/skills\/([^/]+)\/docs$/);
           if (docsMatch) {
             const [, siteId, skillId] = docsMatch;
 
@@ -366,7 +366,7 @@ export function registerPromptHandlers(server: Server, deps: ToolDispatchDeps): 
                 type: 'text' as const,
                 text:
                   `I want to explore ${url} and discover its API endpoints. ` +
-                  `Start by calling oneagent_explore with this URL, then take a browser_snapshot ` +
+                  `Start by calling schrute_explore with this URL, then take a browser_snapshot ` +
                   `to see the page. Look for interactive elements (forms, buttons, links) that ` +
                   `might trigger API calls. Suggest which actions would be valuable to record as skills.`,
               },
@@ -386,10 +386,10 @@ export function registerPromptHandlers(server: Server, deps: ToolDispatchDeps): 
                 type: 'text' as const,
                 text:
                   `I want to record a browser action called "${actionName}" on ${url}. ` +
-                  `First, call oneagent_explore with the URL to start a browser session. ` +
-                  `Then call oneagent_record with the name "${actionName}". ` +
+                  `First, call schrute_explore with the URL to start a browser session. ` +
+                  `Then call schrute_record with the name "${actionName}". ` +
                   `Perform the action using browser tools (navigate, click, type, etc.). ` +
-                  `When the action is complete, call oneagent_stop to process the recording into a skill.`,
+                  `When the action is complete, call schrute_stop to process the recording into a skill.`,
               },
             },
           ],

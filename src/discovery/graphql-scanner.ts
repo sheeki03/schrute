@@ -53,7 +53,7 @@ const INTROSPECTION_QUERY = `
 
 // ─── Known GraphQL endpoints ─────────────────────────────────────────
 
-const GRAPHQL_PATHS = ['/graphql', '/api/graphql', '/gql'];
+export const GRAPHQL_PATHS = ['/graphql', '/api/graphql', '/gql'];
 
 // ─── Public API ──────────────────────────────────────────────────────
 
@@ -61,6 +61,7 @@ export async function scanGraphQL(
   baseUrl: string,
   headers?: Record<string, string>,
   fetchFn: typeof fetch = fetch,
+  pathFilter?: (path: string) => boolean,
 ): Promise<GraphQLScanResult> {
   const origin = normalizeOrigin(baseUrl);
 
@@ -80,6 +81,7 @@ export async function scanGraphQL(
   }
 
   for (const gqlPath of GRAPHQL_PATHS) {
+    if (pathFilter && !pathFilter(gqlPath)) continue;
     const url = `${origin}${gqlPath}`;
     try {
       const resp = await fetchFn(url, {
@@ -116,6 +118,80 @@ export async function scanGraphQL(
   }
 
   return { found: false, queries: [], mutations: [] };
+}
+
+/**
+ * Introspect a GraphQL endpoint at an exact URL (no path probing).
+ */
+export async function scanGraphQLAt(
+  endpointUrl: string,
+  allowedOrigin?: string,
+  headers?: Record<string, string>,
+  fetchFn: typeof fetch = fetch,
+): Promise<GraphQLScanResult> {
+  // SSRF guard: same-origin check
+  if (allowedOrigin) {
+    try {
+      if (new URL(endpointUrl).origin !== allowedOrigin) {
+        log.warn({ endpointUrl, allowedOrigin }, 'scanGraphQLAt blocked — origin mismatch');
+        return { found: false, queries: [], mutations: [] };
+      }
+    } catch {
+      return { found: false, queries: [], mutations: [] };
+    }
+  }
+
+  // Public-IP validation (only when using real fetch)
+  if (fetchFn === fetch) {
+    try {
+      const hostname = new URL(endpointUrl).hostname;
+      const ipCheck = await resolveAndValidate(hostname);
+      if (!ipCheck.allowed) {
+        log.warn({ hostname, ip: ipCheck.ip, category: ipCheck.category }, 'scanGraphQLAt blocked — private IP');
+        return { found: false, queries: [], mutations: [] };
+      }
+    } catch {
+      return { found: false, queries: [], mutations: [] };
+    }
+  }
+
+  try {
+    const resp = await fetchFn(endpointUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json',
+        ...headers,
+      },
+      body: JSON.stringify({ query: INTROSPECTION_QUERY }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) {
+      return { found: false, queries: [], mutations: [] };
+    }
+
+    const json = (await resp.json()) as Record<string, unknown>;
+    const data = json.data as Record<string, unknown> | undefined;
+    if (!data?.__schema) {
+      return { found: false, queries: [], mutations: [] };
+    }
+
+    log.info({ url: endpointUrl }, 'GraphQL introspection succeeded (exact URL)');
+
+    const schema = data.__schema as IntrospectionSchema;
+    const queries = extractOperations(schema, schema.queryType?.name ?? 'Query', 'query');
+    const mutations = extractOperations(schema, schema.mutationType?.name ?? 'Mutation', 'mutation');
+
+    return {
+      found: true,
+      queries,
+      mutations,
+    };
+  } catch (err) {
+    log.debug({ err, url: endpointUrl }, 'scanGraphQLAt failed');
+    return { found: false, queries: [], mutations: [] };
+  }
 }
 
 /**

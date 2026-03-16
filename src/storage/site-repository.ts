@@ -27,6 +27,8 @@ interface SiteRow {
   recommended_tier: string;
   total_requests: number;
   successful_requests: number;
+  lighthouse_score: number | null;
+  lighthouse_accessibility: number | null;
 }
 
 function rowToSite(row: SiteRow): SiteManifest {
@@ -39,6 +41,8 @@ function rowToSite(row: SiteRow): SiteManifest {
     recommendedTier: validateExecutionTier(row.recommended_tier),
     totalRequests: row.total_requests,
     successfulRequests: row.successful_requests,
+    lighthouseScore: row.lighthouse_score ?? undefined,
+    lighthouseAccessibility: row.lighthouse_accessibility ?? undefined,
   };
 }
 
@@ -47,8 +51,8 @@ export class SiteRepository {
 
   create(site: SiteManifest): void {
     this.db.run(
-      `INSERT OR IGNORE INTO sites (id, display_name, first_seen, last_visited, mastery_level, recommended_tier, total_requests, successful_requests)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO sites (id, display_name, first_seen, last_visited, mastery_level, recommended_tier, total_requests, successful_requests, lighthouse_score, lighthouse_accessibility)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       site.id,
       site.displayName ?? null,
       site.firstSeen,
@@ -57,6 +61,8 @@ export class SiteRepository {
       site.recommendedTier,
       site.totalRequests,
       site.successfulRequests,
+      site.lighthouseScore ?? null,
+      site.lighthouseAccessibility ?? null,
     );
   }
 
@@ -101,6 +107,14 @@ export class SiteRepository {
     if (updates.successfulRequests !== undefined) {
       fields.push('successful_requests = ?');
       values.push(updates.successfulRequests);
+    }
+    if (updates.lighthouseScore !== undefined) {
+      fields.push('lighthouse_score = ?');
+      values.push(updates.lighthouseScore);
+    }
+    if (updates.lighthouseAccessibility !== undefined) {
+      fields.push('lighthouse_accessibility = ?');
+      values.push(updates.lighthouseAccessibility);
     }
 
     if (fields.length === 0) return;

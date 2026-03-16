@@ -1,4 +1,4 @@
--- OneAgent v0.2 WebMCP tool cache
+-- Schrute v0.2 WebMCP tool cache
 -- Stores discovered WebMCP tools per site for cold-start discovery
 
 CREATE TABLE IF NOT EXISTS webmcp_tools (

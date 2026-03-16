@@ -1,7 +1,8 @@
 import { getLogger } from '../core/logger.js';
 import { isDomainMatch } from '../shared/domain-utils.js';
+import { BoundedMap } from '../shared/bounded-map.js';
 import type {
-  OneAgentConfig,
+  SchruteConfig,
   ToolBudgetConfig,
   PayloadLimits,
   ExecutionTierName,
@@ -12,13 +13,13 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface BudgetCheckResult {
+interface BudgetCheckResult {
   allowed: boolean;
   reason?: string;
   rule?: string;
 }
 
-export interface BudgetStats {
+interface BudgetStats {
   totalCalls: number;
   activeConcurrent: number;
   callsBySkill: Record<string, number>;
@@ -32,12 +33,12 @@ export class ToolBudgetTracker {
   private limits: PayloadLimits;
   private totalCalls: number = 0;
   private activeConcurrent: number = 0;
-  private activeBySite: Map<string, number> = new Map();
-  private callsBySkill: Map<string, number> = new Map();
-  private callsBySite: Map<string, number> = new Map();
+  private activeBySite = new BoundedMap<string, number>({ maxSize: 5000 });
+  private callsBySkill = new BoundedMap<string, number>({ maxSize: 10000 });
+  private callsBySite = new BoundedMap<string, number>({ maxSize: 10000 });
   private domainAllowlist: Set<string> = new Set();
 
-  constructor(config: OneAgentConfig) {
+  constructor(config: SchruteConfig) {
     this.config = config.toolBudget;
     this.limits = config.payloadLimits;
   }
@@ -140,7 +141,9 @@ export class ToolBudgetTracker {
   releaseCall(siteId: string): void {
     this.activeConcurrent = Math.max(0, this.activeConcurrent - 1);
     const siteActive = this.activeBySite.get(siteId) ?? 0;
-    if (siteActive > 0) {
+    if (siteActive <= 1) {
+      this.activeBySite.delete(siteId);  // Clean up zero entries to prevent unbounded growth
+    } else {
       this.activeBySite.set(siteId, siteActive - 1);
     }
   }
@@ -166,8 +169,8 @@ export class ToolBudgetTracker {
     return {
       totalCalls: this.totalCalls,
       activeConcurrent: this.activeConcurrent,
-      callsBySkill: Object.fromEntries(this.callsBySkill),
-      callsBySite: Object.fromEntries(this.callsBySite),
+      callsBySkill: Object.fromEntries(this.callsBySkill.entries()),
+      callsBySite: Object.fromEntries(this.callsBySite.entries()),
     };
   }
 

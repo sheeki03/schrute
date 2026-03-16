@@ -144,6 +144,13 @@ interface SkillRow {
   validation: string;
   redaction: string;
   replay_strategy: string;
+  avg_latency_ms: number | null;
+  last_successful_tier: string | null;
+  direct_canary_eligible: number;
+  direct_canary_attempts: number;
+  validations_since_last_canary: number;
+  last_canary_error_type: string | null;
+  review_required: number;
 }
 
 const log = getLogger();
@@ -193,12 +200,24 @@ function rowToSkill(row: SkillRow): SkillSpec {
     openApiFragment: row.openapi_fragment ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // NOTE: Fallback values on JSON parse failure have different security properties:
+    // - allowedDomains: [] means no domains allowed (restrictive, safe default)
+    // - validation: empty checks means no semantic/invariant validation will run (permissive)
+    // - redaction: empty PII classes means no redaction applied (permissive, potential data leak)
+    // If tightening is needed, consider failing loudly instead of falling back.
     allowedDomains: parseJson<string[]>(row.allowed_domains, []),
     requiredCapabilities: parseJson<CapabilityName[]>(row.required_capabilities, []),
     parameters: parseJson<SkillParameter[]>(row.parameters, []),
     validation: parseJson<SkillValidation>(row.validation, { semanticChecks: [], customInvariants: [] }),
     redaction: parseJson<SkillRedactionInfo>(row.redaction, { piiClassesFound: [], fieldsRedacted: 0 }),
     replayStrategy: validateReplayStrategy(row.replay_strategy ?? 'prefer_tier_3'),
+    avgLatencyMs: row.avg_latency_ms ?? undefined,
+    lastSuccessfulTier: row.last_successful_tier ?? undefined,
+    directCanaryEligible: row.direct_canary_eligible === 1,
+    directCanaryAttempts: row.direct_canary_attempts ?? 0,
+    validationsSinceLastCanary: row.validations_since_last_canary ?? 0,
+    lastCanaryErrorType: row.last_canary_error_type ?? undefined,
+    reviewRequired: row.review_required === 1,
   };
 }
 
@@ -214,8 +233,11 @@ export class SkillRepository {
         confidence, consecutive_validations, sample_count, parameter_evidence,
         last_verified, last_used, success_rate, skill_md, openapi_fragment,
         created_at, updated_at,
-        allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy,
+        avg_latency_ms, last_successful_tier,
+        direct_canary_eligible, direct_canary_attempts, validations_since_last_canary, last_canary_error_type,
+        review_required
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       skill.id,
       skill.siteId,
       skill.name,
@@ -251,6 +273,13 @@ export class SkillRepository {
       JSON.stringify(skill.validation ?? { semanticChecks: [], customInvariants: [] }),
       JSON.stringify(skill.redaction ?? { piiClassesFound: [], fieldsRedacted: 0 }),
       skill.replayStrategy ?? 'prefer_tier_3',
+      skill.avgLatencyMs ?? null,
+      skill.lastSuccessfulTier ?? null,
+      skill.directCanaryEligible ? 1 : 0,
+      skill.directCanaryAttempts ?? 0,
+      skill.validationsSinceLastCanary ?? 0,
+      skill.lastCanaryErrorType ?? null,
+      skill.reviewRequired ? 1 : 0,
     );
   }
 
@@ -261,6 +290,15 @@ export class SkillRepository {
 
   getBySiteId(siteId: string): SkillSpec[] {
     const rows = this.db.all<SkillRow>('SELECT * FROM skills WHERE site_id = ? ORDER BY name, version', siteId);
+    return rows.map(rowToSkill);
+  }
+
+  getByStatusAndSiteId(status: string, siteId: string): SkillSpec[] {
+    const rows = this.db.all<SkillRow>(
+      'SELECT * FROM skills WHERE site_id = ? AND status = ? ORDER BY name, version',
+      siteId,
+      status,
+    );
     return rows.map(rowToSkill);
   }
 
@@ -298,6 +336,9 @@ export class SkillRepository {
       ['lastUsed', 'last_used'], ['successRate', 'success_rate'],
       ['skillMd', 'skill_md'], ['openApiFragment', 'openapi_fragment'],
       ['replayStrategy', 'replay_strategy'],
+      ['avgLatencyMs', 'avg_latency_ms'],
+      ['lastSuccessfulTier', 'last_successful_tier'],
+      ['lastCanaryErrorType', 'last_canary_error_type'],
     ];
 
     // JSON-serialized columns
@@ -328,9 +369,25 @@ export class SkillRepository {
       fields.push('is_composite = ?');
       values.push(updates.isComposite ? 1 : 0);
     }
+    if (updates.reviewRequired !== undefined) {
+      fields.push('review_required = ?');
+      values.push(updates.reviewRequired ? 1 : 0);
+    }
     if (updates.tierLock !== undefined) {
       fields.push('tier_lock = ?');
       values.push(updates.tierLock ? JSON.stringify(updates.tierLock) : null);
+    }
+    if (updates.directCanaryEligible !== undefined) {
+      fields.push('direct_canary_eligible = ?');
+      values.push(updates.directCanaryEligible ? 1 : 0);
+    }
+    if (updates.directCanaryAttempts !== undefined) {
+      fields.push('direct_canary_attempts = ?');
+      values.push(updates.directCanaryAttempts);
+    }
+    if (updates.validationsSinceLastCanary !== undefined) {
+      fields.push('validations_since_last_canary = ?');
+      values.push(updates.validationsSinceLastCanary);
     }
 
     if (fields.length === 0) return;
@@ -362,7 +419,66 @@ export class SkillRepository {
     );
   }
 
+  incrementValidationsSinceLastCanary(skillId: string): void {
+    this.db.run('UPDATE skills SET validations_since_last_canary = validations_since_last_canary + 1 WHERE id = ?', skillId);
+  }
+
+  searchFts(query: string, opts?: { siteId?: string; limit?: number }): { skills: SkillSpec[]; matchType: 'fts' | 'like' } {
+    try {
+      // Try FTS5 first
+      let sql = 'SELECT s.* FROM skills s JOIN skills_fts f ON s.id = f.skill_id WHERE skills_fts MATCH ?';
+      const params: unknown[] = [query];
+
+      if (opts?.siteId) {
+        sql += ' AND s.site_id = ?';
+        params.push(opts.siteId);
+      }
+
+      sql += ' ORDER BY rank';
+
+      if (opts?.limit) {
+        sql += ' LIMIT ?';
+        params.push(opts.limit);
+      }
+
+      const rows = this.db.all<SkillRow>(sql, ...params);
+      return { skills: rows.map(rowToSkill), matchType: 'fts' };
+    } catch (err: unknown) {
+      // Only fall back to LIKE for expected FTS failures (syntax errors, missing module).
+      // Re-throw unexpected database errors (broken connection, schema regression, etc.).
+      const msg = err instanceof Error ? err.message : '';
+      const isFtsError = /fts5|MATCH|no such table.*skills_fts|syntax error|unterminated string|parse error|unknown special query/i.test(msg);
+      if (!isFtsError) {
+        log.warn({ err }, 'Unexpected FTS query error (not an FTS syntax/availability issue)');
+        throw err;
+      }
+      // FTS5 not available or query syntax invalid — fall back to LIKE search
+      // Strip FTS5 phrase delimiters (not meaningful in LIKE context)
+      const cleanQuery = query.replace(/^"+|"+$/g, '');
+      const escaped = cleanQuery.replace(/[%_\\]/g, '\\$&');
+      const likePattern = `%${escaped}%`;
+      let sql = "SELECT * FROM skills WHERE (name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR path_template LIKE ? ESCAPE '\\')";
+      const params: unknown[] = [likePattern, likePattern, likePattern];
+
+      if (opts?.siteId) {
+        sql += ' AND site_id = ?';
+        params.push(opts.siteId);
+      }
+
+      if (opts?.limit) {
+        sql += ' LIMIT ?';
+        params.push(opts.limit);
+      }
+
+      const rows = this.db.all<SkillRow>(sql, ...params);
+      return { skills: rows.map(rowToSkill), matchType: 'like' };
+    }
+  }
+
   delete(id: string): void {
+    // Delete from dependent tables first (no FK cascade guarantee)
+    this.db.run('DELETE FROM skill_amendments WHERE skill_id = ?', id);
+    this.db.run('DELETE FROM skill_exemplars WHERE skill_id = ?', id);
     this.db.run('DELETE FROM skills WHERE id = ?', id);
   }
 }

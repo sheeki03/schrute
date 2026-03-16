@@ -2,24 +2,30 @@ import { getLogger } from '../core/logger.js';
 import type { BrowserProvider } from '../skill/types.js';
 import type { MultiSessionManager, NamedSession } from './multi-session.js';
 import type { BrowserAuthStore } from './auth-store.js';
+import type { BrowserManager } from './manager.js';
 
 const log = getLogger();
 
-export interface BrowserBackend {
-  createProvider(siteId: string, domains: string[]): Promise<BrowserProvider | undefined>;
+export interface LiveChromeResult {
+  browserManager: BrowserManager;
+  siteId: string;
+  sessionName: string;
 }
 
-export class LiveChromeBackend implements BrowserBackend {
+export class LiveChromeBackend {
   constructor(
     private multiSession: MultiSessionManager,
     private authStore?: BrowserAuthStore,
   ) {}
 
-  async createProvider(
+  /**
+   * Find a CDP session matching the siteId. Returns the BrowserManager
+   * so the caller (engine) can create a provider through normal channels.
+   */
+  findSession(
     siteId: string,
-    domains: string[],
     sessionName?: string,
-  ): Promise<BrowserProvider | undefined> {
+  ): LiveChromeResult | undefined {
     let session: NamedSession | undefined;
 
     if (sessionName) {
@@ -33,14 +39,22 @@ export class LiveChromeBackend implements BrowserBackend {
     }
 
     const ctx = session.browserManager.tryGetContext(siteId);
-    if (!ctx) return undefined;
+    if (!ctx) {
+      log.debug({ siteId, sessionName: session.name }, 'LiveChromeBackend: no context for siteId');
+      return undefined;
+    }
 
-    // Return the adapter from the existing context
     const pages = ctx.pages();
-    if (pages.length === 0) return undefined;
+    if (pages.length === 0) {
+      log.debug({ siteId }, 'LiveChromeBackend: context has no pages');
+      return undefined;
+    }
 
-    log.info({ siteId, sessionName: session.name }, 'LiveChromeBackend providing browser context');
-    // The caller will use engine.createBrowserProvider() with this manager
-    return undefined; // Placeholder -- actual adapter creation requires PlaywrightMcpAdapter wiring via engine
+    log.info({ siteId, sessionName: session.name }, 'LiveChromeBackend matched CDP session');
+    return {
+      browserManager: session.browserManager,
+      siteId: session.siteId,
+      sessionName: session.name,
+    };
   }
 }

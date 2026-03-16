@@ -3,8 +3,12 @@ import ipaddr from 'ipaddr.js';
 import { getLogger } from './logger.js';
 import { getDatabase } from '../storage/database.js';
 import { BoundedMap } from '../shared/bounded-map.js';
+import { normalizeDomain, isDomainMatch } from '../shared/domain-utils.js';
+// Re-export so existing consumers that imported from policy.ts still work
+export { normalizeDomain, isDomainMatch };
 import type {
   CapabilityName,
+  HttpMethod,
   SideEffectClassName,
   SitePolicy,
   SchruteConfig,
@@ -15,10 +19,13 @@ import {
   DISABLED_BY_DEFAULT_CAPABILITIES,
   TIER1_ALLOWED_HEADERS,
   BLOCKED_HOP_BY_HOP_HEADERS,
-  DESTRUCTIVE_GET_PATTERNS,
-  DESTRUCTIVE_POST_PATTERNS,
   SideEffectClass,
 } from '../skill/types.js';
+import {
+  checkPathRisk as canonicalCheckPathRisk,
+  addPathAllowlistEntry as canonicalAddPathAllowlistEntry,
+  removePathAllowlistEntry as canonicalRemovePathAllowlistEntry,
+} from '../skill/path-risk.js';
 
 // ─── Result Types ─────────────────────────────────────────────────
 
@@ -42,7 +49,7 @@ export interface PathRiskResult {
 // ─── Site Policy Defaults ─────────────────────────────────────────
 
 const DEFAULT_SITE_POLICY: Omit<SitePolicy, 'siteId'> = {
-  allowedMethods: ['GET', 'HEAD'],
+  allowedMethods: ['GET', 'HEAD'] as HttpMethod[],
   maxQps: 10,
   maxConcurrent: 3,
   readOnlyDefault: true,
@@ -83,9 +90,17 @@ function loadPolicyFromDb(siteId: string, config?: SchruteConfig): SitePolicy | 
 
     if (!row) return null;
 
+    const VALID_HTTP_METHODS = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+    const rawMethods: string[] = JSON.parse(row.allowed_methods);
+    const allowedMethods = rawMethods.filter(m => VALID_HTTP_METHODS.has(m)) as HttpMethod[];
+    if (allowedMethods.length !== rawMethods.length) {
+      const log = getLogger();
+      log.warn({ siteId, invalid: rawMethods.filter(m => !VALID_HTTP_METHODS.has(m)) }, 'Filtered invalid HTTP methods from persisted policy');
+    }
+
     return {
       siteId: row.site_id,
-      allowedMethods: JSON.parse(row.allowed_methods),
+      allowedMethods,
       maxQps: row.max_qps,
       maxConcurrent: row.max_concurrent,
       readOnlyDefault: row.read_only_default === 1,
@@ -123,7 +138,7 @@ export function getSitePolicy(siteId: string, config?: SchruteConfig): SitePolic
   return { siteId, ...DEFAULT_SITE_POLICY };
 }
 
-export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): void {
+export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): { persisted: boolean } {
   // Validate: executionSessionName requires executionBackend='playwright'
   if (policy.executionSessionName
       && policy.executionBackend !== 'playwright'
@@ -159,9 +174,11 @@ export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): void 
       JSON.stringify(policy.capabilities),
       policy.executionBackend ?? null, policy.executionSessionName ?? null,
     );
+    return { persisted: true };
   } catch (err) {
     const log = getLogger();
     log.warn({ siteId: policy.siteId, err }, 'Failed to persist site policy to database');
+    return { persisted: false };
   }
 }
 
@@ -177,15 +194,15 @@ export function mergeSitePolicy(
   siteId: string,
   overlay: Partial<Omit<SitePolicy, 'siteId'>>,
   config?: SchruteConfig,
-): { merged: SitePolicy; prior: Partial<SitePolicy> } {
+): { merged: SitePolicy; prior: Partial<SitePolicy>; persisted: boolean } {
   const existing = getSitePolicy(siteId, config);
   const prior: Partial<SitePolicy> = {};
   for (const key of Object.keys(overlay) as (keyof typeof overlay)[]) {
     (prior as Record<string, unknown>)[key as string] = (existing as unknown as Record<string, unknown>)[key as string];
   }
   const merged = { ...existing, ...overlay };
-  setSitePolicy(merged, config);
-  return { merged, prior };
+  const { persisted } = setSitePolicy(merged, config);
+  return { merged, prior, persisted };
 }
 
 // ─── Capabilities ─────────────────────────────────────────────────
@@ -238,34 +255,12 @@ export function checkCapability(
 
 // ─── Domain Allowlist ─────────────────────────────────────────────
 
-export function normalizeDomain(domain: string): string {
-  let d = domain.toLowerCase();
-  // Strip trailing dots
-  while (d.endsWith('.')) {
-    d = d.slice(0, -1);
-  }
-  // Detect bare IPv6 literals (contain 2+ colons, not already bracketed)
-  if ((d.match(/:/g) || []).length >= 2 && !d.startsWith('[')) {
-    d = `[${d}]`;
-  }
-  // IDN/punycode: convert to ASCII form if needed
-  try {
-    const url = new URL(`http://${d}`);
-    d = url.hostname;
-  } catch {
-    const log = getLogger();
-    log.debug({ domain: d }, 'Domain normalization URL parse failed, using lowercase form');
-  }
-  return d;
-}
-
 export function enforceDomainAllowlist(
   siteId: string,
   targetDomain: string,
   config?: SchruteConfig,
 ): PolicyResult {
   const policy = getSitePolicy(siteId, config);
-  const normalizedTarget = normalizeDomain(targetDomain);
 
   if (policy.domainAllowlist.length === 0) {
     return {
@@ -275,20 +270,14 @@ export function enforceDomainAllowlist(
     };
   }
 
-  for (const allowed of policy.domainAllowlist) {
-    const normalizedAllowed = normalizeDomain(allowed);
-    if (
-      normalizedTarget === normalizedAllowed ||
-      normalizedTarget.endsWith('.' + normalizedAllowed)
-    ) {
-      return { allowed: true, rule: 'domain.allowlisted' };
-    }
+  if (isDomainMatch(targetDomain, policy.domainAllowlist)) {
+    return { allowed: true, rule: 'domain.allowlisted' };
   }
 
   return {
     allowed: false,
     rule: 'domain.not_allowlisted',
-    reason: `Domain '${normalizedTarget}' is not in allowlist for site '${siteId}'`,
+    reason: `Domain '${normalizeDomain(targetDomain)}' is not in allowlist for site '${siteId}'`,
   };
 }
 
@@ -296,12 +285,7 @@ export function matchesDomainAllowlist(
   targetDomain: string,
   allowlist: string[],
 ): boolean {
-  const normalizedTarget = normalizeDomain(targetDomain);
-  return allowlist.some(allowed => {
-    const normalizedAllowed = normalizeDomain(allowed);
-    return normalizedTarget === normalizedAllowed ||
-      normalizedTarget.endsWith('.' + normalizedAllowed);
-  });
+  return isDomainMatch(targetDomain, allowlist);
 }
 
 export function sanitizeImplicitAllowlist(domains: string[]): string[] {
@@ -311,9 +295,8 @@ export function sanitizeImplicitAllowlist(domains: string[]): string[] {
 }
 
 // ─── Private Network Egress Blocking ──────────────────────────────
-// IPv4: Whitelist approach — only 'unicast' range is allowed. All other ranges blocked.
-// IPv6: Blacklist approach — specific ranges (loopback, link-local, etc.) are blocked.
-// Implication: New IPv6 range types are allowed by default. Review if new ranges are added.
+// Both IPv4 and IPv6 use whitelist approach — only 'unicast' range is ultimately allowed.
+// IPv6 has additional defense-in-depth early-exit via BLOCKED_IPV6_RANGES.
 
 const BLOCKED_IPV6_RANGES: string[] = [
   'loopback',
@@ -452,43 +435,20 @@ export async function resolveAndValidate(
 }
 
 // ─── Path Risk Heuristics ─────────────────────────────────────────
-
-const pathAllowlist = new Set<string>();
+// Canonical implementation lives in skill/path-risk.ts (supports per-site allowlists).
+// This module delegates to it for backward compatibility.
 
 export function addPathAllowlistEntry(path: string): void {
-  if (pathAllowlist.size >= 10_000) return;
-  pathAllowlist.add(path.toLowerCase());
+  // Legacy global API — routes to canonical per-site implementation with a global sentinel
+  canonicalAddPathAllowlistEntry('__global__', path);
 }
 
 export function removePathAllowlistEntry(path: string): void {
-  pathAllowlist.delete(path.toLowerCase());
+  canonicalRemovePathAllowlistEntry('__global__', path);
 }
 
 export function checkPathRisk(method: string, path: string): PathRiskResult {
-  const normalizedPath = path.toLowerCase();
-
-  // Check programmatic runtime allowlist overrides
-  if (pathAllowlist.has(normalizedPath)) {
-    return { blocked: false };
-  }
-
-  const upperMethod = method.toUpperCase();
-
-  const patterns =
-    (upperMethod === 'GET' || upperMethod === 'HEAD') ? DESTRUCTIVE_GET_PATTERNS :
-    upperMethod === 'POST' ? DESTRUCTIVE_POST_PATTERNS :
-    [];
-
-  for (const pattern of patterns) {
-    if (pattern.test(path)) {
-      return {
-        blocked: true,
-        reason: `Destructive ${upperMethod} pattern detected: ${pattern.source} on path '${path}'`,
-      };
-    }
-  }
-
-  return { blocked: false };
+  return canonicalCheckPathRisk(method, path, '__global__');
 }
 
 // ─── Header Controls ──────────────────────────────────────────────

@@ -1,6 +1,5 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
-import * as net from 'node:net';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import {
@@ -9,7 +8,7 @@ import {
   getDaemonTokenPath,
 } from '../core/config.js';
 import { getLogger } from '../core/logger.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 import type { PidFileContent, TransportConfig } from '../shared/daemon-types.js';
 
 const log = getLogger();
@@ -42,12 +41,13 @@ function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return true;
     return false;
   }
 }
 
-function cleanupStaleFiles(config: OneAgentConfig): void {
+function cleanupStaleFiles(config: SchruteConfig): void {
   const paths = [
     getDaemonPidPath(config),
     getDaemonSocketPath(config),
@@ -81,7 +81,7 @@ function readTokenFile(tokenPath: string): string | null {
   }
 }
 
-function resolveTransport(config: OneAgentConfig): TransportConfig | null {
+function resolveTransport(config: SchruteConfig): TransportConfig | null {
   const socketPath = getDaemonSocketPath(config);
   const tokenPath = getDaemonTokenPath(config);
 
@@ -144,13 +144,21 @@ function httpRequest(
           const data = JSON.parse(raw);
           resolve({ status: res.statusCode ?? 0, data });
         } catch {
+          log.debug({ raw: raw.slice(0, 200) }, 'JSON parse failed for daemon response');
           resolve({ status: res.statusCode ?? 0, data: raw });
         }
       });
       res.on('error', reject);
     });
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ENOENT' || code === 'EPIPE') {
+        reject(new Error('Could not connect to Schrute daemon. Start it with: schrute serve'));
+      } else {
+        reject(err);
+      }
+    });
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('Request timed out'));
@@ -165,29 +173,29 @@ function httpRequest(
 
 // ─── Auto-Start Helper ──────────────────────────────────────────
 
-function resolveOneagentBin(): string {
+function resolveSchruteBin(): string {
   // 1. Prefer the package.json "bin" entry resolved via require
   try {
     const req = createRequire(import.meta.url);
-    return req.resolve('oneagent/dist/index.js');
+    return req.resolve('schrute/dist/index.js');
   } catch { /* not resolvable — try next */ }
 
-  // 2. Check if argv[1] looks like the oneagent CLI (not a random host app)
+  // 2. Check if argv[1] looks like the schrute CLI (not a random host app)
   const arg1 = process.argv[1] ?? '';
-  if (arg1.includes('oneagent') && !arg1.includes('node_modules/.bin/vitest')) {
+  if (arg1.includes('schrute') && !arg1.includes('node_modules/.bin/vitest')) {
     return arg1;
   }
 
   // 3. Fall back to npx which will find the installed bin
-  return 'oneagent';
+  return 'schrute';
 }
 
 function spawnDaemon(): void {
-  const bin = resolveOneagentBin();
+  const bin = resolveSchruteBin();
 
-  // If we resolved to the bare name 'oneagent', spawn it as an executable
-  if (bin === 'oneagent') {
-    const child = spawn('npx', ['oneagent', 'serve'], {
+  // If we resolved to the bare name 'schrute', spawn it as an executable
+  if (bin === 'schrute') {
+    const child = spawn('npx', ['schrute', 'serve'], {
       detached: true,
       stdio: 'ignore',
     });
@@ -203,7 +211,7 @@ function spawnDaemon(): void {
   child.unref();
 }
 
-function waitForDaemon(config: OneAgentConfig): Promise<boolean> {
+function waitForDaemon(config: SchruteConfig): Promise<boolean> {
   return new Promise((resolve) => {
     const deadline = Date.now() + AUTO_START_TIMEOUT_MS;
 
@@ -244,7 +252,7 @@ function waitForDaemon(config: OneAgentConfig): Promise<boolean> {
 
 // ─── Client Factory ─────────────────────────────────────────────
 
-export function createDaemonClient(config: OneAgentConfig): DaemonClient {
+export function createDaemonClient(config: SchruteConfig): DaemonClient {
   return {
     async isAvailable(): Promise<boolean> {
       const pidPath = getDaemonPidPath(config);
@@ -305,32 +313,32 @@ export function createDaemonClient(config: OneAgentConfig): DaemonClient {
           spawnDaemon();
           const started = await waitForDaemon(config);
           if (!started) {
-            throw new Error('Failed to auto-start daemon (timed out). Start manually with: oneagent serve');
+            throw new Error('Failed to auto-start daemon (timed out). Start manually with: schrute serve');
           }
           pidFile = readPidFile(pidPath);
           if (!pidFile) {
-            throw new Error('Daemon started but PID file not found. Start manually with: oneagent serve');
+            throw new Error('Daemon started but PID file not found. Start manually with: schrute serve');
           }
         } else {
-          throw new Error('No daemon running. Start one with: oneagent serve');
+          throw new Error('No daemon running. Start one with: schrute serve');
         }
       }
 
       if (!isPidAlive(pidFile.pid)) {
         cleanupStaleFiles(config);
-        throw new Error('Daemon process is dead (stale PID file cleaned). Start one with: oneagent serve');
+        throw new Error('Daemon process is dead (stale PID file cleaned). Start one with: schrute serve');
       }
 
       if (pidFile.apiVersion !== CLIENT_API_VERSION) {
         throw new Error(
           `Daemon API version mismatch: daemon=${pidFile.apiVersion}, client=${CLIENT_API_VERSION}. ` +
-          'Please restart the daemon with: oneagent serve',
+          'Please restart the daemon with: schrute serve',
         );
       }
 
       const transport = resolveTransport(config);
       if (!transport) {
-        throw new Error('Cannot determine daemon transport. Start a daemon with: oneagent serve');
+        throw new Error('Cannot determine daemon transport. Start a daemon with: schrute serve');
       }
 
       const { status, data } = await httpRequest(transport, method, reqPath, body);

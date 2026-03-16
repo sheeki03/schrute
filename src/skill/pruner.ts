@@ -1,16 +1,16 @@
-import type { SkillSpec, OneAgentConfig } from './types.js';
+import type { SkillSpec, SchruteConfig } from './types.js';
 import { SkillStatus } from './types.js';
 import { getConfig } from '../core/config.js';
 import { calculateConfidence, STALE_THRESHOLD } from './versioning.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface PruneResult {
+interface PruneResult {
   visible: SkillSpec[];
   hidden: SkillSpec[];
 }
 
-export interface ShortlistResult {
+interface ShortlistResult {
   skills: SkillSpec[];
   isFullCatalog: boolean;
   hint?: string;
@@ -24,7 +24,7 @@ export interface ShortlistResult {
  */
 export function pruneSkills(
   skills: SkillSpec[],
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): PruneResult {
   const cfg = config ?? getConfig();
   const maxTools = cfg.maxToolsPerSite;
@@ -68,7 +68,7 @@ export function getShortlist(
   skills: SkillSpec[],
   intent?: string,
   k?: number,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): ShortlistResult {
   const cfg = config ?? getConfig();
   const maxK = k ?? cfg.toolShortlistK;

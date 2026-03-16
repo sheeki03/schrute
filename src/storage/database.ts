@@ -287,6 +287,14 @@ ALTER TABLE webmcp_tools ADD COLUMN declarative INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE webmcp_tools ADD COLUMN auto_submit INTEGER NOT NULL DEFAULT 0;
 `,
   },
+  {
+    filename: '011_lighthouse.sql',
+    sql: `
+-- Lighthouse audit scores per site
+ALTER TABLE sites ADD COLUMN lighthouse_score REAL;
+ALTER TABLE sites ADD COLUMN lighthouse_accessibility REAL;
+`,
+  },
 ];
 
 export class AgentDatabase {

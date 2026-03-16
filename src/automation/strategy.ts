@@ -6,7 +6,7 @@ const log = getLogger();
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface SiteStrategy {
+interface SiteStrategy {
   defaultTier: ExecutionTierName;
   overrides: Record<string, ExecutionTierName>;
 }
@@ -116,7 +116,7 @@ export function updateStrategy(
 }
 
 /** Clear all strategy caches. Useful for testing. */
-export function resetStrategyCache(): void {
+function resetStrategyCache(): void {
   strategies.clear();
   tierSuccessCounts.clear();
 }

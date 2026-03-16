@@ -8,8 +8,6 @@ export interface PidFileContent {
   startedAt: string;
 }
 
-export type TransportMode = 'uds' | 'tcp';
-
 export type TransportConfig =
   | { mode: 'uds'; socketPath: string; token?: string }
   | { mode: 'tcp'; port: number; token?: string };

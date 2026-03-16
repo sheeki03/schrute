@@ -1,17 +1,40 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "oneagent-client"
+name = "schrute-client"
 version = "0.2.0"
-description = "Python client SDK for OneAgent REST API"
-requires-python = ">=3.8"
+description = "Python client SDK for Schrute REST API"
+readme = "README.md"
+requires-python = ">=3.9"
 license = {text = "MIT"}
-keywords = ["oneagent", "browser-agent", "api-client", "sdk"]
+keywords = ["schrute", "browser-agent", "api-client", "sdk", "mcp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Internet :: WWW/HTTP",
+]
 
 [project.urls]
-Homepage = "https://github.com/anthropics/oneagent"
+Homepage = "https://github.com/user/schrute"
+Documentation = "https://github.com/user/schrute#python-sdk"
+Repository = "https://github.com/user/schrute"
+Issues = "https://github.com/user/schrute/issues"
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.uv]
+dev-dependencies = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+]

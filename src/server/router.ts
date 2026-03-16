@@ -5,18 +5,33 @@ import { Engine } from '../core/engine.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { SiteRepository } from '../storage/site-repository.js';
 import { dryRun } from '../replay/dry-run.js';
+import { validateParams } from '../replay/param-validator.js';
 import { validateSkill } from '../skill/validator.js';
 import { ConfirmationManager } from './confirmation.js';
 import type {
   SkillSpec,
-  OneAgentConfig,
+  SchruteConfig,
   SkillStatusName,
   AuditEntry,
 } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
 import type { ContextOverrides } from '../browser/manager.js';
+import { shouldAutoConfirm } from './skill-helpers.js';
 
 const log = getLogger();
+
+// ─── Slug-Tolerant Matching ──────────────────────────────────────
+
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function findSkillBySlug(skills: SkillSpec[], skillName: string, requireActive: boolean): SkillSpec | undefined {
+  return skills.find(s =>
+    (s.name === skillName || slugify(s.name) === slugify(skillName)) &&
+    (!requireActive || s.status === SkillStatus.ACTIVE),
+  );
+}
 
 // ─── Router Result Types ─────────────────────────────────────────
 
@@ -30,7 +45,7 @@ export interface RouterDeps {
   engine: Engine;
   skillRepo: SkillRepository;
   siteRepo: SiteRepository;
-  config: OneAgentConfig;
+  config: SchruteConfig;
   confirmation: ConfirmationManager;
 }
 
@@ -82,11 +97,10 @@ export function createRouter(deps: RouterDeps) {
       siteId: string,
       skillName: string,
       params: Record<string, unknown>,
+      callerId?: string,
     ): Promise<RouterResult> {
       const skills = skillRepo.getBySiteId(siteId);
-      const skill = skills.find(
-        (s) => s.name === skillName && s.status === SkillStatus.ACTIVE,
-      );
+      const skill = findSkillBySlug(skills, skillName, true);
 
       if (!skill) {
         return {
@@ -96,8 +110,17 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
+      // WS-7: Validate params before confirmation — reject invalid params early
+      const validation = validateParams(params, skill, config.paramLimits);
+      if (!validation.valid) {
+        return { success: false, error: `Invalid params: ${validation.errors.join('; ')}`, statusCode: 400 };
+      }
+
+      // P2-8: Auto-confirm read-only GET/HEAD skills
+      const autoConfirm = shouldAutoConfirm(skill);
+
       // Gate ALL unconfirmed skills through confirmation, regardless of side-effect class
-      const needsConfirmation = !confirmation.isSkillConfirmed(skill.id);
+      const needsConfirmation = !autoConfirm && !confirmation.isSkillConfirmed(skill.id);
 
       if (needsConfirmation) {
         const token = await confirmation.generateToken(
@@ -123,7 +146,7 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
-      const result = await engine.executeSkill(skill.id, params);
+      const result = await engine.executeSkill(skill.id, params, callerId);
       if (result.success) {
         return { success: true, data: result };
       }
@@ -138,7 +161,7 @@ export function createRouter(deps: RouterDeps) {
       mode?: 'agent-safe' | 'developer-debug',
     ): Promise<RouterResult> {
       const skills = skillRepo.getBySiteId(siteId);
-      const skill = skills.find((s) => s.name === skillName);
+      const skill = findSkillBySlug(skills, skillName, false);
 
       if (!skill) {
         return {
@@ -148,12 +171,16 @@ export function createRouter(deps: RouterDeps) {
         };
       }
 
+      // WS-8: Validate params before preview
+      const validation = validateParams(params, skill, config.paramLimits);
+
       const preview = await dryRun(skill, params, mode ?? 'agent-safe');
       return {
         success: true,
         data: {
           ...preview,
-          note: 'This is a preview only. No request was sent.',
+          ...(validation.valid ? {} : { validationErrors: validation.errors, note: 'Parameters would be rejected at execution time.' }),
+          ...(validation.valid ? { note: 'This is a preview only. No request was sent.' } : {}),
         },
       };
     },
@@ -165,7 +192,7 @@ export function createRouter(deps: RouterDeps) {
       params: Record<string, unknown>,
     ): Promise<RouterResult> {
       const skills = skillRepo.getBySiteId(siteId);
-      const skill = skills.find((s) => s.name === skillName);
+      const skill = findSkillBySlug(skills, skillName, false);
 
       if (!skill) {
         return {
@@ -230,18 +257,16 @@ export function createRouter(deps: RouterDeps) {
       confirmationToken: string,
       approve: boolean,
     ): RouterResult {
-      const verification = confirmation.verifyToken(confirmationToken);
-      if (!verification.valid || !verification.token) {
+      const result = confirmation.verifyAndConsume(confirmationToken, approve);
+      if (!result.valid || !result.token) {
         return {
           success: false,
-          error: `Confirmation failed: ${verification.error ?? 'invalid token'}`,
+          error: `Confirmation failed: ${result.error ?? 'invalid token'}`,
           statusCode: 400,
         };
       }
 
-      const { skillId, tier } = verification.token;
-
-      confirmation.consumeToken(confirmationToken, approve);
+      const { skillId, tier } = result.token;
 
       if (approve) {
         return {

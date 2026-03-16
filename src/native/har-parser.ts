@@ -23,7 +23,7 @@ export function parseHarNative(harJson: string): StructuredRecord[] {
       return JSON.parse(resultJson) as StructuredRecord[];
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native har-parser unavailable, using TS fallback');
+        log.info({ err }, 'Native har-parser unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

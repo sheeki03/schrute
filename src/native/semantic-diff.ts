@@ -35,7 +35,7 @@ export function checkSemanticNative(
       return JSON.parse(resultJson) as SemanticCheckResult;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native semantic-diff unavailable, using TS fallback');
+        log.info({ err }, 'Native semantic-diff unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

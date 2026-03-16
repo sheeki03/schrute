@@ -19,7 +19,7 @@ interface RecordingSession {
 /**
  * Wraps Playwright's HAR recording with action-frame boundaries.
  *
- * Pipeline: raw HAR -> redactor.redact() -> durable store commit -> raw HAR deleted
+ * Pipeline: raw HAR -> redactFn() -> durable store commit -> raw HAR deleted
  *
  * FAIL-CLOSED: if redaction times out, no durable write occurs, no terminal/agent output.
  * Raw HAR is preserved in temp with TTL for background retry.

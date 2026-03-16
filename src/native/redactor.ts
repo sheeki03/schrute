@@ -11,7 +11,6 @@
  */
 
 import type { RedactionMode } from '../skill/types.js';
-import { redactForOutput, redactHeaders as tsRedactHeaders } from '../storage/redactor.js';
 import { getNativeModule } from './index.js';
 import { getLogger } from '../core/logger.js';
 
@@ -33,7 +32,7 @@ export function redactNative(
       return parsed.redacted;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native redactor unavailable, using TS fallback');
+        log.info({ err }, 'Native redactor unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }
@@ -56,7 +55,7 @@ export function redactHeadersNative(
       return JSON.parse(resultJson) as Record<string, string>;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native redactor unavailable, using TS fallback');
+        log.info({ err }, 'Native redactor unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

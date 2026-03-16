@@ -25,7 +25,7 @@ export function scoreVolatilityNative(samples: RequestSample[]): FieldVolatility
       return JSON.parse(resultJson) as FieldVolatility[];
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native volatility unavailable, using TS fallback');
+        log.info({ err }, 'Native volatility unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

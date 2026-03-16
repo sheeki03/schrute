@@ -9,12 +9,12 @@ import {
   getDaemonPidPath,
   getDaemonTokenPath,
 } from '../core/config.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 import type { Engine } from '../core/engine.js';
 import type { PidFileContent, TransportConfig } from '../shared/daemon-types.js';
 import { verifyBearerToken } from '../shared/auth-utils.js';
 
-const log = getLogger();
+function log() { return getLogger(); }
 
 const DAEMON_VERSION = '0.2.0';
 const API_VERSION = 1;
@@ -76,11 +76,11 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
 
 // ─── Socket Startup Safety ──────────────────────────────────────
 
-async function validateAndCleanSocket(socketPath: string, config: OneAgentConfig): Promise<void> {
+async function validateAndCleanSocket(socketPath: string, config: SchruteConfig): Promise<void> {
   // Verify socket path is under dataDir (canonical path containment)
   const realDataDir = fs.realpathSync(config.dataDir);
   const resolvedSocket = fs.existsSync(socketPath) ? fs.realpathSync(socketPath) : path.resolve(socketPath);
-  if (!resolvedSocket.startsWith(realDataDir + path.sep) && resolvedSocket !== path.join(realDataDir, path.basename(resolvedSocket))) {
+  if (path.dirname(resolvedSocket) !== realDataDir) {
     throw new Error(`Socket path ${resolvedSocket} is not under dataDir ${realDataDir}`);
   }
 
@@ -108,7 +108,7 @@ async function validateAndCleanSocket(socketPath: string, config: OneAgentConfig
   }
 
   // All checks passed — remove stale socket
-  log.info({ socketPath }, 'Removing stale daemon socket');
+  log().info({ socketPath }, 'Removing stale daemon socket');
   fs.unlinkSync(socketPath);
 }
 
@@ -141,7 +141,7 @@ function generateToken(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
-function writeTokenFile(tokenPath: string, token: string, config: OneAgentConfig): void {
+function writeTokenFile(tokenPath: string, token: string, config: SchruteConfig): void {
   // Pre-write safety: reject if path exists as symlink or non-regular file
   if (fs.existsSync(tokenPath)) {
     const stat = fs.lstatSync(tokenPath);
@@ -191,7 +191,7 @@ function removePidFile(pidPath: string): void {
   try {
     if (fs.existsSync(pidPath)) fs.unlinkSync(pidPath);
   } catch (err) {
-    log.warn({ err, pidPath }, 'Failed to remove PID file during cleanup');
+    log().warn({ err, pidPath }, 'Failed to remove PID file during cleanup');
   }
 }
 
@@ -199,7 +199,7 @@ function removePidFile(pidPath: string): void {
 
 async function handleRequest(
   engine: Engine,
-  config: OneAgentConfig,
+  config: SchruteConfig,
   transport: TransportConfig,
   lifecycle: LifecycleGuard,
   gracefulShutdownFn: () => Promise<void>,
@@ -269,8 +269,220 @@ async function handleRequest(
         apiVersion: API_VERSION,
         daemonVersion: DAEMON_VERSION,
         pid: process.pid,
-        uptime: process.uptime(),
+        uptime: Math.round(process.uptime() * 1000),
       });
+      return;
+    }
+
+    // GET /ctl/sessions
+    if (method === 'GET' && url === '/ctl/sessions') {
+      const msm = engine.getMultiSessionManager();
+      const activeName = msm.getActive();
+      const sessions = msm.list().map(s => ({
+        name: s.name,
+        siteId: s.siteId,
+        isCdp: s.isCdp,
+        active: s.name === activeName,
+      }));
+      sendJson(res, 200, sessions);
+      return;
+    }
+
+    // POST /ctl/skills/search
+    if (method === 'POST' && url === '/ctl/skills/search') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON in request body' });
+        return;
+      }
+      const { getDatabase } = await import('../storage/database.js');
+      const { SkillRepository } = await import('../storage/skill-repository.js');
+      const { searchAndProjectSkills } = await import('./skill-helpers.js');
+      const db = getDatabase(config);
+      const skillRepo = new SkillRepository(db);
+      const siteId = body.siteId as string | undefined;
+      const includeInactive = body.includeInactive as boolean | undefined;
+      const browserManager = engine.getSessionManager().getBrowserManager();
+      const limit = (body.limit as number) ?? 10;
+      const query = body.query as string | undefined;
+
+      const response = searchAndProjectSkills(skillRepo, browserManager, {
+        query, siteId, limit, includeInactive: includeInactive ?? false,
+      });
+
+      sendJson(res, 200, response);
+      return;
+    }
+
+    // POST /ctl/execute
+    if (method === 'POST' && url === '/ctl/execute') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON' });
+        return;
+      }
+      const { skillId, params } = body;
+      if (!skillId || typeof skillId !== 'string') {
+        sendJson(res, 400, { error: 'Missing required field: skillId' });
+        return;
+      }
+      // Use SchruteService for safety gates (active check, confirmation)
+      const { getDatabase } = await import('../storage/database.js');
+      const { SkillRepository } = await import('../storage/skill-repository.js');
+      const { SiteRepository } = await import('../storage/site-repository.js');
+      const { ConfirmationManager } = await import('./confirmation.js');
+      const { SchruteService } = await import('../app/service.js');
+      const db = getDatabase(config);
+      const skillRepo = new SkillRepository(db);
+      const siteRepo = new SiteRepository(db);
+      const confirmation = new ConfirmationManager(db, config);
+      const appService = new SchruteService({ engine, skillRepo, siteRepo, confirmation, config });
+
+      try {
+        const result = await lifecycle.withLock(() =>
+          appService.executeSkill(skillId as string, (params ?? {}) as Record<string, unknown>, 'daemon'),
+        );
+        sendJson(res, 200, result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendJson(res, 400, { error: message });
+      }
+      return;
+    }
+
+    // POST /ctl/confirm
+    if (method === 'POST' && url === '/ctl/confirm') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON' });
+        return;
+      }
+      const { token, approve } = body;
+      if (!token || typeof token !== 'string') {
+        sendJson(res, 400, { error: 'Missing required field: token' });
+        return;
+      }
+      const { getDatabase } = await import('../storage/database.js');
+      const { ConfirmationManager } = await import('./confirmation.js');
+      const db = getDatabase(config);
+      const confirmation = new ConfirmationManager(db, config);
+
+      try {
+        const result = await lifecycle.withLock(async () => {
+          const verifyResult = confirmation.verifyAndConsume(token, approve !== false);
+          if (!verifyResult.valid || !verifyResult.token) {
+            throw new Error(`Confirmation failed: ${verifyResult.error ?? 'invalid token'}`);
+          }
+          return {
+            status: approve !== false ? 'approved' : 'denied',
+            skillId: verifyResult.token.skillId,
+          };
+        });
+        sendJson(res, 200, result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendJson(res, 400, { error: message });
+      }
+      return;
+    }
+
+    // POST /ctl/revoke
+    if (method === 'POST' && url === '/ctl/revoke') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON' });
+        return;
+      }
+      const { skillId } = body;
+      if (!skillId || typeof skillId !== 'string') {
+        sendJson(res, 400, { error: 'Missing required field: skillId' });
+        return;
+      }
+      const { getDatabase } = await import('../storage/database.js');
+      const { ConfirmationManager } = await import('./confirmation.js');
+      const db = getDatabase(config);
+      const confirmation = new ConfirmationManager(db, config);
+      confirmation.revokeApproval(skillId);
+      sendJson(res, 200, { revoked: true, skillId });
+      return;
+    }
+
+    // GET /ctl/amendments
+    if (method === 'GET' && url.startsWith('/ctl/amendments')) {
+      const parsedUrl = new URL(url, 'http://localhost');
+      const skillId = parsedUrl.searchParams.get('skillId');
+      if (!skillId) {
+        sendJson(res, 400, { error: 'skillId query parameter required' });
+        return;
+      }
+      const amendmentRepo = engine.getAmendmentRepo();
+      if (!amendmentRepo) {
+        sendJson(res, 503, { error: 'Amendment tracking not available' });
+        return;
+      }
+      const amendments = amendmentRepo.getBySkillId(skillId);
+      sendJson(res, 200, { amendments });
+      return;
+    }
+
+    // POST /ctl/optimize
+    if (method === 'POST' && url === '/ctl/optimize') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON in request body' });
+        return;
+      }
+      const { skillId } = body;
+      if (!skillId || typeof skillId !== 'string') {
+        sendJson(res, 400, { error: 'skillId is required' });
+        return;
+      }
+      const { getDatabase } = await import('../storage/database.js');
+      const { SkillRepository } = await import('../storage/skill-repository.js');
+      const db = getDatabase(config);
+      const skillRepo = new SkillRepository(db);
+      const skill = skillRepo.getById(skillId);
+      if (!skill) {
+        sendJson(res, 404, { error: `Skill '${skillId}' not found` });
+        return;
+      }
+      const amendmentRepo = engine.getAmendmentRepo();
+      const exemplarRepo = engine.getExemplarRepo();
+      if (!amendmentRepo) {
+        sendJson(res, 503, { error: 'Amendment or exemplar tracking not available' });
+        return;
+      }
+      const { GepaEngine } = await import('../healing/gepa.js');
+      const { AmendmentEngine } = await import('../healing/amendment.js');
+      const metricsRepo = engine.getMetricsRepo();
+      const amendmentEngine = new AmendmentEngine(amendmentRepo, skillRepo, metricsRepo);
+      const gepa = new GepaEngine(skillRepo, amendmentRepo, exemplarRepo, amendmentEngine);
+      const result = await gepa.optimize(skillId);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    // GET /ctl/cdp-sessions — list CDP sessions for persistence across restarts
+    if (method === 'GET' && url === '/ctl/cdp-sessions') {
+      const msm = engine.getMultiSessionManager();
+      const cdpSessions = msm.list().filter(s => s.isCdp).map(s => ({
+        name: s.name,
+        siteId: s.siteId,
+        selectedPageUrl: s.selectedPageUrl,
+        createdAt: s.createdAt,
+        lastUsedAt: s.lastUsedAt,
+      }));
+      sendJson(res, 200, { cdpSessions });
       return;
     }
 
@@ -279,7 +491,7 @@ async function handleRequest(
       sendJson(res, 200, { message: 'Shutting down' });
       setImmediate(() => {
         gracefulShutdownFn().catch((err) => {
-          log.error({ err }, 'Error during graceful shutdown');
+          log().error({ err }, 'Error during graceful shutdown');
         });
       });
       return;
@@ -287,7 +499,7 @@ async function handleRequest(
 
     sendJson(res, 404, { error: 'Not found' });
   } catch (err) {
-    log.error({ err, url, method }, 'Control server request error');
+    log().error({ err, url, method }, 'Control server request error');
     const message = err instanceof Error ? err.message : String(err);
     sendJson(res, 500, { error: message });
   }
@@ -301,7 +513,7 @@ export interface DaemonCloseHandles {
 
 async function createGracefulShutdown(
   engine: Engine,
-  config: OneAgentConfig,
+  config: SchruteConfig,
   server: http.Server,
   lifecycle: LifecycleGuard,
   closeHandles: DaemonCloseHandles,
@@ -313,7 +525,7 @@ async function createGracefulShutdown(
   return async () => {
     if (!lifecycle.markShuttingDown()) return; // already shutting down
 
-    log.info('Daemon graceful shutdown initiated');
+    log().info('Daemon graceful shutdown initiated');
 
     // 1. Stop accepting new connections
     await new Promise<void>((resolve) => {
@@ -329,7 +541,7 @@ async function createGracefulShutdown(
         try {
           await handle.close();
         } catch (err) {
-          log.warn({ err }, 'Error closing MCP handle during shutdown');
+          log().warn({ err }, 'Error closing MCP handle during shutdown');
         }
       }
     }
@@ -338,28 +550,28 @@ async function createGracefulShutdown(
     try {
       await engine.close();
     } catch (err) {
-      log.warn({ err }, 'Error closing engine during shutdown');
+      log().warn({ err }, 'Error closing engine during shutdown');
     }
 
     // 5. Remove socket + PID + token files
     try { if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); } catch (err) {
-      log.warn({ err, socketPath }, 'Failed to remove daemon socket during shutdown');
+      log().warn({ err, socketPath }, 'Failed to remove daemon socket during shutdown');
     }
     removePidFile(pidPath);
     try { if (fs.existsSync(tokenPath)) fs.unlinkSync(tokenPath); } catch (err) {
-      log.warn({ err, tokenPath }, 'Failed to remove daemon token file during shutdown');
+      log().warn({ err, tokenPath }, 'Failed to remove daemon token file during shutdown');
     }
 
-    log.info('Daemon shutdown complete');
+    log().info('Daemon shutdown complete');
   };
 }
 
 // ─── Signal Handler Setup ───────────────────────────────────────
 
-export function setupSignalHandlers(shutdownFn: () => Promise<void>): void {
+function setupSignalHandlers(shutdownFn: () => Promise<void>): void {
   const handler = () => {
     shutdownFn().catch((err) => {
-      log.error({ err }, 'Error during signal-triggered shutdown');
+      log().error({ err }, 'Error during signal-triggered shutdown');
       process.exitCode = 1;
     });
   };
@@ -370,7 +582,7 @@ export function setupSignalHandlers(shutdownFn: () => Promise<void>): void {
 
 // ─── Start Daemon Server ────────────────────────────────────────
 
-export interface DaemonServerHandle {
+interface DaemonServerHandle {
   close: () => Promise<void>;
   gracefulShutdown: () => Promise<void>;
   transport: TransportConfig;
@@ -378,7 +590,7 @@ export interface DaemonServerHandle {
 
 export async function startDaemonServer(
   engine: Engine,
-  config: OneAgentConfig,
+  config: SchruteConfig,
   closeHandles?: DaemonCloseHandles,
 ): Promise<DaemonServerHandle> {
   const socketPath = getDaemonSocketPath(config);
@@ -392,7 +604,7 @@ export async function startDaemonServer(
 
   // UDS path length limit: 104 bytes on macOS (sun_path), 108 on Linux
   if (socketPath.length > 104) {
-    log.warn({ socketPath, length: socketPath.length }, 'UDS path too long, falling back to TCP');
+    log().warn({ socketPath, length: socketPath.length }, 'UDS path too long, falling back to TCP');
     useUds = false;
   }
 
@@ -415,7 +627,7 @@ export async function startDaemonServer(
 
   server.on('request', (req, res) => {
     handleRequest(engine, config, transport, lifecycle, gracefulShutdownFn, req, res).catch((err) => {
-      log.error({ err }, 'Unhandled request error');
+      log().error({ err }, 'Unhandled request error');
       if (!res.headersSent) {
         sendJson(res, 500, { error: 'Internal server error' });
       }
@@ -432,7 +644,7 @@ export async function startDaemonServer(
         try {
           fs.chmodSync(udsTransport.socketPath, 0o600);
         } catch (err) {
-          log.error({ err, socketPath: udsTransport.socketPath }, 'Failed to set socket permissions — aborting (fail-closed)');
+          log().error({ err, socketPath: udsTransport.socketPath }, 'Failed to set socket permissions — aborting (fail-closed)');
           server.close();
           reject(new Error(`Failed to set socket permissions on ${udsTransport.socketPath}: ${err instanceof Error ? err.message : String(err)}`));
           return;
@@ -449,9 +661,9 @@ export async function startDaemonServer(
   writePidFile(pidPath);
 
   if (transport.mode === 'uds') {
-    log.info({ socketPath: transport.socketPath }, 'Daemon control server listening (UDS)');
+    log().info({ socketPath: transport.socketPath }, 'Daemon control server listening (UDS)');
   } else {
-    log.info({ port: transport.port }, 'Daemon control server listening (TCP, bearer auth required)');
+    log().info({ port: transport.port }, 'Daemon control server listening (TCP, bearer auth required)');
   }
 
   const closeServer = async () => {

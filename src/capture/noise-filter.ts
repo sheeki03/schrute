@@ -202,6 +202,11 @@ function classifyEntry(
     return { classification: 'noise', reason: 'beacon' };
   }
 
+  // Consent/tracking endpoint detection via response-shape heuristics
+  if (isConsentOrTrackingEndpoint(entry)) {
+    return { classification: 'noise', reason: 'tracking_endpoint' };
+  }
+
   // Polling/heartbeat detection
   const sigKey = `${entry.request.method}|${entry.request.url}`;
   if (pollingUrls.has(sigKey)) {
@@ -260,6 +265,31 @@ function isBeacon(entry: HarEntry): boolean {
     '/analytics', '/log', '/ping', '/heartbeat',
   ];
   return trackingPatterns.some(p => url.includes(p));
+}
+
+function isConsentOrTrackingEndpoint(entry: HarEntry): boolean {
+  const urlPath = getUrlPath(entry.request.url).toLowerCase();
+  const status = entry.response.status;
+  const bodySize = entry.response.content?.size ?? entry.response.bodySize ?? -1;
+
+  // 1. Tracking pixel files (any domain, any method)
+  const filename = urlPath.split('/').pop() ?? '';
+  if (['pixel.gif', 'pixel.png', '1x1.gif'].includes(filename)) return true;
+
+  // 2. Consent/decision endpoints: path contains consent-like segment
+  //    AND response body is very small (< 256 bytes)
+  const CONSENT_PATHS = ['/decision', '/consent', '/gdpr', '/cmp'];
+  if (CONSENT_PATHS.some(p => urlPath.includes(p)) && bodySize >= 0 && bodySize < 256) {
+    return true;
+  }
+
+  // 3. Empty 204 responses with tracking-like paths (any domain)
+  if (status === 204) {
+    const TRACKING_204_PATHS = ['/collect', '/track', '/beacon', '/ping', '/pixel'];
+    if (TRACKING_204_PATHS.some(p => urlPath.includes(p))) return true;
+  }
+
+  return false;
 }
 
 function getResponseContentType(entry: HarEntry): string | undefined {

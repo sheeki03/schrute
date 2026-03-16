@@ -8,13 +8,15 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { getLogger } from '../core/logger.js';
+import { BoundedMap } from '../shared/bounded-map.js';
 import { VERSION } from '../version.js';
 import type { Engine } from '../core/engine.js';
 import type { SkillRepository } from '../storage/skill-repository.js';
 import type { SiteRepository } from '../storage/site-repository.js';
 import type { ConfirmationManager } from './confirmation.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 import { buildToolList, dispatchToolCall } from './tool-dispatch.js';
+import { createRouter } from './router.js';
 import { registerResourceHandlers, registerPromptHandlers } from './mcp-handlers.js';
 
 const log = getLogger();
@@ -26,7 +28,7 @@ export interface McpHttpDeps {
   skillRepo: SkillRepository;
   siteRepo: SiteRepository;
   confirmation: ConfirmationManager;
-  config: OneAgentConfig;
+  config: SchruteConfig;
 }
 
 // ─── MCP HTTP Server ─────────────────────────────────────────────
@@ -47,23 +49,40 @@ export async function startMcpHttpServer(
   const host = options?.host ?? '127.0.0.1';
   const port = options?.port ?? 3001;
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
-  const sessionServers = new Map<string, Server>();
+  // Create a single shared router for all sessions (avoids per-call allocation)
+  const router = createRouter(deps);
+  const depsWithRouter = { ...deps, router };
+
+  interface McpSession {
+    transport: StreamableHTTPServerTransport;
+    server: Server;
+  }
+  const sessions = new BoundedMap<string, McpSession>({
+    maxSize: 100,
+    onEvict: (_key, session) => {
+      Promise.resolve()
+        .then(() => session.transport.close())
+        .then(() => session.server.close())
+        .catch(e => log.warn({ e }, 'Session eviction cleanup failed'));
+    },
+  });
   let isShuttingDown = false;
 
   // Helper: register all MCP handlers on a server instance
   function registerAllHandlers(server: Server): void {
-    registerResourceHandlers(server, deps);
-    registerPromptHandlers(server, deps);
+    registerResourceHandlers(server, depsWithRouter);
+    registerPromptHandlers(server, depsWithRouter);
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const tools = buildToolList(deps);
+    server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
+      const listCallerId = (extra as { sessionId?: string })?.sessionId ?? 'mcp-http-unknown';
+      const tools = buildToolList(depsWithRouter, listCallerId);
       return { tools };
     });
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: args } = request.params;
-      return dispatchToolCall(name, args as Record<string, unknown> | undefined, deps);
+      const toolCallerId = (extra as { sessionId?: string })?.sessionId ?? 'mcp-http-unknown';
+      return dispatchToolCall(name, args as Record<string, unknown> | undefined, depsWithRouter, toolCallerId);
     });
   }
 
@@ -131,8 +150,8 @@ export async function startMcpHttpServer(
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
-    if (sessionId && transports.has(sessionId)) {
-      transport = transports.get(sessionId)!;
+    if (sessionId && sessions.has(sessionId)) {
+      transport = sessions.get(sessionId)!.transport;
     } else if (req.method === 'POST' && !sessionId) {
       // Gate 2: Before creating new transport/session server
       // This catches in-flight requests that entered before shutdown
@@ -153,18 +172,20 @@ export async function startMcpHttpServer(
         if (sid) {
           if (!isShuttingDown) {
             // Normal close: this callback owns server cleanup
-            sessionServers.get(sid)?.close().catch(e => log.warn({ e }, 'Session server close error in onclose'));
-            sessionServers.delete(sid);
+            const session = sessions.get(sid);
+            session?.server.close().catch(e => log.warn({ e }, 'Session server close error in onclose'));
+            sessions.deleteQuiet(sid);
           }
-          // During shutdown: leave sessionServers intact (shutdown phase 2 owns server close)
-          transports.delete(sid);
+          // During shutdown: leave sessions intact — shutdown owns cleanup via
+          // sessions.clear() (which does not fire onEvict). Calling delete here
+          // would trigger onEvict and double-close the transport/server.
           log.debug({ sessionId: sid }, 'MCP HTTP session closed');
         }
       };
 
       // Create per-session server
       const sessionServer = new Server(
-        { name: 'oneagent', version: VERSION },
+        { name: 'schrute', version: VERSION },
         { capabilities: { tools: {}, resources: {}, prompts: {} } },
       );
       registerAllHandlers(sessionServer);
@@ -200,12 +221,11 @@ export async function startMcpHttpServer(
 
       // NOW sessionId is set — register the transport and server
       if (transport.sessionId) {
-        transports.set(transport.sessionId, transport);
-        sessionServers.set(transport.sessionId, sessionServer);
+        sessions.set(transport.sessionId, { transport, server: sessionServer });
         log.info({ sessionId: transport.sessionId }, 'MCP HTTP session registered');
       }
       return;
-    } else if (sessionId && !transports.has(sessionId)) {
+    } else if (sessionId && !sessions.has(sessionId)) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session not found' }));
       return;
@@ -241,18 +261,19 @@ export async function startMcpHttpServer(
         async close() {
           isShuttingDown = true;
 
+          // Snapshot sessions before closing — onclose may mutate the map
+          const snapshot = [...sessions.values()];
+
           // Phase 1: Close transports (frees active connections)
-          const serversToClose = [...sessionServers.values()];
           await Promise.allSettled(
-            [...transports.values()].map(t => t.close().catch(e => log.warn({ e }, 'Transport close error')))
+            snapshot.map(s => s.transport.close().catch(e => log.warn({ e }, 'Transport close error')))
           );
-          transports.clear();
 
           // Phase 2: Close all session servers (sole owner — onclose skipped during shutdown)
           await Promise.allSettled(
-            serversToClose.map(s => s.close().catch(e => log.warn({ e }, 'Session server close error')))
+            snapshot.map(s => s.server.close().catch(e => log.warn({ e }, 'Session server close error')))
           );
-          sessionServers.clear();
+          sessions.clear();
 
           // Phase 3: Close HTTP server last
           await new Promise<void>((resolveClose, reject) => {

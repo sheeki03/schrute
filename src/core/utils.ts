@@ -5,9 +5,13 @@ import type { SealedFetchRequest, SealedFetchResponse } from '../skill/types.js'
 const log = getLogger();
 
 // ─── extractPathParams ──────────────────────────────────────────────
-// Canonical implementation (was duplicated in compiler.ts, validator.ts,
-// generator.ts, request-builder.ts).
 
+/**
+ * Extract named path parameters from a URL path template.
+ *
+ * @param template - URL path template containing `{paramName}` placeholders
+ * @returns Array of parameter names found in the template
+ */
 export function extractPathParams(template: string): string[] {
   const matches = template.match(/\{(\w+)\}/g);
   if (!matches) return [];
@@ -15,13 +19,19 @@ export function extractPathParams(template: string): string[] {
 }
 
 // ─── defaultFetch ───────────────────────────────────────────────────
-// Canonical implementation (was duplicated in compiler.ts, validator.ts).
 
+/**
+ * Execute an HTTP request using the global `fetch` API and return a normalized response.
+ *
+ * @param req - Sealed fetch request containing url, method, headers, and optional body
+ * @returns Normalized response with status, headers, and body as text
+ */
 export async function defaultFetch(req: SealedFetchRequest): Promise<SealedFetchResponse> {
   const response = await fetch(req.url, {
     method: req.method,
     headers: req.headers,
     body: req.body,
+    redirect: 'manual',
   });
 
   const body = await response.text();
@@ -38,11 +48,15 @@ export async function defaultFetch(req: SealedFetchRequest): Promise<SealedFetch
 }
 
 // ─── withTimeout ────────────────────────────────────────────────────
-// Canonical implementation (was duplicated in compiler.ts, executor.ts,
-// redactor.ts). This version accepts a Promise directly (the most common
-// usage pattern). redactor.ts previously accepted a thunk; callers should
-// wrap with withTimeout(fn(), ms) instead.
 
+/**
+ * Race a promise against a timeout, rejecting if the timeout fires first.
+ *
+ * @param promise - The promise to race against the timeout
+ * @param ms - Timeout duration in milliseconds
+ * @param label - Optional label included in the timeout error message
+ * @returns The resolved value of the promise, or rejects with a timeout error
+ */
 export function withTimeout<T>(promise: Promise<T>, ms: number, label?: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -62,9 +76,14 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label?: string):
 }
 
 // ─── normalizeOrigin ────────────────────────────────────────────────
-// Canonical implementation (was duplicated in graphql-scanner.ts,
-// openapi-scanner.ts).
 
+/**
+ * Extract the origin (scheme + host + port) from a URL string.
+ * Falls back to stripping trailing slashes if the URL cannot be parsed.
+ *
+ * @param url - The URL to normalize
+ * @returns The origin portion of the URL
+ */
 export function normalizeOrigin(url: string): string {
   try {
     const parsed = new URL(url);
@@ -76,9 +95,14 @@ export function normalizeOrigin(url: string): string {
 }
 
 // ─── typeOf ─────────────────────────────────────────────────────────
-// Canonical implementation (was duplicated in api-extractor.ts,
-// response-parser.ts).
 
+/**
+ * Return a refined type string for a value, distinguishing `null` and `array`
+ * from the generic `typeof` result.
+ *
+ * @param value - Any value to inspect
+ * @returns `'null'`, `'array'`, or the result of `typeof value`
+ */
 export function typeOf(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'array';
@@ -86,9 +110,6 @@ export function typeOf(value: unknown): string {
 }
 
 // ─── ERROR_SIGNATURE_PATTERNS ───────────────────────────────────────
-// Canonical error signature detection patterns (were duplicated in
-// validator.ts and response-parser.ts). Both files detect the same
-// underlying error conditions in HTTP response bodies.
 
 export const ERROR_SIGNATURE_PATTERNS: ReadonlyArray<{ name: string; check: (body: string) => boolean }> = [
   {

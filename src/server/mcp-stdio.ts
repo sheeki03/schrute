@@ -10,9 +10,10 @@ import type { Engine } from '../core/engine.js';
 import type { SkillRepository } from '../storage/skill-repository.js';
 import type { SiteRepository } from '../storage/site-repository.js';
 import type { ConfirmationManager } from './confirmation.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
 import { buildToolList, dispatchToolCall } from './tool-dispatch.js';
+import { createRouter } from './router.js';
 import { registerResourceHandlers, registerPromptHandlers } from './mcp-handlers.js';
 import { drainMcpNotifications } from '../healing/notification.js';
 
@@ -28,7 +29,7 @@ export interface McpStdioDeps {
   skillRepo: SkillRepository;
   siteRepo: SiteRepository;
   confirmation: ConfirmationManager;
-  config: OneAgentConfig;
+  config: SchruteConfig;
 }
 
 // ─── MCP Server ──────────────────────────────────────────────────
@@ -36,12 +37,16 @@ export interface McpStdioDeps {
 export async function startMcpServer(deps: McpStdioDeps): Promise<{ close: () => Promise<void> }> {
   const { skillRepo } = deps;
 
+  // Create a single shared router (avoids per-call allocation in dispatchToolCall)
+  const router = createRouter(deps);
+  const depsWithRouter = { ...deps, router };
+
   // Track which skills are currently exposed
   let lastActiveSkillIds: string[] = [];
 
   const server = new Server(
     {
-      name: 'oneagent',
+      name: 'schrute',
       version: VERSION,
     },
     {
@@ -54,13 +59,13 @@ export async function startMcpServer(deps: McpStdioDeps): Promise<{ close: () =>
   );
 
   // ─── Resource & Prompt Handlers ─────────────────────────────────
-  registerResourceHandlers(server, deps);
-  registerPromptHandlers(server, deps);
+  registerResourceHandlers(server, depsWithRouter);
+  registerPromptHandlers(server, depsWithRouter);
 
   // ─── List Tools Handler ───────────────────────────────────────
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = buildToolList(deps);
+    const tools = buildToolList(depsWithRouter, 'stdio');
 
     // Track for change detection
     const activeSkills = skillRepo.getByStatus(SkillStatus.ACTIVE);
@@ -84,7 +89,7 @@ export async function startMcpServer(deps: McpStdioDeps): Promise<{ close: () =>
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return dispatchToolCall(name, args as Record<string, unknown> | undefined, deps);
+    return dispatchToolCall(name, args as Record<string, unknown> | undefined, depsWithRouter, 'stdio');
   });
 
   // ─── Periodic Tool List Change Detection ──────────────────────

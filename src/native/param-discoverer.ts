@@ -31,7 +31,7 @@ export function discoverParamsNative(recordings: RequestSample[]): ParameterEvid
       return JSON.parse(resultJson) as ParameterEvidence[];
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native param-discoverer unavailable, using TS fallback');
+        log.info({ err }, 'Native param-discoverer unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

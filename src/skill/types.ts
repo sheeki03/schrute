@@ -245,6 +245,7 @@ export const ALLOWED_BROWSER_TOOLS = [
   'browser_batch_actions',
   'browser_snapshot_with_screenshot',
   'browser_debug_trace',
+  'browser_load_all',
 ] as const;
 
 export const BLOCKED_BROWSER_TOOLS = [
@@ -445,10 +446,13 @@ export interface SiteManifest {
   defaultOverrides?: { proxy?: { server: string }; geo?: GeoEmulationConfig };
 }
 
+// ─── HTTP Methods ───────────────────────────────────────────────────
+export type HttpMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
+
 // ─── Policy ────────────────────────────────────────────────────────
 export interface SitePolicy {
   siteId: string;
-  allowedMethods: string[];
+  allowedMethods: HttpMethod[];
   maxQps: number;
   maxConcurrent: number;
   readOnlyDefault: boolean;
@@ -595,7 +599,7 @@ export interface SchruteConfig {
   dataDir: string;               // ~/.schrute
   logLevel: string;              // default: 'info'
   features: {
-    webmcp: boolean;             // default: false
+    webmcp: boolean;             // default: true
     httpTransport: boolean;      // default: false (v0.2+)
     discoveryImport: boolean;    // default: false — gates cold-start → DRAFT skill creation
     respectRobotsTxt: boolean;   // default: true — honor robots.txt during discovery

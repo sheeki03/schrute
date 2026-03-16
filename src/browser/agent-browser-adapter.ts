@@ -1,5 +1,4 @@
 import type { Page, Response as PwResponse } from 'playwright';
-import type { NetworkEntry } from '../skill/types.js';
 import type { BrowserFeatureFlags } from './feature-flags.js';
 import type { BrowserBenchmark } from './benchmark.js';
 import { BaseBrowserAdapter } from './base-browser-adapter.js';

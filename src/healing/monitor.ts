@@ -1,4 +1,5 @@
-import type { SkillSpec } from '../skill/types.js';
+import type { SkillSpec, FailureCauseName } from '../skill/types.js';
+import { INFRA_FAILURE_CAUSES } from '../skill/types.js';
 import type { MetricsRepository, SkillMetric } from '../storage/metrics-repository.js';
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -44,15 +45,21 @@ export function monitorSkills(
   return skills.map((skill) => assessSkillHealth(skill, metricsRepo));
 }
 
+function filterOutInfraMetrics(metrics: SkillMetric[]): SkillMetric[] {
+  return metrics.filter(m => !m.errorType || !INFRA_FAILURE_CAUSES.has(m.errorType as FailureCauseName));
+}
+
 function assessSkillHealth(
   skill: SkillSpec,
   metricsRepo: MetricsRepository,
 ): HealthReport {
   const metrics = metricsRepo.getRecentBySkillId(skill.id, MAX_WINDOW_SIZE * DEGRADING_TREND_WINDOWS);
 
-  // Apply time window filter (24 hours)
+  // Apply time window filter (24 hours), then strip infra failures before any classification.
+  // Infra failures (policy_denied, rate_limited, budget_denied) are not skill observations
+  // and must not influence health status, trend, or sudden-drop detection.
   const cutoff = Date.now() - MAX_WINDOW_HOURS * 60 * 60 * 1000;
-  const recentMetrics = metrics.filter((m) => m.executedAt >= cutoff);
+  const recentMetrics = filterOutInfraMetrics(metrics.filter((m) => m.executedAt >= cutoff));
 
   if (recentMetrics.length === 0) {
     return {
@@ -132,4 +139,36 @@ function detectSuddenDrop(metrics: SkillMetric[]): boolean {
   );
 
   return previousRate - currentRate > SUDDEN_DROP_THRESHOLD;
+}
+
+// ─── Nudge Decision ─────────────────────────────────────────────
+
+/**
+ * Determine if a skill should receive a "nudge" — a lightweight hint
+ * to refine its behavior without full amendment/relearn.
+ *
+ * Nudge criteria: skill is healthy but success rate is between 70-90%
+ * and trending slightly downward (< -0.05 but > -0.1).
+ */
+export function shouldNudge(report: HealthReport): boolean {
+  if (report.status !== 'healthy') return false;
+  if (report.windowSize < 10) return false; // Not enough data
+  return report.successRate >= 0.7 && report.successRate < 0.9 && report.trend < -0.05;
+}
+
+// ─── Amendment Decision ─────────────────────────────────────────
+
+/**
+ * Determine whether a degrading/broken skill should attempt amendment,
+ * skip (evaluation in progress), or fall through to relearning.
+ */
+export function shouldAmend(
+  report: HealthReport,
+  amendmentRepo: { hasActiveAmendment(skillId: string): boolean; isInCooldown(skillId: string, cooldown: number): boolean },
+  cooldownExecutions: number = 50,
+): 'amend' | 'skip' | 'relearn' {
+  if (report.status !== 'degrading' && report.status !== 'broken') return 'skip';
+  if (amendmentRepo.hasActiveAmendment(report.skillId)) return 'skip'; // evaluation in progress
+  if (amendmentRepo.isInCooldown(report.skillId, cooldownExecutions)) return 'relearn'; // cooldown → fall through to relearner
+  return 'amend';
 }

@@ -18,7 +18,7 @@ export class StaleRefError extends Error {
 
 // ─── Interfaces ─────────────────────────────────────────────────
 
-export interface LocatorStrategy {
+interface LocatorStrategy {
   method: 'scopedRole' | 'globalRole' | 'locator';
   scopeChain?: Array<{ role: string; name?: string }>;
   role?: string;
@@ -60,7 +60,7 @@ export interface SnapshotNode {
   framePath?: string;
 }
 
-export interface TreeDiff {
+interface TreeDiff {
   added: SnapshotNode[];
   removed: SnapshotNode[];
   modified: Array<{ ref: string; changes: string }>;

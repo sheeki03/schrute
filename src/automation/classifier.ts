@@ -6,7 +6,7 @@ const log = getLogger();
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface SiteClassification {
+interface SiteClassification {
   recommendedTier: ExecutionTierName;
   authRequired: boolean;
   dynamicFieldsDetected: boolean;

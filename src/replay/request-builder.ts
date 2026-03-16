@@ -5,7 +5,6 @@ import type {
   SkillSpec,
   ExecutionTierName,
   AuthRecipe,
-  SealedFetchRequest,
 } from '../skill/types.js';
 import {
   ExecutionTier,
@@ -33,7 +32,7 @@ const TIER3_BLOCKED_HEADERS: string[] = [
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface BuildRequestResult {
+interface BuildRequestResult {
   url: string;
   method: string;
   headers: Record<string, string>;

@@ -1,4 +1,4 @@
-import { createSign, createVerify, createHash, randomBytes } from 'node:crypto';
+import { createSign, createVerify, randomBytes } from 'node:crypto';
 import { getLogger } from '../core/logger.js';
 import type { SealedFetchRequest } from '../skill/types.js';
 
@@ -6,7 +6,7 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface BotIdentity {
+interface BotIdentity {
   /** Key identifier registered with the server */
   keyId: string;
   /** PEM-encoded private key for signing */

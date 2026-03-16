@@ -9,7 +9,7 @@ type SideEffectClass = 'read-only' | 'idempotent' | 'non-idempotent';
 type HealthStatus = 'ok' | 'degraded' | 'error';
 type EngineMode = 'idle' | 'exploring' | 'recording' | 'replaying';
 
-export interface OneAgentClientOptions {
+export interface SchruteClientOptions {
   baseUrl: string;
   apiKey?: string;
 }
@@ -109,3 +109,42 @@ export interface HealthResponse {
 }
 
 export type OpenApiSpec = Record<string, unknown>;
+
+export interface SkillSearchResult {
+  id: string;
+  name: string;
+  siteId: string;
+  method: string;
+  pathTemplate: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  status: string;
+  successRate: number;
+  currentTier: string;
+  executable: boolean;
+  blockedReason?: string;
+  provenance?: 'learned' | 'webmcp' | 'both';
+}
+
+export interface SkillSearchResponse {
+  results: SkillSearchResult[];
+  matchType?: 'fts' | 'like';
+  inactiveMatches?: Array<{ id: string; status: string }>;
+  inactiveHint?: string;
+}
+
+// ─── Compile-time drift guards ──────────────────────────────────
+// If a server enum value is added/removed, one of these lines fails to compile.
+import type { SkillStatusName, ExecutionTierName, TierStateName, MasteryLevelName, SideEffectClassName } from '../../skill/types.js';
+import type { EngineMode as ServerEngineMode } from '../../core/engine.js';
+
+type _Exact<A, B> = [A] extends [B] ? [B] extends [A] ? true : false : false;
+type _Assert<T extends true> = T;
+
+// Each line fails to compile if a server enum gains or loses a member.
+type _CheckSkillStatus = _Assert<_Exact<SkillStatus, SkillStatusName>>;
+type _CheckExecutionTier = _Assert<_Exact<ExecutionTier, ExecutionTierName>>;
+type _CheckTierState = _Assert<_Exact<TierState, TierStateName>>;
+type _CheckMasteryLevel = _Assert<_Exact<MasteryLevel, MasteryLevelName>>;
+type _CheckSideEffectClass = _Assert<_Exact<SideEffectClass, SideEffectClassName>>;
+type _CheckEngineMode = _Assert<_Exact<EngineMode, ServerEngineMode>>;

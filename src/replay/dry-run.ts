@@ -17,7 +17,7 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface DryRunResult {
+interface DryRunResult {
   method: string;
   url: string;
   headers: Record<string, string>;

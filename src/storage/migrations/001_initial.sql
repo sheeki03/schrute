@@ -1,4 +1,4 @@
--- OneAgent v0.1 initial schema
+-- Schrute v0.1 initial schema
 -- SQLite with WAL mode (set at connection time, not here)
 
 -- ─── Sites ───────────────────────────────────────────────────────────

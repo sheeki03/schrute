@@ -41,7 +41,7 @@ export function filterRequestsNative(
       };
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native noise-filter unavailable, using TS fallback');
+        log.info({ err }, 'Native noise-filter unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

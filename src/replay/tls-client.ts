@@ -5,7 +5,7 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface TlsOptions {
+interface TlsOptions {
   /** JA3 fingerprint string to mimic */
   ja3?: string;
   /** User-Agent header override */
@@ -161,7 +161,7 @@ export function isCycleTlsAvailable(): boolean {
 /**
  * Clean up the CycleTLS instance. Call on process shutdown.
  */
-export async function closeTlsClient(): Promise<void> {
+async function closeTlsClient(): Promise<void> {
   if (cycleTlsInstance) {
     try {
       await cycleTlsInstance.exit();

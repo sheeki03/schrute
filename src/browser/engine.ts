@@ -11,7 +11,7 @@ export interface EngineCapabilities {
   effectiveEngine: BrowserEngine;
 }
 
-export interface LaunchResult {
+interface LaunchResult {
   browser: Browser;
   capabilities: EngineCapabilities;
 }
@@ -128,7 +128,7 @@ export async function launchBrowserEngine(
             const { createRequire } = await import('node:module');
             const req = createRequire(import.meta.url);
             pwVersion = req('playwright-core/package.json').version;
-          } catch { /* version diagnostic is best-effort */ }
+          } catch (err) { log.debug({ err }, 'Version diagnostic failed'); }
           throw new Error(
             `Camoufox runtime probe failed: ${probeErr instanceof Error ? probeErr.message : String(probeErr)}. ` +
             `This may be a playwright-core version mismatch (installed: ${pwVersion}). ` +
@@ -159,13 +159,13 @@ export async function launchBrowserEngine(
 /**
  * Reset the camoufox probe flag — for testing only.
  */
-export function _resetCamoufoxProbe(): void {
+function _resetCamoufoxProbe(): void {
   camoufoxProbePass = false;
 }
 
 // ─── CDP Connection ──────────────────────────────────────────────
 
-export interface ConnectOptions {
+interface ConnectOptions {
   wsEndpoint?: string;
   port?: number;
   host?: string;
@@ -175,7 +175,7 @@ export interface ConnectOptions {
  * Connect to an existing browser via CDP.
  * Returns LaunchResult with playwright capabilities.
  */
-export async function connectBrowserEngine(options: ConnectOptions): Promise<LaunchResult> {
+async function connectBrowserEngine(options: ConnectOptions): Promise<LaunchResult> {
   const { connectViaCDP } = await import('./cdp-connector.js');
   const browser = await connectViaCDP(options);
   return {

@@ -24,7 +24,7 @@ export function inferSchemaNative(samples: unknown[]): JsonSchema {
       return JSON.parse(resultJson) as JsonSchema;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native schema-inference unavailable, using TS fallback');
+        log.info({ err }, 'Native schema-inference unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

@@ -1,5 +1,6 @@
 import type { SkillSpec } from '../skill/types.js';
-import { ALLOWED_BROWSER_TOOLS } from '../skill/types.js';
+import { ALLOWED_BROWSER_TOOLS, isParamRequired } from '../skill/types.js';
+import { extractPathParams } from '../core/utils.js';
 
 // ─── Tool Shortlist Ranking ──────────────────────────────────────
 
@@ -8,23 +9,48 @@ export function rankToolsByIntent(
   intent: string | undefined,
   k: number,
 ): SkillSpec[] {
-  if (!intent || skills.length <= k) {
+  if (!intent) {
     return skills.slice(0, k);
   }
 
   const intentLower = intent.toLowerCase();
   const words = intentLower.split(/\s+/);
 
+  // Detect HTTP method in query for method+path combo bonus
+  const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options']);
+  const queryMethod = words.find(w => HTTP_METHODS.has(w));
+  const queryPathWords = words.filter(w => !HTTP_METHODS.has(w));
+
   const scored = skills.map((skill) => {
     let score = 0;
     const nameLower = (skill.name ?? '').toLowerCase();
     const descLower = (skill.description ?? '').toLowerCase();
     const idLower = skill.id.toLowerCase();
+    const pathLower = (skill.pathTemplate ?? '').toLowerCase();
+    const siteIdLower = (skill.siteId ?? '').toLowerCase();
+    const methodLower = (skill.method ?? '').toLowerCase();
+    const pathSegments = pathLower.split('/').filter(Boolean);
 
     for (const word of words) {
       if (nameLower.includes(word)) score += 3;
       if (descLower.includes(word)) score += 2;
       if (idLower.includes(word)) score += 1;
+      if (pathLower.includes(word)) score += 3;
+      if (siteIdLower.includes(word)) score += 1;
+      // Exact method match gets +2, substring match gets +1
+      if (methodLower === word) {
+        score += 2;
+      } else if (methodLower.includes(word)) {
+        score += 1;
+      }
+      // Whole-path-segment bonus
+      if (pathSegments.includes(word)) score += 2;
+    }
+
+    // Method+path combo bonus: if query has e.g. "GET users", boost skills matching both
+    if (queryMethod && queryPathWords.length > 0 && methodLower === queryMethod) {
+      const pathMatch = queryPathWords.some(pw => pathSegments.includes(pw));
+      if (pathMatch) score += 3;
     }
 
     // Boost by success rate and recency
@@ -33,6 +59,12 @@ export function rankToolsByIntent(
       const ageHours = (Date.now() - skill.lastUsed) / (1000 * 60 * 60);
       if (ageHours < 24) score += 1;
     }
+
+    // Boost direct-proven skills
+    if (skill.currentTier === 'tier_1') score += 1;
+    // Boost lower latency
+    const avgLatencyMs = 'avgLatencyMs' in skill ? (skill as unknown as Record<string, unknown>).avgLatencyMs : undefined;
+    if (typeof avgLatencyMs === 'number' && avgLatencyMs < 500) score += 1;
 
     return { skill, score };
   });
@@ -43,7 +75,7 @@ export function rankToolsByIntent(
 
 // ─── Parameter Key Sanitization ─────────────────────────────────
 
-const PARAM_KEY_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
+export const PARAM_KEY_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
 
 /**
  * Sanitize a parameter name to match the API requirement: ^[a-zA-Z0-9_.-]{1,64}$
@@ -96,7 +128,7 @@ function buildAutoDescription(skill: SkillSpec): string {
   parts.push(`[${skill.sideEffectClass}]`);
 
   const userInputParams = skill.parameters
-    .filter(p => p.source === 'user_input')
+    .filter(isParamRequired)
     .map(p => p.name);
   if (userInputParams.length > 0) {
     parts.push(`Inputs: ${userInputParams.join(', ')}`);
@@ -105,21 +137,40 @@ function buildAutoDescription(skill: SkillSpec): string {
   return parts.join(' — ');
 }
 
-export function skillToToolDefinition(skill: SkillSpec) {
+export function skillToToolDefinition(skill: SkillSpec, options?: { maxDescriptionLength?: number }) {
+  // Include path template parameters (e.g. {id}) in inputSchema
+  const pathParams = extractPathParams(skill.pathTemplate);
+  const pathParamEntries: [string, { type: string; description: string }][] =
+    pathParams.map((pp) => [pp, { type: 'string', description: 'Path parameter' }]);
+
+  const skillParamEntries: [string, { type: string; description: string }][] =
+    skill.parameters.map((p) => [
+      sanitizeParamKey(p.name),
+      { type: p.type, description: `Source: ${p.source}` },
+    ]);
+
+  // Path params first, then skill params (skill params win on collision)
+  const properties = Object.fromEntries([...pathParamEntries, ...skillParamEntries]);
+
+  const requiredFromPath = pathParams;
+  const requiredFromSkill = skill.parameters
+    .filter(isParamRequired)
+    .map((p) => sanitizeParamKey(p.name));
+  const required = [...new Set([...requiredFromPath, ...requiredFromSkill])];
+
+  let description = skill.description ?? buildAutoDescription(skill);
+  const maxLen = options?.maxDescriptionLength;
+  if (maxLen !== undefined && description.length > maxLen) {
+    description = description.slice(0, maxLen) + '...';
+  }
+
   return {
     name: skillToToolName(skill),
-    description: skill.description ?? buildAutoDescription(skill),
+    description,
     inputSchema: {
       type: 'object' as const,
-      properties: Object.fromEntries(
-        skill.parameters.map((p) => [
-          sanitizeParamKey(p.name),
-          { type: p.type, description: `Source: ${p.source}` },
-        ]),
-      ),
-      required: skill.parameters
-        .filter((p) => p.source === 'user_input')
-        .map((p) => sanitizeParamKey(p.name)),
+      properties,
+      required,
     },
   };
 }
@@ -128,7 +179,7 @@ export function skillToToolDefinition(skill: SkillSpec) {
 
 export const META_TOOLS = [
   {
-    name: 'oneagent_explore',
+    name: 'schrute_explore',
     description: 'Start a browser session to explore a website',
     inputSchema: {
       type: 'object' as const,
@@ -160,6 +211,15 @@ export const META_TOOLS = [
             },
             timezoneId: { type: 'string' },
             locale: { type: 'string' },
+            userAgent: { type: 'string', description: 'Custom User-Agent string' },
+            viewport: {
+              type: 'object',
+              description: 'Browser viewport dimensions',
+              properties: {
+                width: { type: 'number' },
+                height: { type: 'number' },
+              },
+            },
           },
         },
       },
@@ -167,7 +227,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_record',
+    name: 'schrute_record',
     description: 'Start recording an action frame for skill generation',
     inputSchema: {
       type: 'object' as const,
@@ -183,7 +243,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_stop',
+    name: 'schrute_stop',
     description: 'Stop recording, process HAR, and generate skills',
     inputSchema: {
       type: 'object' as const,
@@ -191,7 +251,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_sites',
+    name: 'schrute_sites',
     description: 'List all known sites',
     inputSchema: {
       type: 'object' as const,
@@ -199,7 +259,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_skills',
+    name: 'schrute_skills',
     description: 'List skills, optionally filtered by site',
     inputSchema: {
       type: 'object' as const,
@@ -209,7 +269,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_status',
+    name: 'schrute_status',
     description: 'Get current session and engine status',
     inputSchema: {
       type: 'object' as const,
@@ -217,7 +277,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_dry_run',
+    name: 'schrute_dry_run',
     description: 'Preview a request for a skill without executing it',
     inputSchema: {
       type: 'object' as const,
@@ -233,7 +293,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_confirm',
+    name: 'schrute_confirm',
     description: 'Confirm or deny first-run of a newly-active skill',
     inputSchema: {
       type: 'object' as const,
@@ -251,7 +311,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_connect_cdp',
+    name: 'schrute_connect_cdp',
     description: 'Connect to an Electron app or existing browser via Chrome DevTools Protocol. Domains are host-only (port-agnostic).',
     inputSchema: {
       type: 'object' as const,
@@ -270,12 +330,14 @@ export const META_TOOLS = [
           type: 'boolean',
           description: 'Scan common CDP ports if no port/wsEndpoint given',
         },
+        tabUrl: { type: 'string', description: 'URL prefix to select a specific tab after connecting' },
+        tabTitle: { type: 'string', description: 'Title substring to select a specific tab after connecting' },
       },
       required: ['name'],
     },
   },
   {
-    name: 'oneagent_sessions',
+    name: 'schrute_sessions',
     description: 'List all named browser sessions',
     inputSchema: {
       type: 'object' as const,
@@ -283,7 +345,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_close_session',
+    name: 'schrute_close_session',
     description: 'Close a named browser session',
     inputSchema: {
       type: 'object' as const,
@@ -295,7 +357,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_switch_session',
+    name: 'schrute_switch_session',
     description: 'Switch active browser session for tool routing',
     inputSchema: {
       type: 'object' as const,
@@ -306,7 +368,7 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_import_cookies',
+    name: 'schrute_import_cookies',
     description: 'Import cookies from a Netscape/Mozilla cookie file into a browser context',
     inputSchema: {
       type: 'object' as const,
@@ -318,20 +380,21 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_execute',
+    name: 'schrute_execute',
     description: 'Execute any skill by ID (cross-site)',
     inputSchema: {
       type: 'object' as const,
       properties: {
         skillId: { type: 'string', description: 'Skill ID to execute' },
         params: { type: 'object', description: 'Parameters for the skill', additionalProperties: true },
+        testMode: { type: 'boolean', description: 'Execute without recording metrics (success rate unaffected)' },
       },
       required: ['skillId'],
     },
   },
   {
-    name: 'oneagent_activate',
-    description: 'Manually activate a DRAFT skill (first execution still requires confirmation)',
+    name: 'schrute_activate',
+    description: 'Manually activate a DRAFT or BROKEN skill (first execution still requires confirmation)',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -341,15 +404,17 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_doctor',
+    name: 'schrute_doctor',
     description: 'Run diagnostic checks on browser engine, config, database, etc.',
     inputSchema: {
       type: 'object' as const,
-      properties: {},
+      properties: {
+        full: { type: 'boolean', description: 'Run full diagnostic checks (admin only — tests browser, keychain, TLS, WAL)' },
+      },
     },
   },
   {
-    name: 'oneagent_export_cookies',
+    name: 'schrute_export_cookies',
     description: 'Export cookies from a browser context',
     inputSchema: {
       type: 'object' as const,
@@ -360,15 +425,162 @@ export const META_TOOLS = [
     },
   },
   {
-    name: 'oneagent_webmcp_call',
-    description: 'Call a WebMCP tool discovered on the current site. Use oneagent_status to see available tools.',
+    name: 'schrute_webmcp_call',
+    description: 'Call a WebMCP tool discovered on the current site. Use schrute_status to see available tools.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         toolName: { type: 'string', description: 'Name of the WebMCP tool to call' },
         args: { type: 'object', description: 'Arguments to pass to the tool', default: {} },
+        refresh: { type: 'boolean', description: 'Re-scan the page for WebMCP tools before calling' },
       },
       required: ['toolName'],
+    },
+  },
+  {
+    name: 'schrute_search_skills',
+    description: 'Search learned skills by keyword. Returns matching skill IDs, input guidance, and metadata. Use with schrute_execute to run a skill by ID.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'Search keywords (matches skill name, description, and ID)' },
+        limit: { type: 'number', description: 'Max results (default: 10)' },
+        siteId: { type: 'string', description: 'Filter to a specific site' },
+        includeInactive: { type: 'boolean', description: 'Include inactive (broken/draft/stale) skills in search results' },
+      },
+    },
+  },
+  {
+    name: 'schrute_revoke',
+    description: 'Revoke permanent approval for a skill (next execution will require confirmation again)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to revoke approval for' },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_amendments',
+    description: 'List amendments for a skill',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to get amendments for' },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_optimize',
+    description: 'Run GEPA offline optimization on a broken or degraded skill',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to optimize' },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_delete_skill',
+    description: 'Permanently delete a skill and its amendments/exemplars (admin only)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to delete' },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_list_tabs',
+    description: 'List open tabs in a CDP-connected browser session',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        session: { type: 'string', description: 'Session name (default: active session)' },
+      },
+    },
+  },
+  {
+    name: 'schrute_select_tab',
+    description: 'Switch to a specific tab by URL or title in a CDP session',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        session: { type: 'string', description: 'Session name' },
+        tabUrl: { type: 'string', description: 'URL prefix to match' },
+        tabTitle: { type: 'string', description: 'Title substring to match' },
+      },
+    },
+  },
+  {
+    name: 'schrute_capture_recent',
+    description: 'Capture recent network activity and generate skills from it (no pre-recording needed)',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        minutes: { type: 'number', description: 'How many minutes of history to capture (default: 5, max: 10)' },
+        name: { type: 'string', description: 'Name for the generated action frame' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'schrute_performance_trace',
+    description: 'Start/stop performance trace on the current browser session',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['start', 'stop'], description: 'Start or stop tracing' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'schrute_test_webmcp',
+    description: 'Test a WebMCP tool with sample inputs and validate the response',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        toolName: { type: 'string' },
+        testArgs: { type: 'object' },
+      },
+      required: ['toolName'],
+    },
+  },
+  {
+    name: 'schrute_batch_execute',
+    description: 'Execute multiple skill calls in sequence with batch confirmation',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        actions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              skillId: { type: 'string' },
+              params: { type: 'object' },
+            },
+            required: ['skillId'],
+          },
+          maxItems: 50,
+        },
+      },
+      required: ['actions'],
+    },
+  },
+  {
+    name: 'schrute_webmcp_directory',
+    description: 'Search the local WebMCP tool directory across all known sites',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'Search by tool name or description' },
+      },
     },
   },
 ] as const;
@@ -480,7 +692,7 @@ export function getBrowserToolDefinitions() {
     if (name === 'browser_close') {
       return {
         name,
-        description: 'Close the current browser page (NOT the session — use oneagent_close_session for that)',
+        description: 'Close the current browser page (NOT the session — use schrute_close_session for that)',
         inputSchema: {
           type: 'object' as const,
           properties: {},

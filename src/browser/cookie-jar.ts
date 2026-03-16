@@ -1,5 +1,6 @@
 import { getLogger } from '../core/logger.js';
 import { SERVICE_NAME } from '../storage/secrets.js';
+import { BoundedMap } from '../shared/bounded-map.js';
 
 const log = getLogger();
 
@@ -26,7 +27,7 @@ interface SiteState {
  * In locked mode: cookies are only in-memory for the current session — not persisted.
  */
 export class CookieJar {
-  private inMemoryStore = new Map<string, SiteState>();
+  private inMemoryStore = new BoundedMap<string, SiteState>({ maxSize: 2000, ttlMs: 7200_000 });
   private locked: boolean;
   private refreshIntervalMs: number;
   private keytar: typeof import('keytar') | null = null;

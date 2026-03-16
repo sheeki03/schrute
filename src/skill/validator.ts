@@ -18,20 +18,20 @@ export interface ValidationResult {
   timestamp: number;
 }
 
-export interface InvariantResult {
+interface InvariantResult {
   name: string;
   passed: boolean;
   detail?: string;
 }
 
-export interface ValidationOptions {
+interface ValidationOptions {
   /** Override the default fetch to inject a test double or use browser-proxied fetch */
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>;
   /** Additional invariants beyond the skill's configured ones */
   extraInvariants?: CustomInvariant[];
 }
 
-export interface CustomInvariant {
+interface CustomInvariant {
   name: string;
   check: (body: unknown, headers: Record<string, string>) => InvariantResult;
 }
@@ -43,6 +43,18 @@ export async function validateSkill(
   params: Record<string, unknown>,
   options?: ValidationOptions,
 ): Promise<ValidationResult> {
+  // WebMCP skills bypass HTTP validation — they execute via browser modelContext API
+  if (skill.method === 'WEBMCP') {
+    return {
+      success: true,
+      schemaMatch: true,
+      invariantResults: [],
+      errorSignatures: [],
+      latencyMs: 0,
+      timestamp: Date.now(),
+    };
+  }
+
   const startTime = Date.now();
   const fetchFn = options?.fetchFn ?? defaultFetch;
 

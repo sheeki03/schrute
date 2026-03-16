@@ -30,7 +30,7 @@ export function canonicalizeRequestNative(req: StructuredRequest): Canonicalized
       return JSON.parse(resultJson) as CanonicalizedRequest;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native canonicalizer unavailable, using TS fallback');
+        log.info({ err }, 'Native canonicalizer unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

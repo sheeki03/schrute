@@ -7,13 +7,13 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface ParsedResponse {
+interface ParsedResponse {
   data: unknown;
   schemaMatch: boolean;
   errors: ResponseError[];
 }
 
-export interface ResponseError {
+interface ResponseError {
   type: 'schema_mismatch' | 'error_signature' | 'parse_error';
   message: string;
   detail?: string;

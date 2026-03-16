@@ -14,7 +14,7 @@ export interface GraphQLInfo {
   persistedQueryHash?: string;
 }
 
-export interface GraphQLOperationCluster {
+interface GraphQLOperationCluster {
   operationName: string;
   operationType: 'query' | 'mutation' | 'subscription' | null;
   skillName: string;

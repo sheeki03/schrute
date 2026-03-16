@@ -1,7 +1,7 @@
 {
-  "name": "@oneagent/client",
+  "name": "@schrute/client",
   "version": "0.2.0",
-  "description": "TypeScript client SDK for OneAgent REST API",
+  "description": "TypeScript client SDK for Schrute REST API",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "keywords": [
-    "oneagent",
+    "schrute",
     "browser-agent",
     "api-client",
     "sdk"

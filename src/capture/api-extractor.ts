@@ -1,6 +1,7 @@
 import { getLogger } from '../core/logger.js';
 import { typeOf } from '../core/utils.js';
 import type { StructuredRecord, StructuredRequest } from './har-extractor.js';
+import type { PathTrie } from './path-trie.js';
 
 const log = getLogger();
 
@@ -38,7 +39,7 @@ export function parameterizePath(urlPath: string): string {
 
 // ─── Clustering ──────────────────────────────────────────────────────
 
-export function clusterEndpoints(requests: StructuredRecord[]): EndpointCluster[] {
+export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie): EndpointCluster[] {
   const clusterMap = new Map<string, StructuredRecord[]>();
 
   for (const rec of requests) {
@@ -49,7 +50,14 @@ export function clusterEndpoints(requests: StructuredRecord[]): EndpointCluster[
       continue;
     }
 
-    const template = parameterizePath(urlPath);
+    let template = parameterizePath(urlPath);
+    if (trie) {
+      try {
+        const host = new URL(rec.request.url).hostname;
+        trie.insert(host, template);
+        template = trie.parameterize(host, template);
+      } catch { /* URL parse failure — use un-trieified template */ }
+    }
     const key = `${rec.request.method.toUpperCase()}|${template}`;
 
     let cluster = clusterMap.get(key);
@@ -90,6 +98,7 @@ const SKIP_HEADERS = new Set([
   'user-agent', 'referer', 'origin', 'sec-fetch-site',
   'sec-fetch-mode', 'sec-fetch-dest', 'sec-ch-ua',
   'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+  'sec-fetch-user', 'upgrade-insecure-requests', 'priority',
 ]);
 
 function extractCommonHeaders(requests: StructuredRequest[]): Record<string, string> {

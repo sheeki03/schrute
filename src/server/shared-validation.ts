@@ -1,11 +1,11 @@
 import { setSitePolicy, sanitizeImplicitAllowlist } from '../core/policy.js';
 import { V01_DEFAULT_CAPABILITIES } from '../skill/types.js';
-import type { OneAgentConfig, GeoEmulationConfig } from '../skill/types.js';
+import type { SchruteConfig, GeoEmulationConfig, HttpMethod } from '../skill/types.js';
 
 // ─── Domain Entry Parser ────────────────────────────────────────
 
 /** Moved from tool-dispatch.ts — parses domain entries with IPv6 normalization */
-export function parseDomainEntries(entries: string[]): string[] {
+function parseDomainEntries(entries: string[]): string[] {
   const result: string[] = [];
   for (let entry of entries) {
     if (/[/?#@\s]/.test(entry)) {
@@ -26,16 +26,16 @@ export function parseDomainEntries(entries: string[]): string[] {
 
 // ─── CDP Site Policy Setup ──────────────────────────────────────
 
-export function setupCdpSitePolicy(siteId: string, userDomains?: string[], config?: OneAgentConfig): void {
+export function setupCdpSitePolicy(siteId: string, userDomains?: string[], config?: SchruteConfig): { persisted: boolean } {
   const localDomains = ['127.0.0.1', 'localhost', '[::1]'];
   let allDomains = [...localDomains];
   if (userDomains && Array.isArray(userDomains)) {
     const sanitized = parseDomainEntries(userDomains);
     allDomains = [...localDomains, ...sanitizeImplicitAllowlist(sanitized)];
   }
-  setSitePolicy({
+  return setSitePolicy({
     siteId,
-    allowedMethods: ['GET', 'HEAD'],
+    allowedMethods: ['GET', 'HEAD'] as HttpMethod[],
     maxQps: 10, maxConcurrent: 3,
     readOnlyDefault: true, requireConfirmation: [],
     domainAllowlist: allDomains, redactionRules: [],
@@ -45,7 +45,7 @@ export function setupCdpSitePolicy(siteId: string, userDomains?: string[], confi
 
 // ─── Proxy Validation ───────────────────────────────────────────
 
-export interface ValidatedProxy {
+interface ValidatedProxy {
   server: string;
   bypass?: string;
   username?: string;
@@ -132,6 +132,22 @@ export function validateGeoConfig(geo: unknown): GeoEmulationConfig | undefined 
     catch { throw new Error(`invalid locale "${g.locale}"`); }
     result.locale = g.locale;
   }
-  if (!result.geolocation && !result.timezoneId && !result.locale) return undefined;
+  if (g.userAgent !== undefined && g.userAgent !== null) {
+    if (typeof g.userAgent !== 'string') {
+      throw new Error('geo.userAgent must be a string');
+    }
+    result.userAgent = g.userAgent;
+  }
+  if (g.viewport !== undefined && g.viewport !== null) {
+    if (typeof g.viewport !== 'object' || Array.isArray(g.viewport)) {
+      throw new Error('geo.viewport must be an object');
+    }
+    const vp = g.viewport as Record<string, unknown>;
+    if (typeof vp.width !== 'number' || typeof vp.height !== 'number') {
+      throw new Error('geo.viewport requires numeric width and height');
+    }
+    result.viewport = { width: vp.width, height: vp.height };
+  }
+  if (!result.geolocation && !result.timezoneId && !result.locale && !result.userAgent && !result.viewport) return undefined;
   return result;
 }

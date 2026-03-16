@@ -18,14 +18,29 @@ const MAX_RETRIES_PER_TIER = 1;
 
 export interface RetryOptions extends ExecutorOptions {
   maxRetries?: number;
+  /** Site-recommended tier passed from engine (which owns siteRepo) */
+  siteRecommendedTier?: ExecutionTierName;
+  /** WS-4: Force execution to start at this tier (canary probe support) */
+  forceStartTier?: ExecutionTierName;
+  /** WS-4: Marks this execution as a canary probe */
+  isCanaryProbe?: boolean;
 }
 
-export interface RetryDecision {
+interface RetryDecision {
   attempt: number;
   tier: ExecutionTierName;
   action: 'retry' | 'escalate' | 'abort';
   reason: string;
   backoffMs: number;
+}
+
+/** Per-attempt execution metadata for trajectory capture. */
+interface RetryStepResult {
+  tier: ExecutionTierName;
+  status: number;
+  latencyMs: number;
+  failureCause?: FailureCauseName;
+  success: boolean;
 }
 
 // ─── Retry With Escalation ──────────────────────────────────────
@@ -34,9 +49,10 @@ export async function retryWithEscalation(
   skill: SkillSpec,
   params: Record<string, unknown>,
   options?: RetryOptions,
-): Promise<ExecutionResult & { retryDecisions: RetryDecision[] }> {
+): Promise<ExecutionResult & { retryDecisions: RetryDecision[]; startingTier: ExecutionTierName; stepResults: RetryStepResult[] }> {
   const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   const retryDecisions: RetryDecision[] = [];
+  const stepResults: RetryStepResult[] = [];
 
   // Side-effect-free only — NEVER retry writes
   if (skill.sideEffectClass !== SideEffectClass.READ_ONLY) {
@@ -46,12 +62,25 @@ export async function retryWithEscalation(
     );
 
     const result = await executeSkill(skill, params, options);
-    return { ...result, retryDecisions: [] };
+    const startTier = options?.forceTier ?? (getEffectiveTier(skill) === 'tier_1' ? ExecutionTier.DIRECT : ExecutionTier.BROWSER_PROXIED);
+    return { ...result, retryDecisions: [], startingTier: startTier, stepResults: [] };
   }
 
   // Determine tier cascade based on skill
-  const tierCascade = buildTierCascade(skill);
+  const tierCascade = buildTierCascade(skill, options?.siteRecommendedTier);
   let currentTierIndex = 0;
+
+  // WS-4: Honor forceStartTier — start from its position in cascade, or prepend it
+  if (options?.forceStartTier) {
+    const idx = tierCascade.indexOf(options.forceStartTier);
+    if (idx >= 0) {
+      currentTierIndex = idx;
+    } else {
+      tierCascade.unshift(options.forceStartTier);
+      // currentTierIndex stays 0
+    }
+  }
+
   let attempt = 0;
   let consecutiveFailuresAtTier = 0;
 
@@ -72,12 +101,21 @@ export async function retryWithEscalation(
       forceTier: currentTier,
     });
 
+    // Record per-attempt metadata for trajectory capture
+    stepResults.push({
+      tier: currentTier,
+      status: lastResult.status,
+      latencyMs: lastResult.latencyMs,
+      failureCause: lastResult.failureCause,
+      success: lastResult.success,
+    });
+
     if (lastResult.success) {
       log.info(
         { skillId: skill.id, attempt, tier: currentTier },
         'Skill execution succeeded',
       );
-      return { ...lastResult, retryDecisions };
+      return { ...lastResult, retryDecisions, startingTier: tierCascade[0], stepResults };
     }
 
     // Decide what to do next
@@ -123,7 +161,7 @@ export async function retryWithEscalation(
     'All retries exhausted',
   );
 
-  return { ...(lastResult ?? failureDefault()), retryDecisions };
+  return { ...(lastResult ?? failureDefault()), retryDecisions, startingTier: tierCascade[0], stepResults };
 }
 
 // ─── Retry Decision Logic ───────────────────────────────────────
@@ -166,6 +204,14 @@ function decideRetry(
     return decision('abort', currentTier, 'Policy denied — non-retryable violation');
   }
 
+  // Fetch error: escalate immediately (no same-tier retry for network errors)
+  if (cause === FailureCause.FETCH_ERROR) {
+    if (canEscalate) {
+      return decision('escalate', tierCascade[nextTierIndex], 'Fetch error — escalating tier');
+    }
+    return decision('abort', currentTier, 'Fetch error — all tiers exhausted');
+  }
+
   // JS computed field, protocol sensitivity, signed payload: escalate tier
   if (
     cause === FailureCause.JS_COMPUTED_FIELD ||
@@ -206,12 +252,16 @@ function decideRetry(
 
 // ─── Tier Cascade ───────────────────────────────────────────────
 
-function buildTierCascade(skill: SkillSpec): ExecutionTierName[] {
-  const effectiveTier = getEffectiveTier(skill);
+function buildTierCascade(skill: SkillSpec, siteRecommendedTier?: ExecutionTierName): ExecutionTierName[] {
   if (skill.tierLock?.type === 'permanent' || skill.tierLock?.type === 'temporary_demotion') {
     return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
+  const effectiveTier = getEffectiveTier(skill);
   if (effectiveTier === 'tier_1') {
+    return [ExecutionTier.DIRECT, ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
+  }
+  // tier_3 but site recommends direct — try direct first, fall back to browser
+  if (siteRecommendedTier === ExecutionTier.DIRECT) {
     return [ExecutionTier.DIRECT, ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
   return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];

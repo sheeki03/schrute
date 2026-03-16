@@ -1,4 +1,4 @@
-import type { AuthRecipe, AuthType, RefreshTrigger, RefreshMethod } from '../skill/types.js';
+import type { AuthRecipe, RefreshTrigger } from '../skill/types.js';
 import type { StructuredRecord } from './har-extractor.js';
 import { getLogger } from '../core/logger.js';
 

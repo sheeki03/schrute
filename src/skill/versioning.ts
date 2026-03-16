@@ -2,9 +2,9 @@ import type { SkillSpec } from './types.js';
 
 // ─── Confidence Decay ───────────────────────────────────────────
 
-export const DECAY_CONSTANT_DAYS = 30;
+const DECAY_CONSTANT_DAYS = 30;
 export const STALE_THRESHOLD = 0.3;
-export const BROKEN_THRESHOLD = 0.1;
+const BROKEN_THRESHOLD = 0.1;
 
 /**
  * Exponential decay: exp(-days_since_last_verified / 30)
@@ -58,15 +58,4 @@ export function incrementVersion(skill: SkillSpec): SkillSpec {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-}
-
-/**
- * Batch-update confidence for all skills based on time since last verification.
- * Returns skills with updated confidence values.
- */
-export function updateConfidenceDecay(skills: SkillSpec[]): SkillSpec[] {
-  return skills.map((skill) => ({
-    ...skill,
-    confidence: calculateConfidence(skill),
-  }));
 }

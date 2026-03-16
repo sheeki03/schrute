@@ -22,7 +22,7 @@ import { getLogger } from '../core/logger.js';
 const log = getLogger();
 let _nativeFailureLogged = false;
 
-export interface ChainVerificationNative {
+interface ChainVerificationNative {
   valid: boolean;
   brokenAt?: number;
   totalEntries: number;
@@ -43,7 +43,7 @@ export function computeEntryHashNative(
       return parsed.entryHash;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        log.info({ err }, 'Native audit-chain unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }
@@ -75,7 +75,7 @@ export function signEntryHashNative(
       return parsed.signature;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        log.info({ err }, 'Native audit-chain unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }
@@ -98,7 +98,7 @@ export function verifyChainNative(
       return JSON.parse(resultJson);
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native audit-chain unavailable, using TS fallback');
+        log.info({ err }, 'Native audit-chain unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

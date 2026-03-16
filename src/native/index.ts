@@ -63,10 +63,10 @@ export function getNativeModule(): typeof nativeModule {
     const candidates = [
       // Standalone binary: side-car addon directory
       ...((process as any).pkg
-        ? [join(dirname(process.execPath), 'addons', 'oneagent_native.node')]
+        ? [join(dirname(process.execPath), 'addons', 'schrute_native.node')]
         : []),
       join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'native', 'index.node'),
-      join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'native', 'oneagent-native.node'),
+      join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'native', 'schrute-native.node'),
     ];
 
     for (const candidate of candidates) {

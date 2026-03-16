@@ -1,7 +1,7 @@
 import { getLogger } from './logger.js';
 import { getConfig } from './config.js';
-import type { SkillSpec, SkillStatusName, OneAgentConfig } from '../skill/types.js';
-import { SkillStatus, SideEffectClass, ConfirmationStatus } from '../skill/types.js';
+import type { SkillSpec, SkillStatusName, SchruteConfig } from '../skill/types.js';
+import { SkillStatus, SideEffectClass } from '../skill/types.js';
 
 const log = getLogger();
 
@@ -12,14 +12,14 @@ export interface PromotionCheck {
   reason?: string;
 }
 
-export interface PromotionResult {
+interface PromotionResult {
   skillId: string;
   previousStatus: SkillStatusName;
   newStatus: SkillStatusName;
   timestamp: number;
 }
 
-export interface DemotionResult {
+interface DemotionResult {
   skillId: string;
   previousStatus: SkillStatusName;
   newStatus: SkillStatusName;
@@ -40,7 +40,7 @@ export interface DemotionResult {
  */
 export function canPromote(
   skill: SkillSpec,
-  config?: OneAgentConfig,
+  config?: SchruteConfig,
 ): PromotionCheck {
   const cfg = config ?? getConfig();
   const requiredPasses = cfg.promotionConsecutivePasses;
@@ -80,7 +80,7 @@ export function canPromote(
  * Promote a skill from draft to active.
  * Returns a new SkillSpec with updated status and confirmation.
  */
-export function promoteSkill(skill: SkillSpec, config?: OneAgentConfig): PromotionResult & { skill: SkillSpec } {
+export function promoteSkill(skill: SkillSpec, config?: SchruteConfig): PromotionResult & { skill: SkillSpec } {
   const check = canPromote(skill, config);
   if (!check.eligible) {
     throw new Error(`Cannot promote skill '${skill.id}': ${check.reason}`);

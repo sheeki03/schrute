@@ -2,7 +2,7 @@
 // Metrics collection for browser automation performance tracking.
 // Zero overhead when benchmark instance is null.
 
-export interface BrowserMetrics {
+interface BrowserMetrics {
   snapshotTokens: number;
   snapshotLatencyMs: number;
   actionLatencyMs: number;
@@ -12,7 +12,7 @@ export interface BrowserMetrics {
   networkEntriesCount: number;
 }
 
-export interface BenchmarkSummary {
+interface BenchmarkSummary {
   totalSnapshots: number;
   avgSnapshotTokens: number;
   avgSnapshotLatencyMs: number;

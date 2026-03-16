@@ -5,30 +5,30 @@ const log = getLogger();
 
 // ─── HAR 1.2 Types ───────────────────────────────────────────────────
 
-export interface HarHeader {
+interface HarHeader {
   name: string;
   value: string;
 }
 
-export interface HarQueryParam {
+interface HarQueryParam {
   name: string;
   value: string;
 }
 
-export interface HarPostData {
+interface HarPostData {
   mimeType: string;
   text?: string;
   params?: Array<{ name: string; value: string }>;
 }
 
-export interface HarContent {
+interface HarContent {
   size: number;
   mimeType: string;
   text?: string;
   encoding?: string;
 }
 
-export interface HarTimings {
+interface HarTimings {
   blocked?: number;
   dns?: number;
   connect?: number;
@@ -38,7 +38,7 @@ export interface HarTimings {
   ssl?: number;
 }
 
-export interface HarRequest {
+interface HarRequest {
   method: string;
   url: string;
   httpVersion: string;
@@ -49,7 +49,7 @@ export interface HarRequest {
   bodySize: number;
 }
 
-export interface HarResponse {
+interface HarResponse {
   status: number;
   statusText: string;
   httpVersion: string;
@@ -71,7 +71,7 @@ export interface HarEntry {
   _resourceType?: string;
 }
 
-export interface HarPage {
+interface HarPage {
   startedDateTime: string;
   id: string;
   title: string;
@@ -99,7 +99,7 @@ export interface StructuredRequest {
   queryParams: Record<string, string>;
 }
 
-export interface StructuredResponse {
+interface StructuredResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
@@ -132,7 +132,7 @@ export function parseHar(harPath: string): HarData {
   return parsed;
 }
 
-export function filterByTimeWindow(
+function filterByTimeWindow(
   entries: HarEntry[],
   startTime: number,
   endTime: number,

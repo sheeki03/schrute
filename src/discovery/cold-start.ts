@@ -14,6 +14,7 @@ import type {
   DiscoveryResult,
   DiscoverySource,
   DiscoverySourceType,
+  WebMcpTool,
 } from './types.js';
 import type { CrawledPage } from './managed-crawl.js';
 import type { RobotsPolicy } from './robots.js';
@@ -46,7 +47,7 @@ const TRUST_RANKING: Record<DiscoverySourceType, number> = {
   traffic: 2,
   sitemap: 2,
   webmcp: 1,
-  'devtools-mcp': 1,
+  'devtools-mcp': 3,
 };
 
 // ─── Public API ──────────────────────────────────────────────────────
@@ -114,6 +115,11 @@ export async function discoverSite(
   // WebMCP is feature-flagged
   if (config.features.webmcp && browser && db) {
     tasks.push(runWebMcpScanner(siteId, browser, db, origin));
+  }
+
+  // DevTools MCP scanner — probes for local Chrome DevTools MCP server
+  if (config.features.webmcp) {
+    tasks.push(runDevToolsMcpScanner());
   }
 
   // Sitemap scanner — discovers URLs for second-stage probing
@@ -489,6 +495,19 @@ async function runSitemapScanner(url: string, robotsPolicy?: RobotsPolicy): Prom
   };
 }
 
+async function runDevToolsMcpScanner(): Promise<ScannerOutput> {
+  const { scanDevToolsMcp } = await import('./devtools-mcp-scanner.js');
+  const result = await scanDevToolsMcp();
+  return {
+    source: {
+      type: 'devtools-mcp' as DiscoverySourceType,
+      found: result.found,
+      endpointCount: result.tools.length,
+    },
+    endpoints: result.tools,
+  };
+}
+
 // ─── Page-Based Discovery Adapter ─────────────────────────────────────
 
 async function extractDiscoveryFromPages(
@@ -639,6 +658,57 @@ async function extractDiscoveryFromPages(
     inlineSpecs,
     docs,
   };
+}
+
+// ─── WebMCP Skill Creation ───────────────────────────────────────────
+
+export function createWebMcpSkills(
+  siteId: string,
+  tools: WebMcpTool[],
+  skillRepo: SkillRepository,
+): { created: number; skillIds: string[] } {
+  let created = 0;
+  const skillIds: string[] = [];
+
+  for (const tool of tools) {
+    const skillId = `${siteId}.webmcp_${tool.name}.v1`;
+    if (skillRepo.getById(skillId)) continue;
+
+    const now = Date.now();
+    skillRepo.create({
+      id: skillId,
+      siteId,
+      name: `webmcp_${tool.name}`,
+      version: 1,
+      status: 'draft',
+      currentTier: 'tier_3',
+      tierLock: { type: 'permanent', reason: 'webmcp_requires_browser', evidence: 'WebMCP tools require browser context per spec' },
+      allowedDomains: [siteId],
+      requiredCapabilities: ['browser.modelContext'],
+      parameters: [],
+      validation: { semanticChecks: [], customInvariants: [] },
+      redaction: { piiClassesFound: [], fieldsRedacted: 0 },
+      replayStrategy: 'tier_3_only',
+      sideEffectClass: 'read-only',
+      sampleCount: 0,
+      consecutiveValidations: 0,
+      confidence: 0.5,
+      method: 'WEBMCP',
+      pathTemplate: tool.name,
+      inputSchema: tool.inputSchema ?? {},
+      outputSchema: tool.outputSchema,
+      isComposite: false,
+      description: tool.description,
+      successRate: 0,
+      createdAt: now,
+      updatedAt: now,
+    } as any);
+
+    created++;
+    skillIds.push(skillId);
+  }
+
+  return { created, skillIds };
 }
 
 // ─── Deduplication ───────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getLogger } from './logger.js';
-import type { OneAgentConfig, SkillSpec, PolicyDecision } from '../skill/types.js';
+import type { SchruteConfig, SkillSpec, PolicyDecision } from '../skill/types.js';
 import { SessionManager, type SessionInfo } from './session.js';
 import {
   checkCapability,
@@ -16,25 +16,36 @@ import { getDatabase } from '../storage/database.js';
 import { SkillRepository } from '../storage/skill-repository.js';
 import { MetricsRepository } from '../storage/metrics-repository.js';
 import { executeSkill as replayExecuteSkill } from '../replay/executor.js';
-import { retryWithEscalation } from '../replay/retry.js';
+import { retryWithEscalation, type RetryOptions } from '../replay/retry.js';
+import { TrajectoryRecorder, type Trajectory } from '../replay/trajectory.js';
 import { AuditLog } from '../replay/audit-log.js';
 import { ToolBudgetTracker } from '../replay/tool-budget.js';
+import { ExemplarRepository } from '../storage/exemplar-repository.js';
 import { RateLimiter } from '../automation/rate-limiter.js';
+import { validateParams } from '../replay/param-validator.js';
 import { refreshCookies } from '../automation/cookie-refresh.js';
-import { SideEffectClass, FailureCause } from '../skill/types.js';
+import { SideEffectClass, FailureCause, INFRA_FAILURE_CAUSES, TierState } from '../skill/types.js';
 import type { BrowserProvider } from '../skill/types.js';
 import { PlaywrightMcpAdapter } from '../browser/playwright-mcp-adapter.js';
 import { detectAndWaitForChallenge } from '../browser/base-browser-adapter.js';
 import { getFlags } from '../browser/feature-flags.js';
-import { BrowserManager, ContextOverrideMismatchError } from '../browser/manager.js';
+import { BrowserManager, ContextOverrideMismatchError, stableStringify } from '../browser/manager.js';
 import type { ContextOverrides } from '../browser/manager.js';
+import { BrowserPool } from '../browser/pool.js';
 import { MultiSessionManager, DEFAULT_SESSION_NAME } from '../browser/multi-session.js';
+import type { BrowserBackend } from '../browser/backend.js';
+import { BrowserAuthStore } from '../browser/auth-store.js';
+import { AuthCoordinator } from '../browser/auth-coordinator.js';
+import { AgentBrowserBackend } from '../browser/agent-browser-backend.js';
+import { PlaywrightBackend } from '../browser/playwright-backend.js';
+import { LiveChromeBackend } from '../browser/live-chrome-backend.js';
 import { detectAuth } from '../capture/auth-detector.js';
 import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
 import { parseHar, extractRequestResponse, type StructuredRecord } from '../capture/har-extractor.js';
 import { filterRequestsNative as filterRequests } from '../native/noise-filter.js';
 import { clusterEndpoints } from '../capture/api-extractor.js';
+import { PathTrie } from '../capture/path-trie.js';
 import { generateSkill, generateSkillReferences, generateSkillTemplates, generateActionName } from '../skill/generator.js';
 import { getSkillsDir } from './config.js';
 import { SiteRepository } from '../storage/site-repository.js';
@@ -43,9 +54,13 @@ import { classifySite } from '../automation/classifier.js';
 import { updateStrategy } from '../automation/strategy.js';
 import type { NetworkEntry } from '../skill/types.js';
 import { canPromote, promoteSkill } from './promotion.js';
-import { handleFailure } from './tiering.js';
+import { handleFailure, getEffectiveTier, checkPromotion } from './tiering.js';
 import { detectDrift } from '../healing/diff-engine.js';
-import { monitorSkills } from '../healing/monitor.js';
+import { monitorSkills, shouldNudge } from '../healing/monitor.js';
+import { AmendmentEngine } from '../healing/amendment.js';
+import { AmendmentRepository } from '../storage/amendment-repository.js';
+import { scanSkill } from '../skill/security-scanner.js';
+import { buildDependencyGraph, getCascadeAffected } from '../skill/dependency-graph.js';
 import { notify, createEvent } from '../healing/notification.js';
 import { clusterByOperation, canReplayPersistedQuery, extractGraphQLInfo, isGraphQL } from '../capture/graphql-extractor.js';
 import { canonicalizeRequest } from '../capture/canonicalizer.js';
@@ -53,7 +68,7 @@ import { recordFilteredEntries } from '../capture/noise-filter.js';
 import { inferSchema, mergeSchemas } from '../capture/schema-inferrer.js';
 import { loadCachedTools } from '../discovery/webmcp-scanner.js';
 import { SkillStatus } from '../skill/types.js';
-import type { SkillStatusName, GeoEmulationConfig, PermanentTierLock } from '../skill/types.js';
+import type { GeoEmulationConfig, PermanentTierLock, ExecutionTierName } from '../skill/types.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -65,9 +80,11 @@ export interface EngineStatus {
   activeNamedSession?: { name: string; siteId: string; isCdp: boolean; overrides?: ContextOverrides };
   currentRecording: RecordingInfo | null;
   uptime: number;
+  warnings?: string[];
+  skillSummary?: { total: number; executable: number; blocked: number };
 }
 
-export interface RecordingInfo {
+interface RecordingInfo {
   id: string;
   name: string;
   siteId: string;
@@ -77,6 +94,8 @@ export interface RecordingInfo {
   skillsGenerated?: number;
   signalRequests?: number;
   noiseRequests?: number;
+  generatedSkills?: Array<{ id: string; method: string; pathTemplate: string; status: string }>;
+  dedupedRequests?: number;
 }
 
 export interface ExploreResult {
@@ -85,20 +104,27 @@ export interface ExploreResult {
   url: string;
   reused?: boolean;
   appliedOverrides?: { proxy?: { server: string }; geo?: GeoEmulationConfig };
+  hint: string;
 }
 
 export interface SkillExecutionResult {
   success: boolean;
   data?: unknown;
   error?: string;
+  failureCause?: string;
+  failureDetail?: string;
   latencyMs: number;
+}
+
+function formatExecutionError(cause: string, detail: string): string {
+  return `Failure: ${cause} — ${detail.replace(/\.+$/, '')}. Use schrute_dry_run to preview.`;
 }
 
 /**
  * Remove stale session.json left over from pre-daemon versions.
  * Logs a warning if one is found.
  */
-export function removeStaleSessionJson(config: OneAgentConfig): void {
+export function removeStaleSessionJson(config: SchruteConfig): void {
   const statePath = path.join(config.dataDir, 'session.json');
   try {
     if (fs.existsSync(statePath)) {
@@ -113,7 +139,7 @@ export function removeStaleSessionJson(config: OneAgentConfig): void {
 }
 
 /**
- * Traceability markers used in this file reference the OneAgent implementation plan:
+ * Traceability markers used in this file reference the Schrute implementation plan:
  *   C = Capture pipeline steps
  *       C1: GraphQL clustering (operation-level grouping of GraphQL requests)
  *       C2: Canonicalization (request deduplication via canonical URL/body)
@@ -133,43 +159,168 @@ interface CachedPage { isClosed?: () => boolean }
 // ─── Engine ───────────────────────────────────────────────────────
 
 export class Engine {
-  private config: OneAgentConfig;
+  private config: SchruteConfig;
   private sessionManager: SessionManager;
   private mode: EngineMode = 'idle';
   private activeSessionId: string | null = null;
   private currentRecording: RecordingInfo | null = null;
+  private recordingBrowserManager: BrowserManager | null = null;
   private startedAt: number;
   private log = getLogger();
   private skillRepo: SkillRepository;
+  private siteRepo: SiteRepository;
   private metricsRepo: MetricsRepository;
+  private trajectoryRecorder: TrajectoryRecorder;
+  private exemplarRepo: ExemplarRepository;
   private auditLog: AuditLog;
   private hmacKeyReady: Promise<void> | null = null;
   private budgetTracker: ToolBudgetTracker;
   private rateLimiter: RateLimiter;
   private isClosing = false;
+  private pool: BrowserPool | null = null;
   private multiSessionManager: MultiSessionManager;
   private recordingListenerCleanups: Array<() => void> = [];
+  private cdpHarRecorder: import('../capture/cdp-har-recorder.js').CdpHarRecorder | null = null;
   private providerCache = new WeakMap<
     BrowserManager,
     Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }>
   >();
+  private inflightDedup = new Map<string, Promise<SkillExecutionResult>>();
+  private exploreAbortController: AbortController | null = null;
+  private pendingBackgroundOps = new Set<Promise<void>>();
+  private warnings: string[] = [];
+  private static readonly MAX_WARNINGS = 100;
+  private sessionSweepInterval: ReturnType<typeof setInterval> | null = null;
+  private backoffPersistInterval: ReturnType<typeof setInterval> | null = null;
+  private sweepInterval: ReturnType<typeof setInterval> | null = null;
+  private amendmentEngine: AmendmentEngine | null = null;
+  private amendmentRepo: AmendmentRepository | null = null;
+  private authStore: BrowserAuthStore;
+  private authCoordinator: AuthCoordinator;
+  private agentBrowserBackend: AgentBrowserBackend;
+  private fallbackExecutionBackend: PlaywrightBackend | null = null;
+  private sharedPlaywrightBackends = new Map<string, PlaywrightBackend>();
+  private liveChromeBackend?: LiveChromeBackend;
+  private pathTrie?: PathTrie;
 
-  constructor(config: OneAgentConfig) {
+  constructor(config: SchruteConfig) {
     this.config = config;
-    const browserManager = new BrowserManager(config);
+
+    // Adaptive path trie for clustering deduplication (default: enabled)
+    if (config.features?.adaptivePathTrie !== false) {
+      this.pathTrie = new PathTrie();
+    }
+
+    // Construct BrowserPool when remote endpoints are configured
+    if (config.browserPool?.endpoints?.length) {
+      this.pool = new BrowserPool(config.browserPool.endpoints);
+    }
+
+    const browserManager = new BrowserManager(config, this.pool ?? undefined);
     this.sessionManager = new SessionManager(browserManager);
-    this.multiSessionManager = new MultiSessionManager(browserManager, config);
+    this.multiSessionManager = new MultiSessionManager(browserManager, config, this.pool ?? undefined);
+    this.multiSessionManager.setOnSessionChanged((name) => {
+      this.sharedPlaywrightBackends.delete(name);
+    });
     this.startedAt = Date.now();
 
     const db = getDatabase(config);
     this.skillRepo = new SkillRepository(db);
+    this.siteRepo = new SiteRepository(db);
     this.metricsRepo = new MetricsRepository(db);
+    this.trajectoryRecorder = new TrajectoryRecorder(config.dataDir);
+    this.exemplarRepo = new ExemplarRepository(db);
     this.auditLog = new AuditLog(config);
     this.budgetTracker = new ToolBudgetTracker(config);
     this.rateLimiter = new RateLimiter();
+    this.rateLimiter.attachDatabase(db);
+
+    // Persist rate limiter backoffs every 60 seconds
+    this.backoffPersistInterval = setInterval(() => {
+      this.rateLimiter.persistBackoffs();
+    }, 60_000);
+    this.backoffPersistInterval.unref();
+
+    // Amendment engine for self-healing skills
+    this.amendmentRepo = new AmendmentRepository(db);
+    this.amendmentEngine = new AmendmentEngine(this.amendmentRepo, this.skillRepo, this.metricsRepo);
+
+    // Phase 5: Auth store, coordinator, and agent-browser backend
+    this.authStore = new BrowserAuthStore(config.dataDir);
+    this.authCoordinator = new AuthCoordinator();
+    this.agentBrowserBackend = new AgentBrowserBackend(config, this.authStore);
+    this.agentBrowserBackend.setAuthCoordinator(this.authCoordinator);
+
+    // Wire auth integration into the default BrowserManager and MultiSessionManager
+    browserManager.setAuthIntegration(this.authStore, this.authCoordinator, DEFAULT_SESSION_NAME);
+    this.multiSessionManager.setAuthIntegration(this.authStore, this.authCoordinator);
+
+    // LiveChromeBackend: fallback to CDP sessions for WebMCP skills
+    this.liveChromeBackend = new LiveChromeBackend(this.multiSessionManager, this.authStore);
 
     // HMAC key init is deferred to first skill execution (lazy) to avoid
     // blocking constructor and leaking promises when no skills are executed.
+
+    // Session sweep: clean up idle named sessions every 15 minutes
+    this.sessionSweepInterval = setInterval(() => {
+      this.multiSessionManager.sweepIdleSessions(3600_000);
+    }, 900_000);
+    this.sessionSweepInterval.unref();
+
+    // WS-10: Background sweep for stale/broken skills (every 6 hours)
+    this.sweepInterval = setInterval(() => {
+      if (this.getStatus().mode !== 'idle') return; // Only sweep when idle
+      try {
+        const allSkills = this.skillRepo.getByStatus(SkillStatus.ACTIVE);
+
+        // Build dependency graph for cascade marking
+        const depGraph = buildDependencyGraph(allSkills);
+
+        // Process in batches of 50
+        const brokenIds: string[] = [];
+        for (let i = 0; i < allSkills.length; i += 50) {
+          const batch = allSkills.slice(i, i + 50);
+          const reports = monitorSkills(batch, this.metricsRepo);
+          for (let j = 0; j < batch.length; j++) {
+            const report = reports[j];
+            if (report?.status === 'broken') {
+              this.skillRepo.update(batch[j].id, { status: SkillStatus.BROKEN, consecutiveValidations: 0 });
+              this.log.info({ skillId: batch[j].id }, 'Background sweep: marked skill as broken');
+              brokenIds.push(batch[j].id);
+            } else if (report && shouldNudge(report)) {
+              // Nudge: skill is healthy but trending down — emit notification
+              notify(
+                createEvent('skill_nudge', batch[j].id, batch[j].siteId, {
+                  successRate: report.successRate,
+                  trend: report.trend,
+                }),
+                this.config,
+              ).catch(err => this.log.debug({ err }, 'Nudge notification failed'));
+            }
+          }
+        }
+
+        // Cascade: mark dependents of broken skills as stale
+        for (const brokenId of brokenIds) {
+          const affected = getCascadeAffected(depGraph, brokenId);
+          for (const depId of affected) {
+            const dep = this.skillRepo.getById(depId);
+            if (dep && dep.status === 'active') {
+              this.skillRepo.update(depId, { status: SkillStatus.STALE });
+              this.log.info({ skillId: depId, brokenBy: brokenId }, 'Background sweep: cascade-marked dependent as stale');
+            }
+          }
+        }
+
+        // Auth prefetch: refresh stale cookies for recently-used sites (fire-and-forget)
+        this.prefetchStaleAuth(allSkills).catch(err =>
+          this.log.debug({ err }, 'Auth prefetch sweep failed (non-blocking)'),
+        );
+      } catch (err) {
+        this.log.debug({ err }, 'Background sweep failed (non-blocking)');
+      }
+    }, 6 * 60 * 60 * 1000);
+    this.sweepInterval.unref();
   }
 
   getSessionManager(): SessionManager {
@@ -182,6 +333,105 @@ export class Engine {
 
   getActiveSessionId(): string | null {
     return this.activeSessionId;
+  }
+
+  getMetricsRepo(): MetricsRepository {
+    return this.metricsRepo;
+  }
+
+  getAmendmentRepo(): AmendmentRepository | null {
+    return this.amendmentRepo;
+  }
+
+  getTrajectoryRecorder(): TrajectoryRecorder {
+    return this.trajectoryRecorder;
+  }
+
+  getExemplarRepo(): ExemplarRepository {
+    return this.exemplarRepo;
+  }
+
+  getAuthStore(): BrowserAuthStore { return this.authStore; }
+  getAuthCoordinator(): AuthCoordinator { return this.authCoordinator; }
+
+  /**
+   * Per-site execution backend router.
+   * Returns the appropriate BrowserBackend based on site policy and config.
+   */
+  getExecutionBackend(siteId: string): BrowserBackend {
+    const policy = getSitePolicy(siteId, this.config);
+    const backendType = policy.executionBackend ?? this.config.browser?.execution?.backend ?? 'agent-browser';
+
+    if (backendType === 'agent-browser') {
+      return this.agentBrowserBackend;
+    }
+
+    if (backendType === 'live-chrome') {
+      // Live Chrome: find a CDP session for this site
+      if (this.liveChromeBackend) {
+        const liveResult = this.liveChromeBackend.findSession(siteId, policy.executionSessionName);
+        if (liveResult) {
+          return this.getOrCreateSharedPlaywrightBackend(liveResult.sessionName, liveResult.browserManager);
+        }
+      }
+      // No matching CDP session — fall through to Playwright
+      this.log.debug({ siteId }, 'live-chrome backend: no CDP session found, falling through');
+    }
+
+    // Playwright execution — two modes:
+    if (policy.executionSessionName) {
+      // HARD-SITE: shared explore context required
+      const multiSession = this.getMultiSessionManager();
+      const session = multiSession.get(policy.executionSessionName);
+      if (session?.browserManager.tryGetContext(siteId)) {
+        return this.getOrCreateSharedPlaywrightBackend(policy.executionSessionName, session.browserManager);
+      }
+      throw new Error(
+        `Hard-site execution requires live explore context for '${siteId}' in session '${policy.executionSessionName}'. Explore first.`
+      );
+    }
+
+    // GENERAL: dedicated execution PlaywrightBackend (separate from explore)
+    if (!this.fallbackExecutionBackend) {
+      const dedicatedManager = new BrowserManager(this.config, this.pool ?? undefined);
+      dedicatedManager.setAuthIntegration(this.authStore, this.authCoordinator, '__exec_fallback__');
+      this.fallbackExecutionBackend = new PlaywrightBackend(
+        dedicatedManager,
+        this.config,
+      );
+      this.fallbackExecutionBackend.setAuthCoordinator(this.authCoordinator, this.authStore);
+    }
+    return this.fallbackExecutionBackend;
+  }
+
+  private getOrCreateSharedPlaywrightBackend(sessionName: string, manager: BrowserManager): PlaywrightBackend {
+    let backend = this.sharedPlaywrightBackends.get(sessionName);
+    if (!backend) {
+      backend = new PlaywrightBackend(manager, this.config, { existingOnly: true });
+      this.sharedPlaywrightBackends.set(sessionName, backend);
+    }
+    return backend;
+  }
+
+  drainWarnings(): string[] {
+    const w = [...this.warnings];
+    this.warnings = [];
+    return w;
+  }
+
+  /**
+   * Read warnings without draining. Used for non-admin status calls
+   * so that admin callers don't lose visibility into warnings.
+   */
+  peekWarnings(): string[] {
+    return [...this.warnings];
+  }
+
+  private addWarning(msg: string): void {
+    if (this.warnings.length >= Engine.MAX_WARNINGS) {
+      this.warnings.shift();
+    }
+    this.warnings.push(msg);
   }
 
   private getProviderCacheForManager(manager: BrowserManager): Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }> {
@@ -267,20 +517,48 @@ export class Engine {
     return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
   }
 
-  private navigateFireAndForget(siteId: string, url: string, overrides?: ContextOverrides, sessionId?: string): void {
+  private navigateFireAndForget(siteId: string, url: string, overrides?: ContextOverrides, sessionId?: string, signal?: AbortSignal): Promise<void> {
     const bm = this.sessionManager.getBrowserManager();
-    bm.withLease(async () => {
+    return bm.withLease(async () => {
+      if (signal?.aborted) return;
       const context = await bm.getOrCreateContext(siteId, overrides);
+      if (signal?.aborted) return;
       const page = context.pages()[0] ?? await context.newPage();
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      const gotoOpts: Record<string, unknown> = { waitUntil: 'domcontentloaded', timeout: 30000 };
+      // Referrer spoofing for explore navigation
+      if (this.config.browser?.features?.referrerSpoofing) {
+        try {
+          const currentHost = new URL(page.url()).hostname;
+          const targetHost = new URL(url).hostname;
+          if (currentHost !== targetHost) {
+            gotoOpts.referer = 'https://www.google.com/';
+          }
+        } catch {
+          // Invalid URLs — skip spoofing
+        }
+      }
+
+      if (signal?.aborted) return;
+      await page.goto(url, gotoOpts);
+      if (signal?.aborted) return;
       await detectAndWaitForChallenge(page, 3000);
       if (sessionId) this.sessionManager.updateUrl(sessionId, page.url());
     }).catch(err => {
+      if (signal?.aborted && String(err).includes('TargetClosedError')) return;
       this.log.warn({ url, err }, 'Auto-navigation after explore failed (non-blocking)');
+      if (!signal?.aborted) {
+        this.addWarning(`Auto-navigation failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     });
   }
 
   async explore(url: string, overrides?: ContextOverrides): Promise<ExploreResult> {
+    // Abort any previous explore background ops before starting new ones
+    this.exploreAbortController?.abort();
+    this.exploreAbortController = new AbortController();
+    const signal = this.exploreAbortController.signal;
+
     const parsedUrl = new URL(url);
     const siteId = parsedUrl.hostname;
 
@@ -290,18 +568,29 @@ export class Engine {
       if (currentSession?.siteId === siteId) {
         try {
           await this.sessionManager.getBrowserManager().getOrCreateContext(siteId, overrides);
-          this.navigateFireAndForget(siteId, url, overrides, currentSession.id);
-          return { sessionId: currentSession.id, siteId, url, reused: true };
+          const navOp = this.navigateFireAndForget(siteId, url, overrides, currentSession.id, signal)
+            .finally(() => this.pendingBackgroundOps.delete(navOp));
+          this.pendingBackgroundOps.add(navOp);
+          return { sessionId: currentSession.id, siteId, url, reused: true, hint: 'Session reused. Navigate or call schrute_record to capture.' };
         } catch (err) {
           if (err instanceof ContextOverrideMismatchError) {
             throw new Error(
               `Site "${siteId}" already has an active session with different overrides. ` +
-              `Use oneagent_close_session(name: "default", force: true) first, then re-explore.`
+              `Use schrute_close_session(name: "default", force: true) first, then re-explore.`
             );
           }
           throw err;
         }
       }
+    }
+
+    // Different site while exploring/recording: explicit rejection
+    if (this.mode !== 'idle') {
+      throw new Error(
+        `Engine is currently '${this.mode}'${this.mode === 'exploring' ? ' on a different site' : ''}. ` +
+        `Only one explore/record session is supported at a time. ` +
+        `Stop the current session first with schrute_stop.`
+      );
     }
 
     // Validate browser automation capability
@@ -343,7 +632,21 @@ export class Engine {
     const previousMode = this.mode;
     const previousSessionId = this.activeSessionId;
     try {
-      const session = await this.sessionManager.create(siteId, url, overrides);
+      const { session, browserError } = await this.sessionManager.create(siteId, url, overrides);
+      if (browserError) {
+        // explore() requires a browser — fail loudly with the actual error
+        this.sessionManager.remove(session.id);
+        const browserEngine = this.config.browser?.engine ?? 'patchright';
+        const installHints: Record<string, string> = {
+          playwright: 'npx playwright install chromium',
+          patchright: 'npm install patchright && npx patchright install chromium',
+          camoufox: 'npm install camoufox-js && npx camoufox-js fetch',
+        };
+        throw new Error(
+          `Browser context could not be created for '${siteId}': ${browserError.message}. ` +
+          `If this is an install issue, try: ${installHints[browserEngine] ?? `npx ${browserEngine} install chromium`}`,
+        );
+      }
       this.activeSessionId = session.id;
       this.mode = 'exploring';
 
@@ -353,12 +656,21 @@ export class Engine {
 
       this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
-      this.navigateFireAndForget(siteId, url, overrides, session.id);
+      // Track background ops so startRecording/close can await them
+      const navOp = this.navigateFireAndForget(siteId, url, overrides, session.id, signal)
+        .finally(() => this.pendingBackgroundOps.delete(navOp));
+      this.pendingBackgroundOps.add(navOp);
 
       // Fire-and-forget cold-start discovery (non-blocking)
-      this.runColdStartDiscovery(url, siteId).catch(err => {
-        this.log.warn({ siteId, err }, 'Cold-start discovery failed (non-blocking)');
-      });
+      const discoveryOp = this.runColdStartDiscovery(url, siteId, signal)
+        .catch(err => {
+          if (!signal.aborted) {
+            this.log.warn({ siteId, err }, 'Cold-start discovery failed (non-blocking)');
+            this.addWarning(`Cold-start discovery failed for ${siteId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        })
+        .finally(() => this.pendingBackgroundOps.delete(discoveryOp));
+      this.pendingBackgroundOps.add(discoveryOp);
 
       const appliedOverrides = overrides ? {
         proxy: overrides.proxy ? { server: overrides.proxy.server } : undefined,
@@ -370,6 +682,7 @@ export class Engine {
         siteId,
         url,
         appliedOverrides,
+        hint: 'Browser session started. Navigate with browser tools, then call schrute_record to capture API patterns.',
       };
     } catch (err) {
       this.mode = previousMode;
@@ -382,6 +695,19 @@ export class Engine {
     name: string,
     inputs?: Record<string, string>,
   ): Promise<RecordingInfo> {
+    // Abort background explore ops to prevent races with recording
+    if (this.exploreAbortController) {
+      this.exploreAbortController.abort();
+      this.exploreAbortController = null;
+    }
+    if (this.pendingBackgroundOps.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...this.pendingBackgroundOps]),
+        new Promise(resolve => setTimeout(resolve, 500)),
+      ]);
+      this.pendingBackgroundOps.clear();
+    }
+
     if (this.mode !== 'exploring') {
       throw new Error(
         `Cannot start recording in '${this.mode}' mode. Must be exploring first.`,
@@ -392,24 +718,34 @@ export class Engine {
       throw new Error('No active session to record');
     }
 
-    // Verify recording is on the default launch-based session
-    if (this.multiSessionManager.getActive() !== DEFAULT_SESSION_NAME) {
-      throw new Error(
-        'Recording is only supported on the default session. ' +
-        'Switch to the default session first with oneagent_switch_session.',
-      );
+    // Recording can use the default session (launch-based, Playwright HAR)
+    // or the active named session if it's CDP (uses CDP HAR recorder)
+    const activeName = this.multiSessionManager.getActive();
+    const activeSession = this.multiSessionManager.get(activeName);
+    if (!activeSession) {
+      throw new Error('No active session available for recording.');
     }
-    const defaultSession = this.multiSessionManager.get(DEFAULT_SESSION_NAME);
-    if (!defaultSession) {
-      throw new Error('No default session available for recording.');
-    }
-    const browserManager = defaultSession.browserManager;
+    const browserManager = activeSession.browserManager;
+
+    // CDP sessions don't support Playwright HAR — use CDP HAR recorder instead
     if (!browserManager.supportsHarRecording()) {
-      throw new Error('Recording is not supported on CDP sessions. Use a launch-based browser session.');
+      const { CdpHarRecorder } = await import('../capture/cdp-har-recorder.js');
+      this.cdpHarRecorder = new CdpHarRecorder();
+      this.cdpHarRecorder.start();
+      this.log.info({ session: activeName }, 'Using CDP HAR recorder for non-launch-based session');
+    } else if (activeName !== DEFAULT_SESSION_NAME) {
+      throw new Error(
+        'Recording with Playwright HAR is only supported on the default session. ' +
+        'Switch to the default session first with schrute_switch_session.',
+      );
     }
 
     const previousMode = this.mode;
     const previousRecording = this.currentRecording;
+
+    // Capture the recording session's manager so stopRecording() uses the
+    // exact same manager even if the active session changes mid-recording.
+    this.recordingBrowserManager = browserManager;
 
     // Suppress idle timeout during recording (exception-safe)
     browserManager.setSuppressIdleTimeout(true);
@@ -433,11 +769,41 @@ export class Engine {
       // Attach live request counter to page responses
       this.recordingListenerCleanups = [];
       const recording = this.currentRecording;
+      const cdpRecorder = this.cdpHarRecorder; // capture for closure
       const context = browserManager.tryGetContext(session.siteId);
       if (context) {
-        const responseHandler = () => {
+        const responseHandler = (response: any) => {
           if (this.currentRecording === recording) {
             recording.requestCount++;
+
+            // CDP HAR: ingest entry immediately, patch body asynchronously
+            if (cdpRecorder) {
+              try {
+                const req = response.request();
+                const timing = response.timing?.();
+                const now = Date.now();
+                const entry: NetworkEntry = {
+                  url: req?.url?.() ?? response.url(),
+                  method: req?.method?.() ?? 'GET',
+                  status: response.status(),
+                  requestHeaders: req?.headers?.() ?? {},
+                  responseHeaders: response.headers(),
+                  requestBody: req?.postData?.() ?? undefined,
+                  responseBody: undefined,
+                  timing: {
+                    startTime: timing?.startTime ?? now,
+                    endTime: now,
+                    duration: timing?.responseEnd ?? 0,
+                  },
+                };
+                // Two-phase ingest: record entry now, patch body when promise resolves.
+                // stop() flushes pending bodies before returning the HAR.
+                const bodyPromise = response.body()
+                  .then((buf: Buffer) => buf.toString('utf-8'))
+                  .catch(() => undefined as string | undefined);
+                cdpRecorder.ingestWithPendingBody(entry, bodyPromise);
+              } catch (err) { this.log.debug({ err, url: response.url() }, 'Response capture failed during recording'); }
+            }
           }
         };
         (context as any).on('response', responseHandler);
@@ -456,9 +822,10 @@ export class Engine {
       browserManager.setSuppressIdleTimeout(false);
       this.mode = previousMode;
       this.currentRecording = previousRecording;
+      this.recordingBrowserManager = null;
       // Clean up any listeners attached before the failure
       for (const cleanup of this.recordingListenerCleanups) {
-        try { cleanup(); } catch { /* ignore */ }
+        try { cleanup(); } catch (err2) { this.log.debug({ err: err2 }, 'Recording cleanup failed'); }
       }
       this.recordingListenerCleanups = [];
       throw err;
@@ -476,7 +843,7 @@ export class Engine {
 
     // Detach response listeners from the recording cycle
     for (const cleanup of this.recordingListenerCleanups) {
-      try { cleanup(); } catch { /* page may already be closed */ }
+      try { cleanup(); } catch (err) { this.log.debug({ err }, 'Recording stop cleanup failed'); }
     }
     this.recordingListenerCleanups = [];
 
@@ -485,20 +852,37 @@ export class Engine {
       'Recording stopped',
     );
 
-    const browserManager = this.sessionManager.getBrowserManager();
+    // Use the exact manager captured when recording started, not the current active session.
+    // The active session can change mid-recording (session switch, session close fallback).
+    const browserManager = this.recordingBrowserManager ?? this.sessionManager.getBrowserManager();
+    this.recordingBrowserManager = null;
     const siteId = recording.siteId;
 
     try {
-      // 1. Capture HAR path BEFORE closing context
-      const harPath = browserManager.getHarPath(siteId);
-      if (!harPath) {
-        throw new Error('Missing HAR path during recording — invariant violation');
-      }
+      let harPath: string | undefined;
 
-      // 2. Close context -> flushes HAR to disk (browser-touching, use lease)
-      await browserManager.withLease(async () => {
-        await browserManager.closeContext(siteId);
-      });
+      if (this.cdpHarRecorder) {
+        // CDP recording path: flush pending body reads, then stop and write to temp file
+        const harLog = await this.cdpHarRecorder.stop();
+        this.cdpHarRecorder = null;
+
+        const tmpDir = path.join(this.config.dataDir, 'tmp');
+        fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+        harPath = path.join(tmpDir, `${siteId}-cdp-${Date.now()}.har`);
+        fs.writeFileSync(harPath, JSON.stringify({ log: harLog }), { mode: 0o600 });
+        this.log.info({ harPath, entries: harLog.entries.length }, 'CDP HAR written to disk');
+      } else {
+        // Playwright recording path: capture HAR path before closing context
+        harPath = browserManager.getHarPath(siteId);
+        if (!harPath) {
+          throw new Error('Missing HAR path during recording — invariant violation');
+        }
+
+        // Close context -> flushes HAR to disk (browser-touching, use lease)
+        await browserManager.withLease(async () => {
+          await browserManager.closeContext(siteId);
+        });
+      }
 
       // 3. Run capture pipeline with explicit HAR path (CPU/IO only, no lease)
       let pipelineError: Error | undefined;
@@ -526,6 +910,7 @@ export class Engine {
 
       return recording;
     } finally {
+      this.cdpHarRecorder = null;  // always clear, even on error
       // Always clear idle suppression, even if capture pipeline or re-open throws
       browserManager.setSuppressIdleTimeout(false);
     }
@@ -544,10 +929,9 @@ export class Engine {
 
       // Parse HAR and convert to structured records
       const harData = parseHar(harPath);
-      const allRecords: StructuredRecord[] = harData.log.entries.map(extractRequestResponse);
 
       // Filter noise (analytics, beacons, polling, static assets)
-      const { signal, noise, ambiguous } = filterRequests(harData.log.entries);
+      const { signal, noise } = filterRequests(harData.log.entries);
 
       // C3: Persist noise filter audit trail
       const db = getDatabase(this.config);
@@ -594,7 +978,7 @@ export class Engine {
       const chains = detectChains(restRecords);
 
       // Cluster endpoints and generate draft skills
-      const clusters = clusterEndpoints(restRecords);
+      const clusters = clusterEndpoints(restRecords, this.pathTrie);
       // A1: Track pre-existing skill IDs for this site BEFORE generating new ones
       const preExistingSkillIds = new Set(
         this.skillRepo.getBySiteId(recording.siteId).map(s => s.id)
@@ -702,6 +1086,32 @@ export class Engine {
         }
       }
 
+      // P2-6: Auto-activate read-only GET/HEAD skills from this recording session
+      // Gate: skip activation if security scanner flags the skill as unsafe
+      const newSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
+      for (const s of newSiteSkills) {
+        if (!preExistingSkillIds.has(s.id) && s.sideEffectClass === SideEffectClass.READ_ONLY && (s.method === 'GET' || s.method === 'HEAD')) {
+          const scanResult = scanSkill(s);
+          if (!scanResult.safe) {
+            this.skillRepo.update(s.id, { reviewRequired: true });
+            this.log.warn({ skillId: s.id, findings: scanResult.findings.length }, 'Security scanner blocked auto-activation');
+            continue;
+          }
+          this.skillRepo.update(s.id, { status: SkillStatus.ACTIVE, confidence: 0.5, lastVerified: Date.now() });
+          this.log.info({ skillId: s.id }, 'Auto-activated read-only skill from recording session');
+        }
+      }
+
+      // P2-7: Populate generated skills for richer stop response
+      if (this.currentRecording) {
+        const newSkills = this.skillRepo.getBySiteId(recording.siteId)
+          .filter(s => !preExistingSkillIds.has(s.id));
+        this.currentRecording.generatedSkills = newSkills.map(s => ({
+          id: s.id, method: s.method, pathTemplate: s.pathTemplate, status: s.status,
+        }));
+        this.currentRecording.dedupedRequests = signalRecords.length - dedupedRecords.length;
+      }
+
       // C3: Update action_frame with final skill count
       db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', generatedCount, recording.id);
 
@@ -780,6 +1190,8 @@ export class Engine {
   async executeSkill(
     skillId: string,
     params: Record<string, unknown>,
+    callerId?: string,
+    options?: { skipMetrics?: boolean },
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
@@ -806,40 +1218,52 @@ export class Engine {
       };
     }
 
-    // 2. Apply policy checks
-    const methodAllowed = checkMethodAllowed(skill.siteId, skill.method, skill.sideEffectClass, this.config);
-    if (!methodAllowed) {
+    // 1.5. Validate params against synthesized execution schema
+    const validation = validateParams(params, skill, this.config.paramLimits);
+    if (!validation.valid) {
       return {
         success: false,
-        error: `Policy blocked: method ${skill.method} not allowed for ${skill.siteId}`,
+        error: formatExecutionError('validation_failed', validation.errors.join('; ')),
+        failureCause: 'validation_failed',
+        failureDetail: validation.errors.join('; '),
         latencyMs: Date.now() - startTime,
       };
     }
 
-    const pathCheck = checkPathRisk(skill.method, skill.pathTemplate);
-    if (pathCheck.blocked) {
-      return {
-        success: false,
-        error: `Policy blocked: ${pathCheck.reason ?? 'destructive path pattern'}`,
-        latencyMs: Date.now() - startTime,
-      };
+    // Dedup for read-only skills: collapse identical in-flight requests
+    if (skill.sideEffectClass === SideEffectClass.READ_ONLY) {
+      const dedupKey = `${skillId}|${stableStringify(params)}`;
+      const existing = this.inflightDedup.get(dedupKey);
+      if (existing) {
+        this.log.debug({ skillId }, 'Dedup hit — returning in-flight result');
+        return existing;
+      }
+      const promise = this.executeSkillInner(skill, params, startTime, callerId, options);
+      this.inflightDedup.set(dedupKey, promise);
+      try {
+        return await promise;
+      } finally {
+        this.inflightDedup.delete(dedupKey);
+      }
     }
 
-    // 3. Rate limit check
-    const rateCheck = this.rateLimiter.checkRate(skill.siteId);
-    if (!rateCheck.allowed) {
-      this.log.warn(
-        { skillId, siteId: skill.siteId, retryAfterMs: rateCheck.retryAfterMs },
-        'Rate limited — skipping execution',
-      );
-      return {
-        success: false,
-        error: `Rate limited for site ${skill.siteId}. Retry after ${rateCheck.retryAfterMs}ms`,
-        latencyMs: Date.now() - startTime,
-      };
-    }
+    return this.executeSkillInner(skill, params, startTime, callerId, options);
+  }
 
-    // 4. Build policy decision for audit
+  private async executeSkillInner(
+    skill: SkillSpec,
+    params: Record<string, unknown>,
+    startTime: number,
+    callerId?: string,
+    options?: { skipMetrics?: boolean },
+  ): Promise<SkillExecutionResult> {
+    const skillId = skill.id;
+
+    // Both WebMCP and HTTP paths produce an ExecutionResult for the shared post-execution block
+    const policy = getSitePolicy(skill.siteId, this.config);
+    const effectiveDomains = policy.domainAllowlist.length > 0
+      ? policy.domainAllowlist
+      : [...new Set([...skill.allowedDomains, skill.siteId])];
     const policyDecision: PolicyDecision = {
       proposed: `${skill.method} ${skill.pathTemplate}`,
       policyResult: 'allowed',
@@ -847,45 +1271,183 @@ export class Engine {
       userConfirmed: null,
       redactionsApplied: [],
     };
+    const site = this.siteRepo.getById(skill.siteId);
+    const MAX_CANARY_ATTEMPTS = 5;
+    let isCanaryProbe = false;
+    const isDirectRecommended = site?.recommendedTier === ExecutionTier.DIRECT;
 
-    // Derive effective domain list once — used for budget tracker and browser provider
-    const policy = getSitePolicy(skill.siteId, this.config);
-    const effectiveDomains = policy.domainAllowlist.length > 0
-      ? policy.domainAllowlist
-      : [...new Set([...skill.allowedDomains, skill.siteId])];
-    this.budgetTracker.setDomainAllowlist(effectiveDomains);
+    let result: Awaited<ReturnType<typeof replayExecuteSkill>>;
 
-    // Wire live browser context into executor if available
-    const browserProvider = await this.createBrowserProvider(skill.siteId, effectiveDomains);
+    if (skill.method === 'WEBMCP') {
+      // ── WebMCP execution path ────────────────────────────
+      // Bypasses HTTP method/path checks and the replay pipeline,
+      // but enforces rate limiting and flows through the shared post-execution path.
+      const rateCheck = this.rateLimiter.checkRate(skill.siteId, callerId);
+      if (!rateCheck.allowed) {
+        const detail = `Site '${skill.siteId}' rate limited, retry after ${rateCheck.retryAfterMs}ms`;
+        return {
+          success: false,
+          error: formatExecutionError('rate_limited', detail),
+          failureCause: 'rate_limited',
+          failureDetail: detail,
+          latencyMs: Date.now() - startTime,
+        };
+      }
 
-    const executorOptions = {
-      auditLog: this.auditLog,
-      budgetTracker: this.budgetTracker,
-      metricsRepo: this.metricsRepo,
-      policyDecision,
-      browserProvider,
-      config: this.config,
-    };
+      const webmcpRaw = await this.executeWebMcpSkill(skill, params, startTime);
+      result = {
+        success: webmcpRaw.success,
+        tier: ExecutionTier.FULL_BROWSER as ExecutionTierName,
+        status: webmcpRaw.success ? 200 : 0,
+        data: webmcpRaw.data,
+        rawBody: typeof webmcpRaw.data === 'string' ? webmcpRaw.data : JSON.stringify(webmcpRaw.data ?? null),
+        headers: {},
+        latencyMs: webmcpRaw.latencyMs,
+        schemaMatch: true,
+        semanticPass: true,
+        failureCause: webmcpRaw.failureCause ?? (webmcpRaw.failureDetail ? FailureCause.UNKNOWN : undefined),
+        failureDetail: webmcpRaw.failureDetail,
+      };
+    } else {
+      // ── HTTP execution path ──────────────────────────────
+      // 2. Apply policy checks
+      const methodAllowed = checkMethodAllowed(skill.siteId, skill.method, skill.sideEffectClass, this.config);
+      if (!methodAllowed) {
+        const detail = `Method ${skill.method} not allowed for '${skill.siteId}'`;
+        return {
+          success: false,
+          error: formatExecutionError('policy_denied', detail),
+          failureCause: 'policy_denied',
+          failureDetail: detail,
+          latencyMs: Date.now() - startTime,
+        };
+      }
 
-    // 5. Execute — use retryWithEscalation for read-only skills
-    try {
-      const result = skill.sideEffectClass === SideEffectClass.READ_ONLY
-        ? await retryWithEscalation(skill, params, executorOptions)
-        : await replayExecuteSkill(skill, params, executorOptions);
+      const pathCheck = checkPathRisk(skill.method, skill.pathTemplate);
+      if (pathCheck.blocked) {
+        const detail = pathCheck.reason ?? 'destructive path pattern';
+        return {
+          success: false,
+          error: formatExecutionError('policy_denied', detail),
+          failureCause: 'policy_denied',
+          failureDetail: detail,
+          latencyMs: Date.now() - startTime,
+        };
+      }
 
-      // 6. Update rate limiter with response info
-      this.rateLimiter.recordResponse(skill.siteId, result.status, result.headers);
+      // 3. Rate limit check (with per-caller fairness)
+      const rateCheck = this.rateLimiter.checkRate(skill.siteId, callerId);
+      if (!rateCheck.allowed) {
+        this.log.warn(
+          { skillId, siteId: skill.siteId, retryAfterMs: rateCheck.retryAfterMs },
+          'Rate limited — skipping execution',
+        );
+        const detail = `Site '${skill.siteId}' rate limited, retry after ${rateCheck.retryAfterMs}ms`;
+        return {
+          success: false,
+          error: formatExecutionError('rate_limited', detail),
+          failureCause: 'rate_limited',
+          failureDetail: detail,
+          latencyMs: Date.now() - startTime,
+        };
+      }
 
-      // 7. Record metrics
-      this.metricsRepo.record({
-        skillId: skill.id,
-        executedAt: Date.now(),
-        success: result.success,
-        latencyMs: result.latencyMs,
-        executionTier: result.tier,
-        errorType: result.failureCause,
-        policyRule: policyDecision.policyRule,
+      this.budgetTracker.setDomainAllowlist(effectiveDomains);
+
+      // Wire browser provider: try execution backend first, fall back to explore Playwright
+      let browserProvider: BrowserProvider | undefined;
+      const isHardSite = !!(
+        (policy.executionBackend === 'playwright' || policy.executionBackend === 'live-chrome')
+        && policy.executionSessionName
+      );
+      try {
+        const backend = this.getExecutionBackend(skill.siteId);
+        browserProvider = await backend.createProvider(skill.siteId, effectiveDomains);
+        if (!browserProvider) {
+          if (isHardSite) {
+            throw new Error(`Hard-site '${skill.siteId}' failed to create provider — bound explore session may be closed`);
+          }
+          // Non-hard-site: fall back to explore Playwright context
+          browserProvider = await this.createBrowserProvider(skill.siteId, effectiveDomains);
+        }
+      } catch (err) {
+        if (isHardSite) throw err; // fail closed for hard sites
+        this.log.warn({ err, siteId: skill.siteId }, 'Execution backend failed — falling back to explore Playwright');
+        browserProvider = await this.createBrowserProvider(skill.siteId, effectiveDomains);
+      }
+
+      // Lazy browser provider factory for executor — hard sites NEVER fall back
+      const browserProviderFactory = browserProvider ? undefined : (isHardSite ? undefined : async () => {
+        try {
+          const backend = this.getExecutionBackend(skill.siteId);
+          const provider = await backend.createProvider(skill.siteId, effectiveDomains);
+          if (provider) return provider;
+        } catch { /* fall through */ }
+        return this.createBrowserProvider(skill.siteId, effectiveDomains);
       });
+
+      const executorOptions = {
+        auditLog: this.auditLog,
+        budgetTracker: this.budgetTracker,
+        metricsRepo: this.metricsRepo,
+        policyDecision,
+        browserProvider,
+        browserProviderFactory,
+        config: this.config,
+        siteRecommendedTier: site?.recommendedTier,
+      };
+
+      // 5. Execute — canary probe + tier escalation
+      const retryOpts: RetryOptions = { ...executorOptions, siteRecommendedTier: site?.recommendedTier };
+
+      if (skill.directCanaryEligible && !skill.tierLock
+          && (skill.directCanaryAttempts ?? 0) < MAX_CANARY_ATTEMPTS
+          && !isDirectRecommended) {
+        retryOpts.forceStartTier = ExecutionTier.DIRECT;
+        retryOpts.isCanaryProbe = true;
+        isCanaryProbe = true;
+        this.skillRepo.update(skill.id, {
+          directCanaryAttempts: (skill.directCanaryAttempts ?? 0) + 1,
+          directCanaryEligible: false,
+          validationsSinceLastCanary: 0,
+        });
+      }
+
+      result = skill.sideEffectClass === SideEffectClass.READ_ONLY
+        ? await retryWithEscalation(skill, params, retryOpts)
+        : await replayExecuteSkill(skill, params, retryOpts);
+    }
+
+    try {
+
+      // 6. Update rate limiter with response info (pass latency for adaptive throttling on non-browser tiers)
+      const adaptiveLatency = result.tier !== ExecutionTier.FULL_BROWSER ? result.latencyMs : undefined;
+      this.rateLimiter.recordResponse(skill.siteId, result.status, result.headers, adaptiveLatency, callerId);
+
+      // WS-4: Persist canary failure cause
+      if (isCanaryProbe && 'stepResults' in result && (result as any).stepResults[0] && !(result as any).stepResults[0].success) {
+        this.skillRepo.update(skill.id, { lastCanaryErrorType: (result as any).stepResults[0].failureCause ?? 'unknown' });
+      }
+
+      // 7. Record metrics (skip for infra failures — they don't reflect skill health)
+      const isInfra = result.failureCause && INFRA_FAILURE_CAUSES.has(result.failureCause);
+      if (!isInfra && !options?.skipMetrics) {
+        this.metricsRepo.record({
+          skillId: skill.id,
+          executedAt: Date.now(),
+          success: result.success,
+          latencyMs: result.latencyMs,
+          executionTier: result.tier,
+          errorType: result.failureCause,
+          policyRule: policyDecision.policyRule,
+        });
+      }
+
+      // 7b. Amendment tracking: increment execution count and evaluate
+      if (this.amendmentEngine) {
+        this.amendmentEngine.incrementExecutionCount(skill.id);
+        this.amendmentEngine.evaluate(skill.id);
+      }
 
       // 8. Update adaptive strategy with observation
       updateStrategy(skill.siteId, {
@@ -896,11 +1458,29 @@ export class Engine {
         failureCause: result.failureCause,
       });
 
-      // A1: Update validation counters
+      // A1: Update validation counters (skip decay for infra failures)
       if (result.success) {
         this.skillRepo.updateConfidence(skill.id, Math.min(skill.confidence + 0.1, 1.0), skill.consecutiveValidations + 1);
-      } else {
+      } else if (!isInfra) {
         this.skillRepo.updateConfidence(skill.id, Math.max(skill.confidence - 0.2, 0), 0);
+      }
+
+      // WS-4: Canary re-arm — only for non-direct-recommended tier_3 skills on non-direct success
+      if (result.success && result.tier !== ExecutionTier.DIRECT
+          && skill.currentTier === TierState.TIER_3_DEFAULT
+          && !isDirectRecommended) {
+        this.skillRepo.incrementValidationsSinceLastCanary(skill.id);
+
+        const fresh = this.skillRepo.getById(skill.id);
+        if (fresh && !fresh.directCanaryEligible && (fresh.directCanaryAttempts ?? 0) < MAX_CANARY_ATTEMPTS) {
+          const requiredPasses = Math.min(
+            this.config.promotionConsecutivePasses * Math.pow(2, (fresh.directCanaryAttempts ?? 1) - 1),
+            50,
+          );
+          if ((fresh.validationsSinceLastCanary ?? 0) >= requiredPasses) {
+            this.skillRepo.update(skill.id, { directCanaryEligible: true });
+          }
+        }
       }
 
       // A2: Handle structural failures — tier lock
@@ -908,6 +1488,19 @@ export class Engine {
       if (result.failureCause && structuralCauses.has(result.failureCause as PermanentTierLock['reason'])) {
         const failResult = handleFailure(skill, result.failureCause);
         this.skillRepo.updateTier(skill.id, failResult.newTier, failResult.tierLock);
+      }
+
+      // A3: Tier promotion check — only when direct execution succeeded on a tier_3 skill
+      if (result.success && result.tier === ExecutionTier.DIRECT && skill.currentTier === TierState.TIER_3_DEFAULT) {
+        const updatedSkill = this.skillRepo.getById(skill.id);
+        if (updatedSkill) {
+          const promoCheck = checkPromotion(updatedSkill, [], { match: true, hasDynamicRequiredFields: false }, this.config, site?.recommendedTier);
+          if (promoCheck.promote) {
+            this.skillRepo.updateTier(updatedSkill.id, TierState.TIER_1_PROMOTED, null);
+            this.skillRepo.update(updatedSkill.id, { directCanaryEligible: false, directCanaryAttempts: 0, validationsSinceLastCanary: 0 });
+            this.log.info({ skillId: updatedSkill.id }, 'Promoted to tier_1 after direct execution success');
+          }
+        }
       }
 
       // B1: Drift detection with schema inference
@@ -943,7 +1536,7 @@ export class Engine {
         }
       }
 
-      // B2: Health monitoring
+      // B2: Health monitoring + amendment triggering
       const [healthReport] = monitorSkills([skill], this.metricsRepo);
       if (healthReport?.status === 'broken') {
         this.skillRepo.update(skill.id, { status: SkillStatus.BROKEN, consecutiveValidations: 0 });
@@ -952,6 +1545,111 @@ export class Engine {
       } else if (healthReport?.status === 'degrading') {
         notify(createEvent('skill_degraded', skill.id, skill.siteId,
           { successRate: healthReport.successRate, trend: healthReport.trend }), this.config).catch(err => this.log.debug({ err }, 'Notification failed'));
+      }
+
+      // B3: Amendment proposal on degrading/broken skills
+      if (healthReport && this.amendmentEngine && this.amendmentRepo &&
+          (healthReport.status === 'degrading' || healthReport.status === 'broken')) {
+        const { shouldAmend } = await import('../healing/monitor.js');
+        const amendAction = shouldAmend(healthReport, this.amendmentRepo);
+        if (amendAction === 'amend') {
+          const freshSkill = this.skillRepo.getById(skill.id);
+          if (freshSkill) {
+            try {
+              this.amendmentEngine.proposeAmendment(freshSkill);
+            } catch (amendErr) {
+              this.log.debug({ err: amendErr, skillId: skill.id }, 'Amendment proposal failed (non-blocking)');
+            }
+          }
+        }
+      }
+
+      // WS-3: Persist all derived stats in one write
+      {
+        const updatedStats: Partial<SkillSpec> = {
+          lastUsed: Date.now(),
+        };
+        if (healthReport) {
+          updatedStats.successRate = healthReport.successRate;
+        }
+        if (result.success) {
+          updatedStats.lastSuccessfulTier = result.tier;
+        }
+        // Compute avg latency from recent successful metrics
+        const recentMetrics = this.metricsRepo.getRecentBySkillId(skill.id, 20);
+        const successMetrics = recentMetrics.filter((m: { success: boolean }) => m.success);
+        if (successMetrics.length > 0) {
+          updatedStats.avgLatencyMs = Math.round(successMetrics.reduce((sum: number, m: { latencyMs: number }) => sum + m.latencyMs, 0) / successMetrics.length);
+        }
+        this.skillRepo.update(skill.id, updatedStats);
+      }
+
+      // Phase 3: Trajectory capture — use authoritative per-attempt results from retryWithEscalation
+      {
+        const stepResults = 'stepResults' in result ? (result as any).stepResults as Array<{ tier: ExecutionTierName; status: number; latencyMs: number; failureCause?: string; success: boolean }> : undefined;
+
+        const steps: import('../replay/trajectory.js').TrajectoryStep[] = [];
+        const tiersAttempted: ExecutionTierName[] = [];
+
+        if (stepResults && stepResults.length > 0) {
+          // Use authoritative per-attempt results (real status, latency, failureCause per step)
+          for (const step of stepResults) {
+            if (!tiersAttempted.includes(step.tier)) tiersAttempted.push(step.tier);
+            steps.push({
+              tier: step.tier,
+              status: step.status,
+              latencyMs: step.latencyMs,
+              failureCause: step.failureCause as import('../skill/types.js').FailureCauseName | undefined,
+              success: step.success,
+            });
+          }
+        } else {
+          // Single attempt (non-retry path) — no stepResults available
+          tiersAttempted.push(result.tier);
+          steps.push({
+            tier: result.tier,
+            status: result.status,
+            latencyMs: result.latencyMs,
+            failureCause: result.failureCause,
+            success: result.success,
+          });
+        }
+
+        const totalLatencyMs = steps.reduce((sum, s) => sum + s.latencyMs, 0) || result.latencyMs;
+        const trajectory: Trajectory = {
+          skillId: skill.id,
+          siteId: skill.siteId,
+          tiersAttempted,
+          steps,
+          finalSuccess: result.success,
+          totalLatencyMs,
+          timestamp: Date.now(),
+        };
+        this.trajectoryRecorder.record(trajectory);
+      }
+
+      // Phase 3: Exemplar capture on success
+      if (result.success && result.rawBody) {
+        try {
+          const crypto = await import('node:crypto');
+          const schemaHash = crypto.createHash('sha256')
+            .update(result.rawBody.slice(0, 1000))
+            .digest('hex')
+            .slice(0, 16);
+
+          const { redactBody } = await import('../storage/redactor.js');
+          const redactedBody = await redactBody(result.rawBody) ?? '';
+
+          this.exemplarRepo.save({
+            skillId: skill.id,
+            responseStatus: result.status,
+            responseSchemaHash: schemaHash,
+            redactedResponseBody: redactedBody,
+            capturedAt: Date.now(),
+          });
+        } catch (exemplarErr) {
+          this.log.debug({ err: exemplarErr, skillId: skill.id }, 'Exemplar capture failed (non-blocking)');
+        }
       }
 
       // 9. On cookie_refresh failure, trigger browser cookie refresh
@@ -967,10 +1665,17 @@ export class Engine {
       return {
         success: result.success,
         data: result.data,
-        error: result.failureCause ? `Failure: ${result.failureCause}` : undefined,
+        error: result.failureCause
+          ? formatExecutionError(result.failureCause, result.failureDetail ?? 'unknown')
+          : undefined,
+        failureCause: result.failureCause,
+        failureDetail: result.failureDetail,
         latencyMs: result.latencyMs,
       };
     } catch (err) {
+      if (this.amendmentEngine) {
+        this.amendmentEngine.incrementExecutionCount(skill.id);
+      }
       const latencyMs = Date.now() - startTime;
       this.log.error({ skillId, err }, 'Skill execution error');
       return {
@@ -981,7 +1686,78 @@ export class Engine {
     }
   }
 
-  getStatus(): EngineStatus {
+  private async executeWebMcpSkill(
+    skill: SkillSpec,
+    params: Record<string, unknown>,
+    startTime: number,
+  ): Promise<{ success: boolean; data: unknown; failureDetail?: string; failureCause?: import('../skill/types.js').FailureCauseName; latencyMs: number }> {
+    const policy = getSitePolicy(skill.siteId, this.config);
+    const effectiveDomains = policy.domainAllowlist.length > 0
+      ? policy.domainAllowlist
+      : [...new Set([...skill.allowedDomains, skill.siteId])];
+
+    // Use the same backend routing chain as normal execution
+    let browserProvider: BrowserProvider | undefined;
+    const isHardSite = !!(
+      (policy.executionBackend === 'playwright' || policy.executionBackend === 'live-chrome')
+      && policy.executionSessionName
+    );
+    try {
+      const backend = this.getExecutionBackend(skill.siteId);
+      browserProvider = await backend.createProvider(skill.siteId, effectiveDomains);
+      if (!browserProvider && !isHardSite) {
+        browserProvider = await this.createBrowserProvider(skill.siteId, effectiveDomains);
+      }
+    } catch (err) {
+      if (isHardSite) throw err;
+      this.log.warn({ err, siteId: skill.siteId }, 'Execution backend failed for WebMCP skill — falling back');
+      try {
+        browserProvider = await this.createBrowserProvider(skill.siteId, effectiveDomains);
+      } catch (err2) { this.log.warn({ err: err2, siteId: skill.siteId }, 'Fallback browser creation failed'); }
+    }
+
+    if (!browserProvider) {
+      return {
+        success: false,
+        data: null,
+        failureCause: FailureCause.FETCH_ERROR,
+        failureDetail: 'No browser context available for WebMCP skill. Use schrute_explore first.',
+        latencyMs: Date.now() - startTime,
+      };
+    }
+
+    if (!browserProvider.evaluateModelContext) {
+      return {
+        success: false,
+        data: null,
+        failureCause: FailureCause.POLICY_DENIED,
+        failureDetail: 'WebMCP requires a Chromium-based engine. Current engine does not support navigator.modelContext.',
+        latencyMs: Date.now() - startTime,
+      };
+    }
+
+    const { executeWebMcpTool } = await import('../browser/webmcp-bridge.js');
+    const { loadCachedTools } = await import('../discovery/webmcp-scanner.js');
+    const db = getDatabase(this.config);
+    const allowedTools = loadCachedTools(skill.siteId, db);
+    const toolName = skill.pathTemplate;
+
+    const result = await executeWebMcpTool(
+      { toolName, args: params },
+      browserProvider,
+      allowedTools.map(t => t.name),
+    );
+
+    // Metrics are now recorded by the shared post-execution path in executeSkillInner()
+    return {
+      success: !result.error,
+      data: result.result,
+      failureDetail: result.error ?? undefined,
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
+  getStatus(options?: { drainWarnings?: boolean }): EngineStatus {
     let activeSession: SessionInfo | null = null;
     if (this.activeSessionId) {
       const sessions = this.sessionManager.listActive();
@@ -1001,23 +1777,57 @@ export class Engine {
       };
     }
 
+    // P3-7: Drain or peek warnings depending on caller.
+    // Non-admin callers peek (non-destructive) so admin callers
+    // don't lose visibility into explore/discovery failures.
+    const drain = options?.drainWarnings ?? true;
+    const warnings = drain ? this.drainWarnings() : this.peekWarnings();
+
+    // P2-10: Compute skill summary
+    const allSkills = this.skillRepo.getAll();
+    const browserManager = this.sessionManager.getBrowserManager();
+    let executable = 0;
+    let blocked = 0;
+    for (const s of allSkills) {
+      if (s.status !== SkillStatus.ACTIVE) {
+        blocked++;
+        continue;
+      }
+      const effectiveTier = getEffectiveTier(s);
+      if (effectiveTier === TierState.TIER_3_DEFAULT && !browserManager.hasContext(s.siteId)) {
+        blocked++;
+      } else {
+        executable++;
+      }
+    }
+
     return {
       mode: this.mode,
       activeSession,
       activeNamedSession,
       currentRecording: this.currentRecording ? { ...this.currentRecording } : null,
       uptime: Date.now() - this.startedAt,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      skillSummary: { total: allSkills.length, executable, blocked },
     };
   }
 
-  private async runColdStartDiscovery(url: string, siteId: string): Promise<void> {
+  private async runColdStartDiscovery(url: string, siteId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     const { discoverSite } = await import('../discovery/cold-start.js');
     const db = getDatabase(this.config);
 
+    if (signal?.aborted) return;
     // C5: Pass browser + db into discoverSite for WebMCP scanning
     const browserProvider = await this.createBrowserProvider(siteId);
 
-    const result = await discoverSite(url, this.config, browserProvider, db);
+    // Provide scrape context factory so discovery can render JS-heavy pages
+    const browserManager = this.sessionManager.getBrowserManager();
+    const scrapeFactory = (id: string) => browserManager.createScrapeContext(id);
+
+    if (signal?.aborted) return;
+    const result = await discoverSite(url, this.config, browserProvider, db, undefined, scrapeFactory);
+    if (signal?.aborted) return;
     if (result.endpoints.length > 0) {
       this.log.info(
         { siteId, endpointCount: result.endpoints.length, sources: result.sources.filter(s => s.found).map(s => s.type) },
@@ -1025,6 +1835,19 @@ export class Engine {
       );
     }
 
+    // P1b: Import discovered endpoints as DRAFT skills (feature-flagged)
+    if (this.config.features.discoveryImport && result.endpoints.length > 0) {
+      if (signal?.aborted) return;
+      try {
+        const { discoveredEndpointsToSkills } = await import('../discovery/cold-start.js');
+        const importResult = discoveredEndpointsToSkills(siteId, result.endpoints, this.skillRepo);
+        this.log.info({ siteId, ...importResult }, 'Imported discovered endpoints as DRAFT skills');
+      } catch (err) {
+        this.log.warn({ err }, 'Discovery import failed');
+      }
+    }
+
+    if (signal?.aborted) return;
     // C5: Load cached WebMCP tools
     const cachedTools = loadCachedTools(siteId, db);
     if (cachedTools.length > 0) {
@@ -1032,7 +1855,97 @@ export class Engine {
     }
   }
 
+  /**
+   * Background auth prefetch: refresh stale cookies for recently-used sites.
+   * Skips sites with localStorage auth (same routing rule as agent-browser backend).
+   * Merges cookies only — preserves existing origins array.
+   */
+  private async prefetchStaleAuth(activeSkills: SkillSpec[]): Promise<void> {
+    const AUTH_STALE_MS = 5 * 60 * 1000;
+    const RECENT_USE_MS = 30 * 60 * 1000;
+    const CONCURRENCY = 3;
+    const now = Date.now();
+    const seenSites = new Set<string>();
+
+    // Collect eligible sites
+    const eligible: Array<{ siteId: string; domains: string[] }> = [];
+    for (const skill of activeSkills) {
+      if (seenSites.has(skill.siteId)) continue;
+      seenSites.add(skill.siteId);
+      if (!skill.lastUsed || now - skill.lastUsed > RECENT_USE_MS) continue;
+
+      const authState = this.authStore?.load(skill.siteId);
+      if (!authState) continue;
+      if (authState.origins.some(o => o.localStorage.length > 0)) continue;
+      if (now - authState.lastUpdated < AUTH_STALE_MS) continue;
+
+      const policy = getSitePolicy(skill.siteId, this.config);
+      const domains = policy.domainAllowlist.length > 0
+        ? policy.domainAllowlist
+        : [...new Set([...skill.allowedDomains, skill.siteId])];
+      eligible.push({ siteId: skill.siteId, domains });
+    }
+
+    if (eligible.length === 0) return;
+
+    // Process in chunks of CONCURRENCY
+    for (let i = 0; i < eligible.length; i += CONCURRENCY) {
+      const chunk = eligible.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunk.map(async ({ siteId, domains }) => {
+          // refreshCookies throws on IPC/session failure — Promise.allSettled
+          // catches rejected promises, so persist only runs on confirmed reads.
+          // Empty cookies (successful read) clear stale auth after logout/expiry.
+          const freshCookies = await this.agentBrowserBackend.refreshCookies(siteId, domains);
+          const existing = this.authStore!.load(siteId);
+          this.authStore!.save(siteId, {
+            cookies: freshCookies,
+            origins: existing?.origins ?? [],
+            lastUpdated: now,
+          });
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          this.log.debug({ err: result.reason }, 'Auth prefetch chunk item failed');
+        }
+      }
+    }
+  }
+
   async close(): Promise<void> {
+    // Clear session sweep interval
+    if (this.sessionSweepInterval) {
+      clearInterval(this.sessionSweepInterval);
+      this.sessionSweepInterval = null;
+    }
+
+    // Clear backoff persist interval and do a final persist
+    if (this.backoffPersistInterval) {
+      clearInterval(this.backoffPersistInterval);
+      this.backoffPersistInterval = null;
+    }
+    this.rateLimiter.persistBackoffs();
+
+    // Clear background sweep interval
+    if (this.sweepInterval) {
+      clearInterval(this.sweepInterval);
+      this.sweepInterval = null;
+    }
+
+    // Abort background explore ops before closing
+    if (this.exploreAbortController) {
+      this.exploreAbortController.abort();
+      this.exploreAbortController = null;
+    }
+    if (this.pendingBackgroundOps.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...this.pendingBackgroundOps]),
+        new Promise(resolve => setTimeout(resolve, 500)),
+      ]);
+      this.pendingBackgroundOps.clear();
+    }
+
     this.isClosing = true;
     const CLOSE_TIMEOUT_MS = 8000;
 
@@ -1069,6 +1982,30 @@ export class Engine {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+
+    if (this.pool) {
+      try {
+        await this.pool.shutdown();
+      } catch (err) {
+        this.log.warn({ err }, 'BrowserPool shutdown failed during engine close');
+      }
+    }
+
+    // Shut down execution backends
+    try { await this.agentBrowserBackend.shutdown(); }
+    catch (err) { this.log.warn({ err }, 'AgentBrowserBackend shutdown failed'); }
+
+    if (this.fallbackExecutionBackend) {
+      try { await this.fallbackExecutionBackend.shutdown(); }
+      catch (err) { this.log.warn({ err }, 'PlaywrightBackend shutdown failed'); }
+      this.fallbackExecutionBackend = null;
+    }
+
+    for (const [name, backend] of this.sharedPlaywrightBackends) {
+      try { await backend.shutdown(); }
+      catch (err) { this.log.warn({ err, name }, 'Shared backend shutdown failed'); }
+    }
+    this.sharedPlaywrightBackends.clear();
 
     this.mode = 'idle';
     this.providerCache = new WeakMap();

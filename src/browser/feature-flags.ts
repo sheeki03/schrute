@@ -1,4 +1,4 @@
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 
 // ─── Browser Feature Flags ──────────────────────────────────────
 // Runtime kill switches per phase — disable any feature without code changes.
@@ -11,6 +11,10 @@ export interface BrowserFeatureFlags {
   batchActions: boolean;
   screenshotFormat: 'jpeg' | 'png';
   screenshotQuality: number;
+  fingerprintProfile: boolean;
+  referrerSpoofing: boolean;
+  humanCursor: boolean;
+  assetBlocking: boolean;
 }
 
 export const DEFAULT_FLAGS: BrowserFeatureFlags = {
@@ -21,6 +25,10 @@ export const DEFAULT_FLAGS: BrowserFeatureFlags = {
   batchActions: true,
   screenshotFormat: 'jpeg',
   screenshotQuality: 80,
+  fingerprintProfile: false,
+  referrerSpoofing: false,
+  humanCursor: false,
+  assetBlocking: false,
 };
 
 export const VALID_SNAPSHOT_MODES = new Set<string>(['annotated', 'full', 'none']);
@@ -30,7 +38,7 @@ export const VALID_SNAPSHOT_MODES = new Set<string>(['annotated', 'full', 'none'
  * Merge order: DEFAULT_FLAGS → config file → env overrides
  * (env is already baked into config by loadConfig() + applyEnvOverrides())
  */
-export function getFlags(config: OneAgentConfig): BrowserFeatureFlags {
+export function getFlags(config: SchruteConfig): BrowserFeatureFlags {
   const overrides = config.browser?.features;
   if (!overrides) return { ...DEFAULT_FLAGS };
 
@@ -45,7 +53,7 @@ export function getFlags(config: OneAgentConfig): BrowserFeatureFlags {
   }
 
   // Validate boolean flags — reject non-boolean types (prevents "false" string truthy coercion)
-  const boolFlags = ['incrementalDiffs', 'modalTracking', 'screenshotResize', 'batchActions'] as const;
+  const boolFlags = ['incrementalDiffs', 'modalTracking', 'screenshotResize', 'batchActions', 'fingerprintProfile', 'referrerSpoofing', 'humanCursor', 'assetBlocking'] as const;
   for (const key of boolFlags) {
     if (typeof merged[key] !== 'boolean') {
       throw new Error(

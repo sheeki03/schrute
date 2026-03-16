@@ -1,5 +1,5 @@
-"""OneAgent Python Client SDK."""
+"""Schrute Python Client SDK."""
 
-from .oneagent_client import OneAgentClient, OneAgentError
+from .schrute_client import SchruteClient, SchruteError
 
-__all__ = ["OneAgentClient", "OneAgentError"]
+__all__ = ["SchruteClient", "SchruteError"]

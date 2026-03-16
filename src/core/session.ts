@@ -10,7 +10,6 @@ export interface SessionInfo {
   siteId: string;
   url: string;
   startedAt: number;
-  browserContextId: string;
 }
 
 // ─── Session Manager ──────────────────────────────────────────────
@@ -28,17 +27,14 @@ export class SessionManager {
     this.sessions.delete(sessionId);
   }
 
-  async create(siteId: string, url: string, overrides?: ContextOverrides): Promise<SessionInfo> {
-    const contextId = randomUUID();
-
-    // Design choice: session continues without browser context because some operations
-    // (e.g., direct fetch skill execution) don't require a browser. Callers that need
-    // a browser context should check getBrowserManager().hasContext() before proceeding.
+  async create(siteId: string, url: string, overrides?: ContextOverrides): Promise<{ session: SessionInfo; browserError?: Error }> {
+    let browserError: Error | undefined;
     try {
       await this.browserManager.getOrCreateContext(siteId, overrides);
       this.log.info({ siteId }, 'Browser context created');
     } catch (err) {
       if (err instanceof ContextOverrideMismatchError) throw err;
+      browserError = err instanceof Error ? err : new Error(String(err));
       this.log.warn(
         { siteId, err },
         'Could not create browser context — session created without browser',
@@ -50,7 +46,6 @@ export class SessionManager {
       siteId,
       url,
       startedAt: Date.now(),
-      browserContextId: contextId,
     };
 
     this.sessions.set(session.id, session);
@@ -59,7 +54,7 @@ export class SessionManager {
       'Session created',
     );
 
-    return session;
+    return { session, browserError };
   }
 
   async resume(sessionId: string): Promise<SessionInfo> {

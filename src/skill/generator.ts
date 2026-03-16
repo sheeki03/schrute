@@ -1,12 +1,12 @@
 import { extractPathParams } from '../core/utils.js';
 import { sanitizeParamKey } from '../server/tool-registry.js';
+import { buildExecutionSchema } from '../replay/param-validator.js';
 import type {
   SkillSpec,
   SkillParameter,
   AuthRecipe,
   ParameterEvidence,
   RequestChain,
-  SideEffectClassName,
   SkillStatusName,
   TierStateName,
   CapabilityName,
@@ -16,9 +16,9 @@ import {
   SkillStatus,
   TierState,
   Capability,
-  SideEffectClass,
 } from './types.js';
 import { classifySideEffect } from './side-effects.js';
+import { scanSkill } from './security-scanner.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -101,9 +101,27 @@ export function generateSkill(
     name: actionName,
     description: cluster.description,
     successRate: 0,
+    directCanaryEligible: false,
+    directCanaryAttempts: 0,
+    validationsSinceLastCanary: 0,
+    lastCanaryErrorType: undefined,
     createdAt: now,
     updatedAt: now,
   };
+
+  // WS-11: Backfill empty inputSchema from parameter evidence (guardrail: don't overwrite rich schemas)
+  if (!spec.inputSchema || Object.keys(spec.inputSchema).length === 0) {
+    const execSchema = buildExecutionSchema(spec);
+    if (Object.keys(execSchema.properties).length > 0 || execSchema.required.length > 0) {
+      spec.inputSchema = { type: 'object', properties: execSchema.properties, required: execSchema.required };
+    }
+  }
+
+  // Security scan: flag skills with dangerous patterns for review
+  const scanResult = scanSkill(spec);
+  if (!scanResult.safe) {
+    spec.reviewRequired = true;
+  }
 
   return spec;
 }
@@ -537,7 +555,7 @@ export function generateSkillTemplates(spec: SkillSpec): Map<string, string> {
   return templates;
 }
 
-export function generateEvidenceReport(
+function generateEvidenceReport(
   skill: SkillSpec,
   validationHistory: EvidenceReport['validationHistory'],
   policyRule: string,

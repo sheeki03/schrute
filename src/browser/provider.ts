@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import type { BrowserProvider, OneAgentConfig } from '../skill/types.js';
+import type { BrowserProvider } from '../skill/types.js';
 import { PlaywrightMcpAdapter } from './playwright-mcp-adapter.js';
 import type { BrowserFeatureFlags } from './feature-flags.js';
 import type { EngineCapabilities } from './engine.js';
@@ -15,7 +15,7 @@ export type {
   SealedModelContextResponse,
 } from '../skill/types.js';
 
-export interface BrowserProviderConfig {
+interface BrowserProviderConfig {
   /** Domains the sealed fetch is allowed to reach */
   domainAllowlist: string[];
   /** Whether WebMCP (model context) is enabled */
@@ -32,7 +32,7 @@ export interface BrowserProviderConfig {
  *
  * Intentional single-method class — serves as extension point for additional browser adapter types
  */
-export class BrowserProviderFactory {
+class BrowserProviderFactory {
   /**
    * Create a BrowserProvider backed by Playwright.
    *

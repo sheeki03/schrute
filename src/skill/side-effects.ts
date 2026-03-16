@@ -7,7 +7,7 @@ const log = getLogger();
 
 // ─── Observed Effects ───────────────────────────────────────────
 
-export interface ObservedEffects {
+interface ObservedEffects {
   stateChangingCookiesSet?: boolean;
   redirectedToLogout?: boolean;
   triggeredDownstreamWrites?: boolean;
@@ -15,9 +15,9 @@ export interface ObservedEffects {
 
 // ─── GraphQL Detection ──────────────────────────────────────────
 
-export type GraphQLOperationType = 'query' | 'mutation' | 'subscription';
+type GraphQLOperationType = 'query' | 'mutation' | 'subscription';
 
-export function detectGraphQLOperation(body?: string): GraphQLOperationType | null {
+function detectGraphQLOperation(body?: string): GraphQLOperationType | null {
   if (!body) return null;
 
   try {

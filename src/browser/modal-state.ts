@@ -7,7 +7,7 @@ const log = getLogger();
 // Tracks native Playwright dialog/filechooser events (NOT HTML/CSS modals).
 // Prevents tools from executing in invalid states with TTL-based recovery.
 
-export type ModalType = 'dialog' | 'fileChooser';
+type ModalType = 'dialog' | 'fileChooser';
 
 export interface ModalState {
   type: ModalType;
@@ -77,8 +77,8 @@ export class ModalStateTracker extends EventEmitter {
           try {
             const dialog = modal.data as { dismiss: () => Promise<void> };
             dialog.dismiss().catch((err) => log.debug({ err }, 'Dialog dismiss failed'));
-          } catch {
-            // Best-effort
+          } catch (err) {
+            log.debug({ err }, 'Dialog dismiss failed during expiry cleanup');
           }
         }
 

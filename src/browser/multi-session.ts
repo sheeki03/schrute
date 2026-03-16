@@ -194,6 +194,21 @@ export class MultiSessionManager {
       return;
     }
 
+    // Restore CDP policy overlay before closing
+    if (session.cdpPriorPolicyState && session.siteId) {
+      try {
+        const { mergeSitePolicy } = await import('../core/policy.js');
+        const result = mergeSitePolicy(session.siteId, session.cdpPriorPolicyState as any, this.config);
+        if (result.persisted) {
+          log.info({ siteId: session.siteId }, 'Restored pre-CDP policy state on session close');
+        } else {
+          log.warn({ siteId: session.siteId }, 'Pre-CDP policy restored in-memory but failed to persist to database');
+        }
+      } catch (err) {
+        log.warn({ err, siteId: session.siteId }, 'Failed to restore pre-CDP policy state');
+      }
+    }
+
     // Non-default: full close and remove
     if (session.browserManager.isCdpConnected()) {
       await session.browserManager.detachCdp();

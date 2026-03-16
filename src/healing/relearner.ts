@@ -9,9 +9,9 @@ const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export type RelearnAction = 'revalidated' | 'escalated' | 'needs_reexplore';
+type RelearnAction = 'revalidated' | 'escalated' | 'needs_reexplore';
 
-export interface RelearnResult {
+interface RelearnResult {
   /** What action was taken */
   action: RelearnAction;
   /** New skill version (if escalated) */

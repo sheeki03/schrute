@@ -15,6 +15,7 @@ import { BoundedMap } from '../shared/bounded-map.js';
 import type { BrowserAuthStore } from './auth-store.js';
 import type { AuthCoordinator } from './auth-coordinator.js';
 import { ParallelismGovernor } from './parallelism-governor.js';
+import { NetworkRingBuffer } from '../capture/network-ring-buffer.js';
 
 const log = getLogger();
 
@@ -142,6 +143,7 @@ export class BrowserManager {
   private reconnectPromise: Promise<void> | null = null;
   private reconnectAborted: boolean = false;
   private lastCdpSiteId: string | null = null; // preserved across disconnect for reconnect
+  private networkRingBuffer?: NetworkRingBuffer;
 
   constructor(config?: SchruteConfig, pool?: BrowserPool) {
     this.config = config;
@@ -852,7 +854,7 @@ export class BrowserManager {
     const managed = this.contexts.get(siteId);
     this.contexts.delete(siteId);
     if (managed) {
-      managed.context.close().catch(() => {});
+      managed.context.close().catch(err => log.debug({ err, siteId }, 'Browser context discard failed'));
     }
   }
 
@@ -923,6 +925,7 @@ export class BrowserManager {
     this.cdpFailed = false;
     this.reconnectAborted = false;
     this.lastCdpSiteId = siteId;
+    this.networkRingBuffer = new NetworkRingBuffer();
 
     // Get existing context or create minimal one
     const existingContexts = browser.contexts();
@@ -1102,6 +1105,10 @@ export class BrowserManager {
    */
   isCdpConnected(): boolean {
     return this.cdpConnected;
+  }
+
+  getNetworkRingBuffer(): NetworkRingBuffer | undefined {
+    return this.networkRingBuffer;
   }
 
   selectPage(siteId: string, pageUrl: string): void {

@@ -36,14 +36,14 @@ export function buildOpenApiSpec(
   const spec: OpenApiSpec = {
     openapi: '3.1.0',
     info: {
-      title: options?.title ?? 'OneAgent API',
+      title: options?.title ?? 'Schrute API',
       version: options?.version ?? '0.2.0',
-      description: 'Dynamically generated API specification from active OneAgent skills.',
+      description: 'Dynamically generated API specification from active Schrute skills.',
     },
     servers: [
       {
         url: options?.serverUrl ?? 'http://127.0.0.1:3000',
-        description: 'Local OneAgent REST server',
+        description: 'Local Schrute REST server',
       },
     ],
     paths: {},
@@ -68,7 +68,7 @@ export function buildOpenApiSpec(
   }
 
   // Add meta-operation tags
-  spec.tags.push({ name: 'meta', description: 'OneAgent meta operations' });
+  spec.tags.push({ name: 'meta', description: 'Schrute meta operations' });
 
   // Add site tags
   for (const siteId of siteIds) {
@@ -124,8 +124,8 @@ function mergeFragment(
         const op = operation as Record<string, unknown>;
         spec.paths[pathKey][method] = {
           ...op,
-          'x-oneagent-proxy': proxyPath,
-          'x-oneagent-skill-id': skill.id,
+          'x-schrute-proxy': proxyPath,
+          'x-schrute-skill-id': skill.id,
         };
       }
     }

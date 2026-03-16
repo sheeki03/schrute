@@ -17,7 +17,7 @@ export { getConfig, loadConfig, ensureDirectories } from './core/config.js';
 
 // Types
 export type {
-  OneAgentConfig, SkillSpec, SiteManifest, SitePolicy,
+  SchruteConfig, SkillSpec, SiteManifest, SitePolicy,
   ProxyConfig, GeoEmulationConfig,
 } from './skill/types.js';
 export { SkillStatus, ExecutionTier, Capability } from './skill/types.js';

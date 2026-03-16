@@ -1,12 +1,12 @@
 // ─── Types ──────────────────────────────────────────────────────
 
-export type DriftChangeType =
+type DriftChangeType =
   | 'field_added'
   | 'field_removed'
   | 'type_changed'
   | 'value_changed';
 
-export interface DriftChange {
+interface DriftChange {
   path: string;
   type: DriftChangeType;
   /** Whether this change is breaking */
@@ -17,7 +17,7 @@ export interface DriftChange {
   current?: string;
 }
 
-export interface DriftResult {
+interface DriftResult {
   /** Whether any drift was detected */
   drifted: boolean;
   /** Whether any breaking changes were found */

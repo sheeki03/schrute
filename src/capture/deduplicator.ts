@@ -8,7 +8,7 @@ const log = getLogger();
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-export interface DeduplicatedSample extends RequestSample {
+interface DeduplicatedSample extends RequestSample {
   isDuplicate: boolean;
   canonicalKey: string;
 }

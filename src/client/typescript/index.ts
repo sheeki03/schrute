@@ -1,7 +1,7 @@
-// ─── OneAgent TypeScript Client SDK ─────────────────────────────────
+// ─── Schrute TypeScript Client SDK ─────────────────────────────────
 
 export type {
-  OneAgentClientOptions,
+  SchruteClientOptions,
   SiteManifestResponse,
   SkillSummary,
   ExecuteSkillResponse,
@@ -13,10 +13,12 @@ export type {
   StopResponse,
   HealthResponse,
   OpenApiSpec,
+  SkillSearchResult,
+  SkillSearchResponse,
 } from './types.js';
 
 import type {
-  OneAgentClientOptions,
+  SchruteClientOptions,
   SiteManifestResponse,
   SkillSummary,
   ExecuteSkillResponse,
@@ -27,28 +29,29 @@ import type {
   StopResponse,
   HealthResponse,
   OpenApiSpec,
+  SkillSearchResponse,
 } from './types.js';
 
 // ─── Error Class ────────────────────────────────────────────────────
 
-export class OneAgentError extends Error {
+export class SchruteError extends Error {
   constructor(
     message: string,
     public readonly statusCode: number,
     public readonly body?: unknown,
   ) {
     super(message);
-    this.name = 'OneAgentError';
+    this.name = 'SchruteError';
   }
 }
 
 // ─── Client ─────────────────────────────────────────────────────────
 
-export class OneAgentClient {
+export class SchruteClient {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
 
-  constructor(options: OneAgentClientOptions) {
+  constructor(options: SchruteClientOptions) {
     // Strip trailing slash
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.headers = {
@@ -161,7 +164,18 @@ export class OneAgentClient {
     return this.get<OpenApiSpec>('/api/openapi.json');
   }
 
+  // ─── Search ───────────────────────────────────────────────────────
+
+  async searchSkills(opts?: { query?: string; siteId?: string; limit?: number; includeInactive?: boolean }): Promise<SkillSearchResponse> {
+    return this.postV1<SkillSearchResponse>('/api/v1/skills/search', opts ?? {});
+  }
+
   // ─── HTTP Helpers ───────────────────────────────────────────────
+
+  private async postV1<T>(path: string, body: unknown): Promise<T> {
+    const envelope = await this.post<{ success: boolean; data: T; meta: unknown }>(path, body);
+    return envelope.data;
+  }
 
   private async get<T>(path: string): Promise<T> {
     const url = `${this.baseUrl}${path}`;
@@ -196,7 +210,7 @@ export class OneAgentClient {
         parsed && typeof parsed === 'object' && 'error' in parsed
           ? String((parsed as { error: unknown }).error)
           : `HTTP ${response.status}`;
-      throw new OneAgentError(message, response.status, parsed);
+      throw new SchruteError(message, response.status, parsed);
     }
 
     return parsed as T;

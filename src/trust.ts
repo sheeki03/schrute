@@ -5,9 +5,39 @@ import { getLogger } from './core/logger.js';
 import { getDatabase } from './storage/database.js';
 import { isPublicIp } from './core/policy.js';
 import * as secrets from './storage/secrets.js';
-import type { OneAgentConfig, SkillStatusName } from './skill/types.js';
+import type { SchruteConfig, SkillStatusName } from './skill/types.js';
 
 const log = getLogger();
+
+// ─── Database Helper ──────────────────────────────────────────────
+
+/**
+ * Open the database (if it exists) and run `fn` against it.
+ * Returns `fallback` if the DB file is missing or any error occurs.
+ */
+function withDatabase<T>(
+  config: SchruteConfig,
+  fn: (db: ReturnType<typeof getDatabase>) => T,
+  label: string,
+  fallback: T,
+): T {
+  const dbPath = getDbPath(config);
+  if (!fs.existsSync(dbPath)) {
+    return fallback;
+  }
+  try {
+    const db = getDatabase(config);
+    try {
+      return fn(db);
+    } catch (err) {
+      log.warn({ err }, `Trust computation: ${label} query failed`);
+      return fallback;
+    }
+  } catch (err) {
+    log.warn({ err }, `Trust computation: failed to open database for ${label}`);
+    return fallback;
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -41,25 +71,18 @@ export interface TrustPosture {
 
 // ─── Data Collection ──────────────────────────────────────────────
 
-function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
-  let allowedHosts = 0;
-
-  const dbPath = getDbPath(config);
-  if (fs.existsSync(dbPath)) {
-    try {
-      const db = getDatabase(config);
-      try {
-        const row = db.get<{ cnt: number }>(
-          "SELECT COUNT(DISTINCT json_each.value) as cnt FROM policies, json_each(policies.domain_allowlist)",
-        );
-        allowedHosts = row?.cnt ?? 0;
-      } catch (err) {
-        log.warn({ err }, 'Trust computation: failed to query allowed hosts');
-      }
-    } catch (err) {
-      log.warn({ err }, 'Trust computation: failed to open database for network info');
-    }
-  }
+function getNetworkInfo(config: SchruteConfig): TrustPosture['network'] {
+  const allowedHosts = withDatabase(
+    config,
+    (db) => {
+      const row = db.get<{ cnt: number }>(
+        "SELECT COUNT(DISTINCT json_each.value) as cnt FROM policies, json_each(policies.domain_allowlist)",
+      );
+      return row?.cnt ?? 0;
+    },
+    'allowed hosts',
+    0,
+  );
 
   // Verify IP enforcement actually blocks private ranges
   const publicIpsEnforced = !isPublicIp('127.0.0.1') && !isPublicIp('10.0.0.1');
@@ -71,13 +94,13 @@ function getNetworkInfo(config: OneAgentConfig): TrustPosture['network'] {
   };
 }
 
-async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['secrets']> {
+async function getSecretsInfo(config: SchruteConfig): Promise<TrustPosture['secrets']> {
   let storedSessions = 0;
   let keychainOk = false;
 
   // Test keychain access
   try {
-    const testKey = '__oneagent_trust_probe__';
+    const testKey = '__schrute_trust_probe__';
     const testVal = `probe-${Date.now()}`;
     await secrets.store(testKey, testVal);
     const retrieved = await secrets.retrieve(testKey);
@@ -89,20 +112,15 @@ async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['sec
   }
 
   // Count stored sessions from DB if available
-  const dbPath = getDbPath(config);
-  if (fs.existsSync(dbPath)) {
-    try {
-      const db = getDatabase(config);
-      try {
-        const row = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM sites');
-        storedSessions = row?.cnt ?? 0;
-      } catch (err) {
-        log.warn({ err }, 'Trust computation: failed to query stored sessions');
-      }
-    } catch (err) {
-      log.warn({ err }, 'Trust computation: failed to open database for secrets info');
-    }
-  }
+  storedSessions = withDatabase(
+    config,
+    (db) => {
+      const row = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM sites');
+      return row?.cnt ?? 0;
+    },
+    'stored sessions',
+    0,
+  );
 
   return {
     keychainOk,
@@ -111,7 +129,7 @@ async function getSecretsInfo(config: OneAgentConfig): Promise<TrustPosture['sec
   };
 }
 
-function getRedactionInfo(config: OneAgentConfig): TrustPosture['redaction'] {
+function getRedactionInfo(config: SchruteConfig): TrustPosture['redaction'] {
   let redactionsApplied = 0;
 
   // Audit is JSONL file-based, not a DB table. Read the audit file and count redaction violations.
@@ -143,46 +161,40 @@ function getRedactionInfo(config: OneAgentConfig): TrustPosture['redaction'] {
   };
 }
 
-function getSkillsInfo(config: OneAgentConfig): TrustPosture['skills'] {
-  const result = { active: 0, stale: 0, locked: 0, broken: 0 };
+function getSkillsInfo(config: SchruteConfig): TrustPosture['skills'] {
+  return withDatabase(
+    config,
+    (db) => {
+      const result = { active: 0, stale: 0, locked: 0, broken: 0 };
+      const rows = db.all<{ status: string; tier_lock: string | null }>(
+        'SELECT status, tier_lock FROM skills',
+      );
 
-  const dbPath = getDbPath(config);
-  if (fs.existsSync(dbPath)) {
-    try {
-      const db = getDatabase(config);
-      try {
-        const rows = db.all<{ status: string; tier_lock: string | null }>(
-          'SELECT status, tier_lock FROM skills',
-        );
+      for (const row of rows) {
+        const status = row.status as SkillStatusName;
+        if (status === 'active') result.active++;
+        else if (status === 'stale') result.stale++;
+        else if (status === 'broken') result.broken++;
 
-        for (const row of rows) {
-          const status = row.status as SkillStatusName;
-          if (status === 'active') result.active++;
-          else if (status === 'stale') result.stale++;
-          else if (status === 'broken') result.broken++;
-
-          // Check tier lock (Tier 3 locked)
-          if (row.tier_lock) {
-            try {
-              const lock = JSON.parse(row.tier_lock);
-              if (lock?.type === 'permanent') result.locked++;
-            } catch (err) {
-              log.warn({ err }, 'Trust computation: failed to parse tier_lock JSON');
-            }
+        // Check tier lock (Tier 3 locked)
+        if (row.tier_lock) {
+          try {
+            const lock = JSON.parse(row.tier_lock);
+            if (lock?.type === 'permanent') result.locked++;
+          } catch (err) {
+            log.warn({ err }, 'Trust computation: failed to parse tier_lock JSON');
           }
         }
-      } catch (err) {
-        log.warn({ err }, 'Trust computation: failed to query skills table');
       }
-    } catch (err) {
-      log.warn({ err }, 'Trust computation: failed to open database for skills info');
-    }
-  }
 
-  return result;
+      return result;
+    },
+    'skills info',
+    { active: 0, stale: 0, locked: 0, broken: 0 },
+  );
 }
 
-function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
+function getRetentionInfo(config: SchruteConfig): TrustPosture['retention'] {
   let usedMb = 0;
   let oldestFrameDays: number | null = null;
 
@@ -210,26 +222,20 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
   }
 
   // Get oldest frame
-  const dbPath = getDbPath(config);
-  if (fs.existsSync(dbPath)) {
-    try {
-      const db = getDatabase(config);
-      try {
-        const row = db.get<{ oldest: number | null }>(
-          'SELECT MIN(started_at) as oldest FROM action_frames',
-        );
-        if (row?.oldest) {
-          oldestFrameDays = Math.floor(
-            (Date.now() - row.oldest) / (1000 * 60 * 60 * 24),
-          );
-        }
-      } catch (err) {
-        log.warn({ err }, 'Trust computation: failed to query oldest action frame');
+  oldestFrameDays = withDatabase(
+    config,
+    (db) => {
+      const row = db.get<{ oldest: number | null }>(
+        'SELECT MIN(started_at) as oldest FROM action_frames',
+      );
+      if (row?.oldest) {
+        return Math.floor((Date.now() - row.oldest) / (1000 * 60 * 60 * 24));
       }
-    } catch (err) {
-      log.warn({ err }, 'Trust computation: failed to open database for retention info');
-    }
-  }
+      return null;
+    },
+    'oldest action frame',
+    null,
+  );
 
   return {
     usedMb: Math.round(usedMb * 10) / 10,
@@ -240,7 +246,7 @@ function getRetentionInfo(config: OneAgentConfig): TrustPosture['retention'] {
 
 // ─── Main Trust Report ────────────────────────────────────────────
 
-export async function getTrustPosture(config?: OneAgentConfig): Promise<TrustPosture> {
+export async function getTrustPosture(config?: SchruteConfig): Promise<TrustPosture> {
   const cfg = config ?? getConfig();
 
   return {

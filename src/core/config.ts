@@ -25,8 +25,7 @@ const DEFAULT_DATA_DIR = path.join(
   '.schrute',
 );
 
-// Daemon config merged into default config alongside all other settings.
-const DEFAULT_CONFIG: SchruteConfig & { daemon: { port: number; autoStart: boolean } } = {
+const DEFAULT_CONFIG: SchruteConfig = {
   dataDir: DEFAULT_DATA_DIR,
   logLevel: 'info',
   features: {
@@ -364,7 +363,7 @@ export function loadConfig(configPath?: string): SchruteConfig {
   const cfgPath = configPath ?? path.join(DEFAULT_DATA_DIR, 'config.json');
 
   if (!fs.existsSync(cfgPath)) {
-    return { ...DEFAULT_CONFIG };
+    return structuredClone(DEFAULT_CONFIG);
   }
 
   try {
@@ -488,7 +487,7 @@ export function loadConfig(configPath?: string): SchruteConfig {
       { err },
       'Failed to read/parse config file — using defaults. Fix your config.json or delete it to silence this warning.',
     );
-    return { ...DEFAULT_CONFIG };
+    return structuredClone(DEFAULT_CONFIG);
   }
 }
 
@@ -503,7 +502,7 @@ export function getConfig(): SchruteConfig {
   if (!cachedConfig) {
     cachedConfig = applyEnvOverrides(loadConfig());
   }
-  return cachedConfig;
+  return structuredClone(cachedConfig);
 }
 
 export function resetConfigCache(): void {
@@ -622,16 +621,22 @@ function validateConfigValue(keyPath: string, value: unknown): void {
   }
 }
 
-// setConfigValue loads from file (no env), mutates, saves — env values never leak to disk
-export function setConfigValue(keyPath: string, value: unknown): SchruteConfig {
+/**
+ * Shared mutation logic: validate top-level key, traverse key path, coerce value,
+ * validate, and assign. Returns the coerced value for callers that need it.
+ */
+function applyConfigMutation(
+  target: Record<string, unknown>,
+  keyPath: string,
+  value: unknown,
+): void {
   const topKey = keyPath.split('.')[0];
   if (!VALID_TOP_LEVEL_KEYS.has(topKey)) {
     throw new Error(`Unknown config key: ${topKey}. Valid keys: ${[...VALID_TOP_LEVEL_KEYS].join(', ')}`);
   }
 
-  const fileConfig = loadConfig(); // raw persisted config — no env overlay
   const keys = keyPath.split('.');
-  let current: Record<string, unknown> = fileConfig as unknown as Record<string, unknown>;
+  let current = target;
 
   for (let i = 0; i < keys.length - 1; i++) {
     const key = keys[i];
@@ -651,40 +656,21 @@ export function setConfigValue(keyPath: string, value: unknown): SchruteConfig {
   validateConfigValue(keyPath, value);
 
   current[lastKey] = value;
+}
+
+// setConfigValue loads from file (no env), mutates, saves — env values never leak to disk
+export function setConfigValue(keyPath: string, value: unknown): SchruteConfig {
+  const fileConfig = loadConfig(); // raw persisted config — no env overlay
+  applyConfigMutation(fileConfig as unknown as Record<string, unknown>, keyPath, value);
   saveConfig(fileConfig);
   cachedConfig = applyEnvOverrides(fileConfig); // re-cache with env overlay
   return cachedConfig;
 }
 
 export function setConfigValueInMemory(keyPath: string, value: unknown): SchruteConfig {
-  const topKey = keyPath.split('.')[0];
-  if (!VALID_TOP_LEVEL_KEYS.has(topKey)) {
-    throw new Error(`Unknown config key: ${topKey}. Valid keys: ${[...VALID_TOP_LEVEL_KEYS].join(', ')}`);
-  }
-
   const currentConfig = getConfig();
   const modified = structuredClone(currentConfig);
-  const keys = keyPath.split('.');
-  let current: Record<string, unknown> = modified as unknown as Record<string, unknown>;
-
-  for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i];
-    if (typeof current[key] !== 'object' || current[key] === null) {
-      current[key] = {};
-    }
-    current = current[key] as Record<string, unknown>;
-  }
-
-  const lastKey = keys[keys.length - 1];
-  if (value === 'true') value = true;
-  else if (value === 'false') value = false;
-  else if (typeof value === 'string' && !isNaN(Number(value)) && NUMERIC_CONFIG_KEYS.has(keyPath)) {
-    value = Number(value);
-  }
-
-  validateConfigValue(keyPath, value);
-
-  current[lastKey] = value;
+  applyConfigMutation(modified as unknown as Record<string, unknown>, keyPath, value);
   cachedConfig = applyEnvOverrides(modified);
   return cachedConfig;
 }

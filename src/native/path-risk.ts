@@ -24,7 +24,7 @@ export function checkPathRiskNative(method: string, path: string): PathRiskResul
       return JSON.parse(resultJson) as PathRiskResult;
     } catch (err) {
       if (!_nativeFailureLogged) {
-        log.debug({ err }, 'Native path-risk unavailable, using TS fallback');
+        log.info({ err }, 'Native path-risk unavailable, using TS fallback');
         _nativeFailureLogged = true;
       }
     }

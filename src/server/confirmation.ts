@@ -2,12 +2,12 @@ import { createHash, randomBytes, createHmac } from 'node:crypto';
 import { getLogger } from '../core/logger.js';
 import { retrieve, store } from '../storage/secrets.js';
 import type { AgentDatabase } from '../storage/database.js';
-import type { ConfirmationToken, OneAgentConfig } from '../skill/types.js';
+import type { ConfirmationToken, SchruteConfig } from '../skill/types.js';
 
 const log = getLogger();
 
 // ─── Keychain-Backed HMAC Key ────────────────────────────────────
-const CONFIRMATION_KEY_NAME = '__oneagent_confirmation_hmac__';
+const CONFIRMATION_KEY_NAME = '__schrute_confirmation_hmac__';
 let confirmationHmacKey: Buffer | null = null;
 
 async function getConfirmationKey(): Promise<Buffer> {
@@ -38,9 +38,9 @@ async function getConfirmationKey(): Promise<Buffer> {
 
 export class ConfirmationManager {
   private db: AgentDatabase;
-  private config: OneAgentConfig;
+  private config: SchruteConfig;
 
-  constructor(db: AgentDatabase, config: OneAgentConfig) {
+  constructor(db: AgentDatabase, config: SchruteConfig) {
     this.db = db;
     this.config = config;
   }
@@ -165,61 +165,144 @@ export class ConfirmationManager {
   }
 
   /**
+   * Atomically verify and consume a token in a single transaction.
+   * Prevents race conditions where two concurrent requests could both
+   * verify the same token before either consumes it.
+   */
+  verifyAndConsume(
+    tokenId: string,
+    approve: boolean,
+    approvedBy?: string,
+  ): { valid: boolean; token?: ConfirmationToken; error?: string } {
+    return this.db.transaction(() => {
+      // 1. Read the nonce row
+      const row = this.db.get<{
+        nonce: string;
+        skill_id: string;
+        params_hash: string;
+        tier: string;
+        created_at: number;
+        expires_at: number;
+        consumed: number;
+        consumed_at: number | null;
+      }>(
+        'SELECT * FROM confirmation_nonces WHERE nonce = ?',
+        tokenId,
+      );
+
+      // 2. Not found
+      if (!row) {
+        return { valid: false, error: 'Token not found' };
+      }
+
+      // 3. Already consumed
+      if (row.consumed) {
+        return { valid: false, error: 'Token already consumed' };
+      }
+
+      // 4. Expired
+      if (Date.now() > row.expires_at) {
+        this.db.run('DELETE FROM confirmation_nonces WHERE nonce = ?', tokenId);
+        return { valid: false, error: 'Token expired' };
+      }
+
+      // 5. Atomic CAS: only consume if still unconsumed
+      const now = Date.now();
+      const result = this.db.run(
+        'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE nonce = ? AND consumed = 0',
+        now,
+        tokenId,
+      );
+
+      if (result.changes === 0) {
+        return { valid: false, error: 'Token already consumed (concurrent)' };
+      }
+
+      // 6/7. Approve or deny
+      if (approve) {
+        this.db.run(
+          `INSERT INTO skill_confirmations (skill_id, confirmation_status, approved_by, approved_at)
+           VALUES (?, 'approved', ?, ?)
+           ON CONFLICT(skill_id) DO UPDATE SET
+             confirmation_status = 'approved',
+             approved_by = excluded.approved_by,
+             approved_at = excluded.approved_at`,
+          row.skill_id,
+          approvedBy ?? 'mcp-client',
+          now,
+        );
+        log.info({ skillId: row.skill_id }, 'Skill globally confirmed (approved)');
+      } else {
+        this.db.run(
+          `INSERT INTO skill_confirmations (skill_id, confirmation_status, denied_at)
+           VALUES (?, 'denied', ?)
+           ON CONFLICT(skill_id) DO UPDATE SET
+             confirmation_status = 'denied',
+             denied_at = excluded.denied_at`,
+          row.skill_id,
+          now,
+        );
+
+        // Invalidate all sibling nonces for this skill
+        this.db.run(
+          'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE skill_id = ? AND consumed = 0',
+          now,
+          row.skill_id,
+        );
+        log.info({ skillId: row.skill_id }, 'Skill confirmation denied, all nonces invalidated');
+      }
+
+      // 8. Clean expired nonces opportunistically
+      this.db.run(
+        'DELETE FROM confirmation_nonces WHERE skill_id = ? AND expires_at < ? AND consumed = 0',
+        row.skill_id,
+        now,
+      );
+
+      // 9. Return success with token info
+      const token: ConfirmationToken = {
+        nonce: row.nonce,
+        skillId: row.skill_id,
+        paramsHash: row.params_hash,
+        tier: row.tier,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+        consumed: true,
+      };
+
+      return { valid: true, token };
+    });
+  }
+
+  /**
    * Consume a token and optionally approve the skill globally.
+   * Delegates to verifyAndConsume() for atomic operation.
+   * @deprecated Use verifyAndConsume directly
    */
   consumeToken(tokenId: string, approve: boolean, approvedBy?: string): void {
+    this.verifyAndConsume(tokenId, approve, approvedBy);
+  }
+
+  /**
+   * Revoke a previously-approved skill confirmation.
+   * Deletes the approval record and invalidates all outstanding nonces.
+   */
+  revokeApproval(skillId: string): void {
     const now = Date.now();
 
-    // Mark nonce as consumed
+    // Remove from skill_confirmations
     this.db.run(
-      'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE nonce = ?',
+      'DELETE FROM skill_confirmations WHERE skill_id = ?',
+      skillId,
+    );
+
+    // Invalidate all outstanding nonces for this skill
+    this.db.run(
+      'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE skill_id = ? AND consumed = 0',
       now,
-      tokenId,
+      skillId,
     );
 
-    // Look up the skill_id from the nonce
-    const row = this.db.get<{ skill_id: string }>(
-      'SELECT skill_id FROM confirmation_nonces WHERE nonce = ?',
-      tokenId,
-    );
-
-    if (!row) return;
-
-    if (approve) {
-      // Upsert into skill_confirmations for global unlock
-      this.db.run(
-        `INSERT INTO skill_confirmations (skill_id, confirmation_status, approved_by, approved_at)
-         VALUES (?, 'approved', ?, ?)
-         ON CONFLICT(skill_id) DO UPDATE SET
-           confirmation_status = 'approved',
-           approved_by = excluded.approved_by,
-           approved_at = excluded.approved_at`,
-        row.skill_id,
-        approvedBy ?? 'mcp-client',
-        now,
-      );
-
-      log.info({ skillId: row.skill_id }, 'Skill globally confirmed (approved)');
-    } else {
-      // Record denial
-      this.db.run(
-        `INSERT INTO skill_confirmations (skill_id, confirmation_status, denied_at)
-         VALUES (?, 'denied', ?)
-         ON CONFLICT(skill_id) DO UPDATE SET
-           confirmation_status = 'denied',
-           denied_at = excluded.denied_at`,
-        row.skill_id,
-        now,
-      );
-
-      // Invalidate all outstanding nonces for this skill
-      this.db.run(
-        'UPDATE confirmation_nonces SET consumed = 1, consumed_at = ? WHERE skill_id = ? AND consumed = 0',
-        now,
-        row.skill_id,
-      );
-
-      log.info({ skillId: row.skill_id }, 'Skill confirmation denied, all nonces invalidated');
-    }
+    log.info({ skillId }, 'Skill approval revoked, all nonces invalidated');
   }
 }

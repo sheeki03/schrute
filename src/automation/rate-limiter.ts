@@ -1,4 +1,6 @@
 import { getLogger } from '../core/logger.js';
+import { BoundedMap } from '../shared/bounded-map.js';
+import type { AgentDatabase } from '../storage/database.js';
 
 const log = getLogger();
 
@@ -8,10 +10,11 @@ const MAX_BACKOFF_MULTIPLIER = 60;
 const LOW_REMAINING_THRESHOLD = 2;
 const INITIAL_BACKOFF_MULTIPLIER = 1;
 const BURST_CAPACITY_MULTIPLIER = 2;
+const DEFAULT_CALLER_FRACTION = 0.25;
 
 // ─── Types ────────────────────────────────────────────────────────
 
-export interface RateCheckResult {
+interface RateCheckResult {
   allowed: boolean;
   retryAfterMs?: number;
 }
@@ -23,27 +26,85 @@ interface SiteBucket {
   lastRefill: number;
   backoffUntil: number;
   backoffMultiplier: number;
+  latencyEwa: number;
+  latencyThresholdMs: number;
 }
 
 // ─── Rate Limiter ──────────────────────────────────────────────
 
 export class RateLimiter {
-  private buckets = new Map<string, SiteBucket>();
+  // Global per-site buckets (protects upstream API).
+  // No TTL — buckets are mutated in place via get(), and TTL is based on insertedAt
+  // which is never refreshed. LRU eviction via maxSize is sufficient.
+  private siteBuckets = new BoundedMap<string, SiteBucket>({ maxSize: 5000 });
+  // Per-caller sub-buckets (ensures fairness, keyed by siteId::callerId)
+  private callerBuckets = new BoundedMap<string, SiteBucket>({ maxSize: 10000 });
   private defaultQps: number;
+  private callerFraction: number;
+  private db?: AgentDatabase;
 
-  constructor(defaultQps = 1.0) {
+  constructor(defaultQps = 1.0, callerFraction = DEFAULT_CALLER_FRACTION) {
     this.defaultQps = defaultQps;
+    this.callerFraction = callerFraction;
   }
 
-  checkRate(siteId: string): RateCheckResult {
-    const bucket = this.getOrCreateBucket(siteId);
-    this.refillTokens(bucket);
+  /** Attach a database for backoff persistence across restarts. */
+  attachDatabase(db: AgentDatabase): void {
+    this.db = db;
+    this.loadBackoffs();
+  }
+
+  /** Persist active backoff windows to DB. */
+  persistBackoffs(): void {
+    if (!this.db) return;
+    const now = Date.now();
+    for (const [siteId, bucket] of this.siteBuckets.entries()) {
+      if (bucket.backoffUntil > now) {
+        this.db.run(
+          'INSERT OR REPLACE INTO rate_limit_backoffs (site_id, backoff_until, multiplier) VALUES (?, ?, ?)',
+          siteId, bucket.backoffUntil, bucket.backoffMultiplier,
+        );
+      } else {
+        // Clean up expired backoffs
+        this.db.run('DELETE FROM rate_limit_backoffs WHERE site_id = ?', siteId);
+      }
+    }
+  }
+
+  /** Load persisted backoffs on startup. */
+  private loadBackoffs(): void {
+    if (!this.db) return;
+    try {
+      const rows = this.db.all<{ site_id: string; backoff_until: number; multiplier: number }>(
+        'SELECT site_id, backoff_until, multiplier FROM rate_limit_backoffs WHERE backoff_until > ?',
+        Date.now(),
+      );
+      for (const row of rows) {
+        const bucket = this.getOrCreateSiteBucket(row.site_id);
+        bucket.backoffUntil = row.backoff_until;
+        bucket.backoffMultiplier = row.multiplier;
+      }
+      log.info({ count: rows.length }, 'Loaded persisted rate limit backoffs');
+    } catch (err) {
+      log.warn({ err }, 'Failed to load rate limit backoffs (table may not exist yet)');
+    }
+  }
+
+  /**
+   * Two-tier rate check:
+   * 1. Global site bucket — protects upstream API (shared across all callers)
+   * 2. Per-caller sub-bucket — ensures fairness (one caller can't exhaust the budget)
+   */
+  checkRate(siteId: string, callerId?: string): RateCheckResult {
+    // 1. Check global site bucket first — protects upstream
+    const siteBucket = this.getOrCreateSiteBucket(siteId);
+    this.refillTokens(siteBucket);
 
     const now = Date.now();
 
-    // Check backoff
-    if (now < bucket.backoffUntil) {
-      const retryAfterMs = bucket.backoffUntil - now;
+    // Check site-level backoff
+    if (now < siteBucket.backoffUntil) {
+      const retryAfterMs = siteBucket.backoffUntil - now;
       log.debug(
         { siteId, retryAfterMs },
         'Rate limited: in backoff period',
@@ -51,18 +112,46 @@ export class RateLimiter {
       return { allowed: false, retryAfterMs };
     }
 
-    // Check token bucket
-    if (bucket.tokens < 1) {
-      const retryAfterMs = Math.ceil((1 - bucket.tokens) / bucket.refillRate * 1000);
+    // Check site-level tokens
+    if (siteBucket.tokens < 1) {
+      const retryAfterMs = Math.ceil((1 - siteBucket.tokens) / siteBucket.refillRate * 1000);
       log.debug(
-        { siteId, tokens: bucket.tokens, retryAfterMs },
+        { siteId, tokens: siteBucket.tokens, retryAfterMs },
         'Rate limited: insufficient tokens',
       );
       return { allowed: false, retryAfterMs };
     }
 
-    // Consume token
-    bucket.tokens -= 1;
+    // 2. If callerId provided, also check per-caller sub-bucket
+    if (callerId) {
+      const callerKey = `${siteId}::${callerId}`;
+      const callerBucket = this.getOrCreateCallerBucket(callerKey, siteBucket);
+      this.refillTokens(callerBucket);
+
+      if (now < callerBucket.backoffUntil) {
+        const retryAfterMs = callerBucket.backoffUntil - now;
+        log.debug(
+          { siteId, callerId, retryAfterMs },
+          'Rate limited: caller in backoff period',
+        );
+        return { allowed: false, retryAfterMs };
+      }
+
+      if (callerBucket.tokens < 1) {
+        const retryAfterMs = Math.ceil((1 - callerBucket.tokens) / callerBucket.refillRate * 1000);
+        log.debug(
+          { siteId, callerId, tokens: callerBucket.tokens, retryAfterMs },
+          'Rate limited: caller insufficient tokens',
+        );
+        return { allowed: false, retryAfterMs };
+      }
+
+      // Consume from caller bucket
+      callerBucket.tokens -= 1;
+    }
+
+    // 3. Consume from global bucket
+    siteBucket.tokens -= 1;
     return { allowed: true };
   }
 
@@ -70,9 +159,13 @@ export class RateLimiter {
     siteId: string,
     status: number,
     headers: Record<string, string>,
+    latencyMs?: number,
+    callerId?: string,
   ): void {
-    const bucket = this.getOrCreateBucket(siteId);
+    const bucket = this.getOrCreateSiteBucket(siteId);
     const now = Date.now();
+    const prevMaxTokens = bucket.maxTokens;
+    const prevRefillRate = bucket.refillRate;
 
     if (status === 429) {
       // Exponential backoff on 429
@@ -87,6 +180,14 @@ export class RateLimiter {
         { siteId, backoffMs, multiplier: bucket.backoffMultiplier },
         'Rate limited (429): backing off',
       );
+
+      // Propagate backoff to caller sub-bucket
+      if (callerId) {
+        const callerKey = `${siteId}::${callerId}`;
+        const callerBucket = this.getOrCreateCallerBucket(callerKey, bucket);
+        callerBucket.backoffUntil = bucket.backoffUntil;
+        callerBucket.tokens = 0;
+      }
       return;
     }
 
@@ -122,18 +223,52 @@ export class RateLimiter {
         );
       }
     }
+
+    // Latency-based AIMD: adjust refill rate based on exponentially weighted average latency
+    if (latencyMs != null && status >= 200 && status < 300) {
+      bucket.latencyEwa = bucket.latencyEwa === 0
+        ? latencyMs
+        : 0.2 * latencyMs + 0.8 * bucket.latencyEwa;
+      if (bucket.latencyEwa > bucket.latencyThresholdMs) {
+        bucket.refillRate = Math.max(bucket.refillRate * 0.8, 0.1);
+      } else if (bucket.latencyEwa < bucket.latencyThresholdMs * 0.5) {
+        bucket.refillRate = Math.min(bucket.refillRate + 0.1, bucket.maxTokens);
+      }
+    }
+
+    // Re-calibrate ALL caller buckets for this site only when limits actually changed.
+    if (bucket.maxTokens !== prevMaxTokens || bucket.refillRate !== prevRefillRate) {
+      this.recalibrateCallerBuckets(siteId, bucket);
+    }
+  }
+
+  /**
+   * Re-calibrate all per-caller sub-buckets for a site when site limits change.
+   * Prevents fairness drift where some callers keep stale larger sub-buckets.
+   */
+  private recalibrateCallerBuckets(siteId: string, siteBucket: SiteBucket): void {
+    const prefix = `${siteId}::`;
+    for (const key of this.callerBuckets.keys()) {
+      if (key.startsWith(prefix)) {
+        const callerBucket = this.callerBuckets.get(key);
+        if (callerBucket) {
+          callerBucket.maxTokens = Math.max(1, Math.floor(siteBucket.maxTokens * this.callerFraction));
+          callerBucket.refillRate = Math.max(0.1, siteBucket.refillRate * this.callerFraction);
+        }
+      }
+    }
   }
 
   setQps(siteId: string, qps: number): void {
-    const bucket = this.getOrCreateBucket(siteId);
+    const bucket = this.getOrCreateSiteBucket(siteId);
     bucket.refillRate = qps;
     bucket.maxTokens = Math.max(Math.ceil(qps * BURST_CAPACITY_MULTIPLIER), 1);
   }
 
   // ─── Internal ───────────────────────────────────────────────────
 
-  private getOrCreateBucket(siteId: string): SiteBucket {
-    let bucket = this.buckets.get(siteId);
+  private getOrCreateSiteBucket(siteId: string): SiteBucket {
+    let bucket = this.siteBuckets.get(siteId);
     if (!bucket) {
       bucket = {
         tokens: Math.max(Math.ceil(this.defaultQps * BURST_CAPACITY_MULTIPLIER), 1),
@@ -142,8 +277,29 @@ export class RateLimiter {
         lastRefill: Date.now(),
         backoffUntil: 0,
         backoffMultiplier: INITIAL_BACKOFF_MULTIPLIER,
+        latencyEwa: 0,
+        latencyThresholdMs: 2000,
       };
-      this.buckets.set(siteId, bucket);
+      this.siteBuckets.set(siteId, bucket);
+    }
+    return bucket;
+  }
+
+  private getOrCreateCallerBucket(callerKey: string, siteBucket: SiteBucket): SiteBucket {
+    let bucket = this.callerBuckets.get(callerKey);
+    if (!bucket) {
+      const maxTokens = Math.max(1, Math.floor(siteBucket.maxTokens * this.callerFraction));
+      bucket = {
+        tokens: maxTokens,
+        maxTokens,
+        refillRate: Math.max(0.1, siteBucket.refillRate * this.callerFraction),
+        lastRefill: Date.now(),
+        backoffUntil: 0,
+        backoffMultiplier: INITIAL_BACKOFF_MULTIPLIER,
+        latencyEwa: 0,
+        latencyThresholdMs: 2000,
+      };
+      this.callerBuckets.set(callerKey, bucket);
     }
     return bucket;
   }

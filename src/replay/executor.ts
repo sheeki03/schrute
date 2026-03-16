@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import * as https from 'node:https';
+import * as http from 'node:http';
 import { getLogger } from '../core/logger.js';
 import { withTimeout } from '../core/utils.js';
 import { getEffectiveTier } from '../core/tiering.js';
@@ -12,15 +14,12 @@ import type {
   SealedFetchResponse,
   BrowserProvider,
   CapabilityName,
-  AuditEntry,
   PolicyDecision,
 } from '../skill/types.js';
 import {
   ExecutionTier,
   FailureCause,
-  FAILURE_CAUSE_PRECEDENCE,
   Capability,
-  TierState,
 } from '../skill/types.js';
 import { buildRequest, extractDomain } from './request-builder.js';
 import { redactString } from '../storage/redactor.js';
@@ -55,6 +54,7 @@ export interface ExecutionResult {
   schemaMatch: boolean;
   semanticPass: boolean;
   failureCause?: FailureCauseName;
+  failureDetail?: string;
   auditIncomplete?: boolean;
 }
 
@@ -71,7 +71,9 @@ export interface ExecutorOptions {
   forceTier?: ExecutionTierName;
   timeoutMs?: number;
   /** Config for policy scoping — avoids falling back to global singleton */
-  config?: import('../skill/types.js').OneAgentConfig;
+  config?: import('../skill/types.js').SchruteConfig;
+  /** Lazy browser provider factory — creates provider on demand */
+  browserProviderFactory?: () => Promise<BrowserProvider | undefined>;
 }
 
 // ─── Execute Skill ──────────────────────────────────────────────
@@ -113,7 +115,7 @@ export async function executeSkill(
     });
     if (!budgetCheck.allowed) {
       log.warn({ skillId: skill.id, reason: budgetCheck.reason }, 'Budget check failed');
-      return failureResult(startTime, startingTier, FailureCause.UNKNOWN);
+      return failureResult(startTime, startingTier, FailureCause.BUDGET_DENIED, `Budget exceeded for skill '${skill.id}': ${budgetCheck.reason}`);
     }
     options.budgetTracker.recordCall(skill.id, skill.siteId);
   }
@@ -230,7 +232,7 @@ async function executeTier(
   const capCheck = checkCapability(skill.siteId, tierToCapability(tier), options?.config);
   if (!capCheck.allowed) {
     log.warn({ skillId: skill.id, tier, rule: capCheck.rule }, 'Capability not allowed');
-    return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+    return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Capability '${tierToCapability(tier)}' is not enabled for site '${skill.siteId}'`);
   }
 
   // 1b. Domain allowlist check
@@ -240,7 +242,7 @@ async function executeTier(
     if (!allowlist.explicit && allowlist.domains.length === 0) {
       log.warn({ skillId: skill.id, rule: 'domain.implicit_empty_after_sanitize' },
         'Implicit allowlist empty after sanitization — blocking');
-      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Domain allowlist empty after sanitization for skill '${skill.id}'`);
     }
     if (!allowlist.explicit && options?.policyDecision) {
       options.policyDecision.derivedAllowlist = allowlist.domains;
@@ -249,12 +251,12 @@ async function executeTier(
       const domainCheck = enforceDomainAllowlist(skill.siteId, requestDomain, options?.config);
       if (!domainCheck.allowed) {
         log.warn({ skillId: skill.id, domain: requestDomain, rule: domainCheck.rule }, 'Domain not allowlisted');
-        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Domain '${requestDomain}' is not in the site policy allowlist for '${skill.siteId}'`);
       }
     } else if (!matchesDomainAllowlist(requestDomain, allowlist.domains)) {
       log.warn({ skillId: skill.id, domain: requestDomain, rule: 'domain.implicit_skill_allowlist' },
         'Domain not in skill allowlist (no explicit policy)');
-      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Domain '${requestDomain}' is not in the skill allowlist for '${skill.siteId}'`);
     }
   }
 
@@ -268,7 +270,7 @@ async function executeTier(
     const ipCheck = await resolveAndValidate(requestDomain);
     if (!ipCheck.allowed) {
       log.warn({ skillId: skill.id, domain: requestDomain, ip: ipCheck.ip, category: ipCheck.category }, 'Private IP blocked');
-      return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+      return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Domain '${requestDomain}' resolves to private IP ${ipCheck.ip} (SSRF protection)`);
     }
     resolvedIp = ipCheck.ip;
   }
@@ -278,18 +280,25 @@ async function executeTier(
     ? options.budgetTracker.getMaxResponseBytes()
     : (options?.config ?? getConfig()).payloadLimits.maxResponseBodyBytes;
 
+  // Resolve browser provider once — used for both initial fetch and redirect following
+  let resolvedBrowserProvider = options?.browserProvider;
+  if (!resolvedBrowserProvider && options?.browserProviderFactory &&
+      (tier === ExecutionTier.BROWSER_PROXIED || tier === ExecutionTier.FULL_BROWSER)) {
+    resolvedBrowserProvider = await options.browserProviderFactory();
+  }
+
   let response: SealedFetchResponse;
   try {
     if (tier === ExecutionTier.BROWSER_PROXIED || tier === ExecutionTier.FULL_BROWSER) {
-      if (!options?.browserProvider) {
+      if (!resolvedBrowserProvider) {
         if (tier === ExecutionTier.BROWSER_PROXIED) {
           log.warn({ skillId: skill.id, tier }, 'browser_proxied tier requested but no browser provider available');
         }
-        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `No browser session available for site '${skill.siteId}'. Start one with schrute_explore.`);
       }
       const fetchPromise = tier === ExecutionTier.FULL_BROWSER
-        ? fullBrowserExecution(skill, options.browserProvider)
-        : options.browserProvider.evaluateFetch(request);
+        ? fullBrowserExecution(skill, resolvedBrowserProvider)
+        : resolvedBrowserProvider.evaluateFetch(request);
       response = await withTimeout(fetchPromise, timeoutMs);
 
     // Post-fetch DNS re-check for browser-proxied tier (defense-in-depth).
@@ -299,12 +308,16 @@ async function executeTier(
       if (!postCheck.allowed) {
         log.warn({ skillId: skill.id, domain: requestDomain, ip: postCheck.ip },
           'DNS rebinding detected — domain resolved to private IP after browser fetch');
-        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `DNS rebinding detected: '${requestDomain}' resolved to private IP after fetch`);
       }
     }
     } else {
-      // ExecutionTier.DIRECT or unknown — use direct fetch
-      response = await withTimeout(directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp), timeoutMs);
+      // ExecutionTier.DIRECT or unknown — use direct fetch.
+      // Both paths handle their own timeout cancellation:
+      // - Pinned IP: socket-level timeout via req.setTimeout() destroys the request
+      // - Non-pinned: AbortController.abort() tears down the fetch connection
+      // No outer withTimeout needed — avoids leaked I/O from promise races.
+      response = await directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp, timeoutMs);
     }
   } catch (err) {
     const latencyMs = Date.now() - startTime;
@@ -319,7 +332,7 @@ async function executeTier(
       latencyMs,
       schemaMatch: false,
       semanticPass: false,
-      failureCause: FailureCause.UNKNOWN,
+      failureCause: FailureCause.FETCH_ERROR,
     };
   }
 
@@ -378,33 +391,34 @@ async function executeTier(
         if (!redirectCheck.allowed) {
           log.warn({ skillId: skill.id, location: resolvedUrl, rule: redirectCheck.rule },
             'Redirect to disallowed domain blocked');
-          return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+          return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Redirect to '${resolvedUrl}' blocked by policy rule '${redirectCheck.rule}' for '${skill.siteId}'`);
         }
       } else if (!matchesDomainAllowlist(redirectDomain, allowlist.domains)) {
         log.warn({ skillId: skill.id, location: resolvedUrl, rule: 'redirect.implicit_skill_allowlist' },
           'Redirect to domain not in skill allowlist');
-        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Redirect to domain '${redirectDomain}' not in skill allowlist [${allowlist.domains.join(', ')}]`);
       }
 
       // IP check — also pin the resolved IP for the redirect fetch
       const ipCheck = await resolveAndValidate(redirectDomain);
       if (!ipCheck.allowed) {
         log.warn({ skillId: skill.id, domain: redirectDomain, ip: ipCheck.ip }, 'Redirect to private IP blocked');
-        return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+        return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Redirect target '${redirectDomain}' resolves to private IP ${ipCheck.ip} (SSRF protection)`);
       }
       resolvedIp = ipCheck.ip;
     }
 
     let redirectResp: SealedFetchResponse;
-    if ((tier === ExecutionTier.BROWSER_PROXIED) && options?.browserProvider) {
+    if ((tier === ExecutionTier.BROWSER_PROXIED) && resolvedBrowserProvider) {
       // Follow redirect through browser context (preserves cookies, TLS, CORS)
-      redirectResp = await options.browserProvider.evaluateFetch({ ...request, url: resolvedUrl });
+      redirectResp = await withTimeout(resolvedBrowserProvider.evaluateFetch({ ...request, url: resolvedUrl }), timeoutMs);
     } else {
       redirectResp = await directFetch(
         { ...request, url: resolvedUrl },
         maxResponseBytes,
         options?.fetchFn,
         resolvedIp,
+        timeoutMs,
       );
     }
     finalResponse = redirectResp;
@@ -422,7 +436,7 @@ async function executeTier(
   ) {
     log.warn({ skillId: skill.id, tier, status: finalResponse.status },
       'Browser-proxied fetch returned redirect without readable Location header — failing closed');
-    return failureResult(startTime, tier, FailureCause.POLICY_DENIED);
+    return failureResult(startTime, tier, FailureCause.POLICY_DENIED, `Browser-proxied response returned status ${finalResponse.status} without Location header for '${skill.siteId}'`);
   }
   } // end if (tier !== ExecutionTier.FULL_BROWSER)
 
@@ -515,7 +529,8 @@ async function classifyFailure(
   if (tier === ExecutionTier.DIRECT && options?.browserProvider) {
     try {
       const tier3Request = buildRequest(skill, params, ExecutionTier.BROWSER_PROXIED);
-      const tier3Response = await options.browserProvider.evaluateFetch(tier3Request);
+      const comparisonTimeout = options?.timeoutMs ?? 30000;
+      const tier3Response = await withTimeout(options.browserProvider.evaluateFetch(tier3Request), comparisonTimeout);
       const tier3Parsed = parseResponse(
         { status: tier3Response.status, headers: tier3Response.headers, body: tier3Response.body },
         skill,
@@ -566,77 +581,187 @@ async function directFetch(
   maxResponseBytes: number,
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>,
   pinnedIp?: string,
+  timeoutMs?: number,
 ): Promise<SealedFetchResponse> {
   if (fetchFn) {
+    // Injected fetch functions (e.g. test mocks) still need a timeout guard
+    // since the caller no longer wraps directFetch in withTimeout.
+    if (timeoutMs) {
+      return withTimeout(fetchFn(request), timeoutMs);
+    }
     return fetchFn(request);
   }
 
-  // CR-01: Pin to the resolved IP to prevent DNS rebinding TOCTOU attacks.
-  // Replace the hostname in the URL with the resolved IP, and set the Host
-  // header to the original hostname for correct routing and TLS SNI.
-  let fetchUrl = request.url;
-  const fetchHeaders = { ...request.headers };
+  // CR-01 + WS-1: When pinnedIp is set, use node:https/node:http directly.
+  // This allows setting `servername` for correct TLS SNI while connecting to
+  // the validated IP (preventing DNS rebinding TOCTOU attacks).
+  // Using fetch() with an IP-rewritten URL breaks TLS because undici derives
+  // SNI from the URL hostname, not the Host header.
   if (pinnedIp) {
-    try {
-      const parsed = new URL(request.url);
-      const originalHost = parsed.host; // includes port if non-default
-      // For IPv6 addresses, wrap in brackets
-      const ipForUrl = pinnedIp.includes(':') ? `[${pinnedIp}]` : pinnedIp;
-      parsed.hostname = ipForUrl;
-      fetchUrl = parsed.toString();
-      // Set Host header so the server routes correctly
-      if (!fetchHeaders['Host'] && !fetchHeaders['host']) {
-        fetchHeaders['Host'] = originalHost;
-      }
-    } catch (err) {
-      log.warn({ url: request.url, pinnedIp, err }, 'Failed to pin IP in URL — falling back to original hostname');
-    }
+    return pinnedIpFetch(request, pinnedIp, maxResponseBytes, timeoutMs);
   }
 
-  const response = await fetch(fetchUrl, {
-    method: request.method,
-    headers: fetchHeaders,
-    body: request.body,
-    redirect: 'manual',  // never auto-follow redirects
-  });
+  // No pinned IP — use standard fetch() with redirect: 'manual'.
+  // AbortSignal ensures the underlying connection is torn down on timeout
+  // (without it, withTimeout races the promise but the fetch keeps running).
+  const abortController = new AbortController();
+  const abortTimeout = timeoutMs
+    ? setTimeout(() => abortController.abort(), timeoutMs)
+    : undefined;
 
-  const headers: Record<string, string> = {};
-  response.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
+  let response: Response;
+  try {
+    response = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: 'manual',  // never auto-follow redirects
+      signal: abortController.signal,
+    });
+  } catch (err) {
+    if (abortTimeout) clearTimeout(abortTimeout);
+    throw err;
+  }
 
-  // Read response body incrementally with size cap to prevent memory exhaustion.
-  // If the body exceeds maxResponseBytes, abort reading and throw.
-  let body: string;
-  if (response.body) {
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let totalBytes = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        totalBytes += value.byteLength;
+  try {
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    // Read response body incrementally with size cap to prevent memory exhaustion.
+    // If the body exceeds maxResponseBytes, abort reading and throw.
+    let body: string;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > maxResponseBytes) {
+            reader.cancel();
+            throw new Error(
+              `Response body exceeded maxResponseBodyBytes (${maxResponseBytes}). ` +
+              `Read ${totalBytes} bytes before aborting.`,
+            );
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const decoder = new TextDecoder();
+      body = chunks.map((c) => decoder.decode(c, { stream: true })).join('') +
+        decoder.decode();
+    } else {
+      body = await response.text();
+    }
+
+    return { status: response.status, headers, body };
+  } finally {
+    if (abortTimeout) clearTimeout(abortTimeout);
+  }
+}
+
+/**
+ * WS-1: Fetch using node:https/node:http with pinned IP and correct TLS SNI.
+ *
+ * Connects to `pinnedIp` (the pre-validated IP) while setting `servername`
+ * to the original hostname so TLS certificate validation succeeds.
+ * This fixes the cert mismatch that occurred when fetch() was given an
+ * IP-rewritten URL (undici derives SNI from the URL hostname, ignoring Host).
+ */
+function pinnedIpFetch(
+  request: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
+  pinnedIp: string,
+  maxResponseBytes: number,
+  timeoutMs?: number,
+): Promise<SealedFetchResponse> {
+  return new Promise<SealedFetchResponse>((resolve, reject) => {
+    const parsed = new URL(request.url);
+    const isHttps = parsed.protocol === 'https:';
+    const originalHost = parsed.hostname;
+    const port = parsed.port
+      ? Number(parsed.port)
+      : (isHttps ? 443 : 80);
+    const path = parsed.pathname + parsed.search;
+
+    const reqHeaders: Record<string, string> = { ...request.headers };
+    // Ensure Host header is set for correct virtual-host routing
+    if (!reqHeaders['Host'] && !reqHeaders['host']) {
+      reqHeaders['Host'] = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+    }
+
+    const baseOptions: http.RequestOptions = {
+      hostname: pinnedIp,
+      port,
+      path,
+      method: request.method,
+      headers: reqHeaders,
+    };
+
+    // For HTTPS: set servername for correct TLS SNI and cert validation.
+    // For IPv6 pinned IPs, hostname already works (node handles brackets internally).
+    const options = isHttps
+      ? { ...baseOptions, servername: originalHost, rejectUnauthorized: true } as https.RequestOptions
+      : baseOptions;
+
+    const transport = isHttps ? https : http;
+    const effectiveTimeout = timeoutMs ?? 30_000;
+
+    const req = transport.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      let aborted = false;
+
+      res.on('data', (chunk: Buffer) => {
+        if (aborted) return;
+        totalBytes += chunk.length;
         if (totalBytes > maxResponseBytes) {
-          reader.cancel();
-          throw new Error(
+          aborted = true;
+          res.destroy();
+          reject(new Error(
             `Response body exceeded maxResponseBodyBytes (${maxResponseBytes}). ` +
             `Read ${totalBytes} bytes before aborting.`,
-          );
+          ));
+          return;
         }
-        chunks.push(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    const decoder = new TextDecoder();
-    body = chunks.map((c) => decoder.decode(c, { stream: true })).join('') +
-      decoder.decode();
-  } else {
-    body = await response.text();
-  }
+        chunks.push(chunk);
+      });
 
-  return { status: response.status, headers, body };
+      res.on('end', () => {
+        if (aborted) return;
+        const headers: Record<string, string> = {};
+        if (res.headers) {
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (value != null) {
+              headers[key] = Array.isArray(value) ? value.join(', ') : value;
+            }
+          }
+        }
+        const body = Buffer.concat(chunks).toString('utf-8');
+        resolve({ status: res.statusCode ?? 0, headers, body });
+      });
+
+      res.on('error', (err) => {
+        if (!aborted) reject(err);
+      });
+    });
+
+    req.setTimeout(effectiveTimeout, () => {
+      req.destroy(new Error(`Request timed out after ${effectiveTimeout}ms`));
+    });
+
+    req.on('error', (err) => reject(err));
+
+    if (request.body) {
+      req.write(request.body);
+    }
+    req.end();
+  });
 }
 
 async function fullBrowserExecution(
@@ -707,7 +832,7 @@ function tierToCapability(tier: ExecutionTierName): CapabilityName {
  */
 function getEffectiveAllowlist(
   skill: SkillSpec,
-  config?: import('../skill/types.js').OneAgentConfig,
+  config?: import('../skill/types.js').SchruteConfig,
 ): { explicit: boolean; domains: string[] } {
   const policy = getSitePolicy(skill.siteId, config);
   if (policy.domainAllowlist.length > 0) {
@@ -717,7 +842,7 @@ function getEffectiveAllowlist(
   return { explicit: false, domains: sanitizeImplicitAllowlist(rawDomains) };
 }
 
-function failureResult(startTime: number, tier: ExecutionTierName, cause: FailureCauseName): ExecutionResult {
+function failureResult(startTime: number, tier: ExecutionTierName, cause: FailureCauseName, detail?: string): ExecutionResult {
   return {
     success: false,
     tier,
@@ -729,6 +854,7 @@ function failureResult(startTime: number, tier: ExecutionTierName, cause: Failur
     schemaMatch: false,
     semanticPass: false,
     failureCause: cause,
+    failureDetail: detail,
   };
 }
 

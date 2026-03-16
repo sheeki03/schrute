@@ -15,7 +15,6 @@
  *     Output: normalized domain string
  */
 
-import type { IpValidationResult } from '../core/policy.js';
 import { isPublicIp as tsIsPublicIp } from '../core/policy.js';
 import { getNativeModule } from './index.js';
 import { getLogger } from '../core/logger.js';

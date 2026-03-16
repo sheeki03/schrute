@@ -20,12 +20,8 @@ export function createLogger(level: string): pino.Logger {
     transport: process.env.NODE_ENV !== 'production'
       ? { target: 'pino-pretty', options: { colorize: true, destination: 2 } }
       : undefined,
-    base: { service: 'oneagent' },
+    base: { service: 'schrute' },
     timestamp: pino.stdTimeFunctions.isoTime,
   }, process.env.NODE_ENV === 'production' ? destination : undefined);
   return logger;
-}
-
-export function setLogLevel(level: string): void {
-  getLogger().level = level;
 }

@@ -1,19 +1,19 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import { getLogger } from '../core/logger.js';
 import { retrieve, store } from '../storage/secrets.js';
-import type { AuditEntry, PolicyDecision, OneAgentConfig } from '../skill/types.js';
+import type { AuditEntry, PolicyDecision, SchruteConfig } from '../skill/types.js';
 import { AuditEntrySchema } from '../skill/types.js';
 
 const log = getLogger();
 
-const AUDIT_HMAC_KEY_NAME = 'oneagent-audit-hmac-key';
+const AUDIT_HMAC_KEY_NAME = 'schrute-audit-hmac-key';
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export interface AuditWriteError {
+interface AuditWriteError {
   type: 'audit_write_error';
   message: string;
   entry: Partial<AuditEntry>;
@@ -36,12 +36,12 @@ export class AuditLog {
   private lastHash: string = '';
   private entryCount: number = 0;
 
-  constructor(config: OneAgentConfig) {
+  constructor(config: SchruteConfig) {
     this.auditFilePath = join(config.dataDir, 'audit', 'audit.jsonl');
     this.rootHashDir = join(config.dataDir, 'audit', 'roots');
     this.strictMode = config.audit.strictMode;
-    // Fallback key: stronger derivation using dataDir + hostname; replaced by keychain key after initHmacKey()
-    this.hmacKey = createHash('sha256').update(`oneagent-audit:${config.dataDir}:${hostname()}`).digest('hex');
+    // Fallback key: Deterministic fallback derivation using dataDir + hostname; replaced by keychain key after initHmacKey()
+    this.hmacKey = createHash('sha256').update(`schrute-audit:${config.dataDir}:${hostname()}`).digest('hex');
 
     this.ensureDirs();
     this.loadLastHash();
@@ -50,7 +50,7 @@ export class AuditLog {
   /**
    * Initialise the HMAC key from the OS keychain.
    * Must be called after construction (async).
-   *  1. Try to retrieve 'oneagent-audit-hmac-key' from keychain.
+   *  1. Try to retrieve 'schrute-audit-hmac-key' from keychain.
    *  2. If not found, generate a random 32-byte key and store it.
    *  3. If the keychain is locked / unavailable, keep the derived fallback key and log a warning.
    */
@@ -274,10 +274,10 @@ export class AuditLog {
   private ensureDirs(): void {
     const auditDir = dirname(this.auditFilePath);
     if (!existsSync(auditDir)) {
-      mkdirSync(auditDir, { recursive: true });
+      mkdirSync(auditDir, { recursive: true, mode: 0o700 });
     }
     if (!existsSync(this.rootHashDir)) {
-      mkdirSync(this.rootHashDir, { recursive: true });
+      mkdirSync(this.rootHashDir, { recursive: true, mode: 0o700 });
     }
   }
 
@@ -288,20 +288,37 @@ export class AuditLog {
       return;
     }
 
-    const content = readFileSync(this.auditFilePath, 'utf-8').trim();
-    if (!content) {
-      this.lastHash = '';
-      this.entryCount = 0;
-      return;
-    }
-
-    const lines = content.split('\n');
-    this.entryCount = lines.length;
-
-    const lastLine = lines[lines.length - 1];
+    const fd = openSync(this.auditFilePath, 'r');
     try {
-      const entry = JSON.parse(lastLine) as AuditEntry;
-      this.lastHash = entry.entryHash;
+      const stat = fstatSync(fd);
+      if (stat.size === 0) {
+        this.lastHash = '';
+        this.entryCount = 0;
+        return;
+      }
+
+      // 1. Read last line by scanning backward in growing chunks
+      let tail = '';
+      let chunkSize = 4096;
+      let position = stat.size;
+      while (position > 0) {
+        const readSize = Math.min(chunkSize, position);
+        position -= readSize;
+        const buf = Buffer.alloc(readSize);
+        readSync(fd, buf, 0, readSize, position);
+        tail = buf.toString('utf-8') + tail;
+        const lines = tail.trim().split('\n');
+        if (lines.length >= 2 || position === 0) {
+          const lastLine = lines[lines.length - 1];
+          const entry = JSON.parse(lastLine) as AuditEntry;
+          this.lastHash = entry.entryHash;
+          break;
+        }
+        chunkSize *= 2;
+      }
+
+      // 2. Count lines by streaming
+      this.entryCount = this.countLinesStreaming(fd, stat.size);
     } catch (err) {
       if (this.strictMode) {
         throw new Error(
@@ -309,11 +326,29 @@ export class AuditLog {
         );
       }
       log.error(
-        { err, line: lastLine, entryCount: this.entryCount },
+        { err, entryCount: this.entryCount },
         'Audit log last entry corrupted — starting fresh hash chain. Chain continuity is broken.',
       );
       this.lastHash = '';
+    } finally {
+      closeSync(fd);
     }
+  }
+
+  private countLinesStreaming(fd: number, fileSize: number): number {
+    const CHUNK = 65536;
+    let count = 0;
+    let position = 0;
+    const buf = Buffer.alloc(CHUNK);
+    while (position < fileSize) {
+      const readSize = Math.min(CHUNK, fileSize - position);
+      readSync(fd, buf, 0, readSize, position);
+      for (let i = 0; i < readSize; i++) {
+        if (buf[i] === 0x0A) count++;
+      }
+      position += readSize;
+    }
+    return count || 1;
   }
 }
 

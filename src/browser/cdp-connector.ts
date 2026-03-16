@@ -84,7 +84,7 @@ function readDevToolsActivePort(host: string): { wsEndpoint: string; port: numbe
         const wsPath = lines[1];
         if (port > 0 && wsPath) return { wsEndpoint: `ws://${host}:${port}${wsPath}`, port };
       }
-    } catch { /* file doesn't exist or unreadable */ }
+    } catch (err) { log.debug({ err }, 'CDP endpoint file read failed'); }
   }
   return null;
 }

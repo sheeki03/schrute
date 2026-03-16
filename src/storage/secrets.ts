@@ -1,7 +1,8 @@
 import type { LockedModeStatus } from '../skill/types.js';
 import { Capability } from '../skill/types.js';
+import { withTimeout } from '../core/utils.js';
 
-export const SERVICE_NAME = 'oneagent';
+export const SERVICE_NAME = 'schrute';
 
 interface Keytar {
   setPassword(service: string, account: string, password: string): Promise<void>;
@@ -17,15 +18,7 @@ let keytarLoadError: string | null = null;
 const KEYTAR_TIMEOUT_MS = 2000;
 
 function withKeytarTimeout<T>(op: Promise<T>, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Keytar operation '${label}' timed out after ${KEYTAR_TIMEOUT_MS}ms`));
-    }, KEYTAR_TIMEOUT_MS);
-    op.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
+  return withTimeout(op, KEYTAR_TIMEOUT_MS, label);
 }
 
 async function loadKeytar(): Promise<Keytar> {
@@ -98,7 +91,7 @@ export async function removeSiteSecret(siteId: string, type: string): Promise<bo
 }
 
 export async function getLockedModeStatus(): Promise<LockedModeStatus> {
-  const testKey = '__oneagent_lock_test__';
+  const testKey = '__schrute_lock_test__';
   const testValue = 'test';
 
   try {

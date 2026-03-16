@@ -5,12 +5,12 @@ import { PNG } from 'pngjs';
 // No Playwright APIs, no DOM, no temp pages — just math on RGBA data.
 // Uses area averaging (box filter) for fast, high-quality downscaling.
 
-export interface ResizeOptions {
+interface ResizeOptions {
   maxDimension?: number;  // default 1568
   maxPixels?: number;     // default 1_150_000 (1.15MP)
 }
 
-export interface ResizeResult {
+interface ResizeResult {
   buffer: Buffer;
   originalWidth: number;
   originalHeight: number;

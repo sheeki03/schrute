@@ -973,6 +973,13 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       }
       case 'browser_batch_actions':
         return this.executeBatch(args);
+      case 'browser_load_all': {
+        const result = await this.loadAll({
+          maxScrolls: typeof args.maxScrolls === 'number' ? args.maxScrolls : undefined,
+          waitMs: typeof args.waitMs === 'number' ? args.waitMs : undefined,
+        });
+        return result;
+      }
       default:
         throw new Error(`Unhandled allowed tool: ${toolName}`);
     }
@@ -1784,6 +1791,24 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
         await locator.first().fill(value, { timeout: this.handlerTimeoutMs });
       }
     }
+  }
+
+  async loadAll(options?: { maxScrolls?: number; waitMs?: number }): Promise<{ scrollCount: number; finalHeight: number }> {
+    const max = options?.maxScrolls ?? 20;
+    const wait = options?.waitMs ?? 1000;
+    let prev = 0;
+    let scrolls = 0;
+
+    while (scrolls < max) {
+      const height = await this.page.evaluate(`document.body.scrollHeight`) as number;
+      if (height === prev) break;
+      prev = height;
+      await this.page.evaluate(`window.scrollTo(0, document.body.scrollHeight)`);
+      await this.page.waitForTimeout(wait);
+      scrolls++;
+    }
+
+    return { scrollCount: scrolls, finalHeight: prev };
   }
 }
 
