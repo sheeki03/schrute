@@ -72,7 +72,12 @@ vi.mock('../../src/core/engine.js', () => {
       explore: vi.fn().mockResolvedValue({ status: 'ready', sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
       recoverExplore: vi.fn().mockResolvedValue({ status: 'ready', siteId: 'example.com', url: 'https://example.com', session: '__recovery' }),
       startRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 0 }),
-      stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5 }),
+      stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5, pipelineJobId: 'job-1' }),
+      getPipelineJob: vi.fn().mockImplementation((jobId: string) => (
+        jobId === 'job-1'
+          ? { jobId, recordingId: 'r1', siteId: 'example.com', status: 'running', startedAt: Date.now() }
+          : undefined
+      )),
       executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' }, latencyMs: 100 }),
       close: vi.fn().mockResolvedValue(undefined),
     })),
@@ -200,6 +205,18 @@ describe('rest-server', () => {
         url: '/api/stop',
       });
       expect(response.statusCode).toBe(200);
+    });
+  });
+
+  describe('GET /api/pipeline/:jobId', () => {
+    it('returns pipeline status', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/pipeline/job-1',
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.jobId).toBe('job-1');
     });
   });
 

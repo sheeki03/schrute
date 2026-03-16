@@ -90,4 +90,8 @@ export class RemoteClient {
   async stopRecording(): Promise<unknown> {
     return this.request('POST', '/stop', {});
   }
+
+  async getPipelineStatus(jobId: string): Promise<unknown> {
+    return this.request('GET', `/pipeline/${encodeURIComponent(jobId)}`);
+  }
 }

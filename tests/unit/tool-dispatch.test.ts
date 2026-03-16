@@ -25,6 +25,7 @@ const mockRouter = {
   explore: vi.fn(),
   startRecording: vi.fn(),
   stopRecording: vi.fn(),
+  getPipelineStatus: vi.fn(),
   listSites: vi.fn(),
   listSkills: vi.fn(),
   getStatus: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('../../src/server/tool-registry.js', () => ({
     { name: 'schrute_recover_explore', description: 'Recover Explore', inputSchema: {} },
     { name: 'schrute_record', description: 'Record', inputSchema: {} },
     { name: 'schrute_stop', description: 'Stop', inputSchema: {} },
+    { name: 'schrute_pipeline_status', description: 'Pipeline Status', inputSchema: {} },
     { name: 'schrute_sites', description: 'Sites', inputSchema: {} },
     { name: 'schrute_skills', description: 'Skills', inputSchema: {} },
     { name: 'schrute_status', description: 'Status', inputSchema: {} },
@@ -520,6 +522,13 @@ describe('tool-dispatch', () => {
       const deps = makeDeps();
       await dispatchToolCall('schrute_stop', {}, deps);
       expect(mockRouter.stopRecording).toHaveBeenCalled();
+    });
+
+    it('routes schrute_pipeline_status to router.getPipelineStatus', async () => {
+      mockRouter.getPipelineStatus.mockReturnValueOnce({ success: true, data: { jobId: 'job-1', status: 'running' } });
+      const deps = makeDeps();
+      await dispatchToolCall('schrute_pipeline_status', { jobId: 'job-1' }, deps);
+      expect(mockRouter.getPipelineStatus).toHaveBeenCalledWith('job-1');
     });
 
     it('routes schrute_sites to router.listSites', async () => {

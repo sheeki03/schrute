@@ -246,7 +246,7 @@ describe('SchruteClient', () => {
 
   describe('record', () => {
     it('starts a recording session', async () => {
-      const response = { frameId: 'f1', name: 'login', siteId: 'example.com' };
+      const response = { id: 'rec-1', name: 'login', siteId: 'example.com', startedAt: 123, requestCount: 0 };
       mockFetch.mockResolvedValueOnce(mockResponse(response));
 
       const result = await client.record('login', { username: 'test' });
@@ -263,14 +263,27 @@ describe('SchruteClient', () => {
 
   describe('stop', () => {
     it('stops recording', async () => {
-      const response = { frameId: 'f1', skills: [] };
+      const response = { id: 'rec-1', name: 'login', siteId: 'example.com', startedAt: 123, requestCount: 5, pipelineJobId: 'job-1' };
       mockFetch.mockResolvedValueOnce(mockResponse(response));
 
       const result = await client.stop();
-      expect(result.frameId).toBe('f1');
+      expect(result.id).toBe('rec-1');
+      expect(result.pipelineJobId).toBe('job-1');
       expect(mockFetch).toHaveBeenCalledWith(
         'http://localhost:3000/api/stop',
         expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    it('gets pipeline status', async () => {
+      const response = { jobId: 'job-1', recordingId: 'rec-1', siteId: 'example.com', status: 'running', startedAt: 123 };
+      mockFetch.mockResolvedValueOnce(mockResponse(response));
+
+      const result = await client.getPipelineStatus('job-1');
+      expect(result.jobId).toBe('job-1');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/pipeline/job-1',
+        expect.objectContaining({ method: 'GET' }),
       );
     });
   });

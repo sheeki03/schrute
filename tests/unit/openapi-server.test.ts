@@ -88,6 +88,7 @@ describe('openapi-server', () => {
       expect(spec.paths['/api/explore']).toBeDefined();
       expect(spec.paths['/api/record']).toBeDefined();
       expect(spec.paths['/api/stop']).toBeDefined();
+      expect(spec.paths['/api/pipeline/{jobId}']).toBeDefined();
       expect(spec.paths['/api/audit']).toBeDefined();
     });
 

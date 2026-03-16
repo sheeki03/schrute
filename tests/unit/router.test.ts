@@ -172,7 +172,12 @@ function makeDeps(): RouterDeps {
     explore: vi.fn().mockResolvedValue({ status: 'ready', sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
     recoverExplore: vi.fn().mockResolvedValue({ status: 'ready', siteId: 'example.com', url: 'https://example.com', session: '__recovery' }),
     startRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 0 }),
-    stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5 }),
+    stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5, pipelineJobId: 'job-1' }),
+    getPipelineJob: vi.fn().mockImplementation((jobId: string) => (
+      jobId === 'job-1'
+        ? { jobId, recordingId: 'r1', siteId: 'example.com', status: 'running', startedAt: Date.now() }
+        : undefined
+    )),
     executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' }, latencyMs: 100 }),
     close: vi.fn().mockResolvedValue(undefined),
   } as unknown as Engine;
@@ -335,6 +340,21 @@ describe('router', () => {
       const result = await router.stopRecording();
       expect(result.success).toBe(true);
       expect(deps.engine.stopRecording).toHaveBeenCalled();
+    });
+
+    it('gets pipeline status from engine', () => {
+      const router = createRouter(deps);
+      const result = router.getPipelineStatus('job-1');
+      expect(result.success).toBe(true);
+      expect((result.data as Record<string, unknown>).jobId).toBe('job-1');
+      expect((deps.engine as any).getPipelineJob).toHaveBeenCalledWith('job-1');
+    });
+
+    it('returns 404 for missing pipeline job', () => {
+      const router = createRouter(deps);
+      const result = router.getPipelineStatus('missing-job');
+      expect(result.success).toBe(false);
+      expect(result.statusCode).toBe(404);
     });
   });
 

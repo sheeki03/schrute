@@ -8,6 +8,7 @@ type MasteryLevel = 'explore' | 'partial' | 'full';
 type SideEffectClass = 'read-only' | 'idempotent' | 'non-idempotent';
 type HealthStatus = 'ok' | 'degraded' | 'error';
 type EngineMode = 'idle' | 'exploring' | 'recording' | 'replaying';
+type PipelineJobStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface SchruteClientOptions {
   baseUrl: string;
@@ -107,19 +108,49 @@ export interface RecoverExploreResponse {
 }
 
 export interface RecordResponse {
-  frameId: string;
+  id: string;
   name: string;
   siteId: string;
+  startedAt: number;
+  requestCount: number;
+  inputs?: Record<string, string>;
 }
 
 export interface StopResponse {
-  frameId: string;
-  skills: Array<{
+  id: string;
+  name: string;
+  siteId: string;
+  startedAt: number;
+  requestCount: number;
+  pipelineJobId?: string;
+  skillsGenerated?: number;
+  signalRequests?: number;
+  noiseRequests?: number;
+  dedupedRequests?: number;
+  generatedSkills?: Array<{
     id: string;
-    name: string;
     method: string;
     pathTemplate: string;
+    status: string;
   }>;
+}
+
+export interface PipelineJobResult {
+  skillsGenerated: number;
+  signalCount: number;
+  noiseCount: number;
+  totalCount: number;
+}
+
+export interface PipelineJobResponse {
+  jobId: string;
+  recordingId: string;
+  siteId: string;
+  status: PipelineJobStatus;
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  result?: PipelineJobResult;
 }
 
 export interface HealthResponse {

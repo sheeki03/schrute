@@ -244,10 +244,21 @@ export const META_TOOLS = [
   },
   {
     name: 'schrute_stop',
-    description: 'Stop recording, process HAR, and generate skills',
+    description: 'Stop recording and return a pipeline job ID for background processing',
     inputSchema: {
       type: 'object' as const,
       properties: {},
+    },
+  },
+  {
+    name: 'schrute_pipeline_status',
+    description: 'Get the status of a background recording pipeline job',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        jobId: { type: 'string', description: 'Pipeline job ID returned by schrute_stop' },
+      },
+      required: ['jobId'],
     },
   },
   {

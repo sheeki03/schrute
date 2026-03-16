@@ -67,6 +67,32 @@ interface ExportedCookie {
   sameSite: string;
 }
 
+export interface PipelineJobResult {
+  skillsGenerated: number;
+  signalCount: number;
+  noiseCount: number;
+  totalCount: number;
+}
+
+export interface PipelineJobInfo {
+  jobId: string;
+  recordingId: string;
+  siteId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  result?: PipelineJobResult;
+}
+
+interface PipelineJobEngine {
+  getPipelineJob(jobId: string): PipelineJobInfo | undefined;
+}
+
+function hasPipelineJobEngine(engine: Engine): engine is Engine & PipelineJobEngine {
+  return typeof (engine as Partial<PipelineJobEngine>).getPipelineJob === 'function';
+}
+
 // ─── Application Service ─────────────────────────────────────────────
 
 export class SchruteService {
@@ -99,6 +125,11 @@ export class SchruteService {
 
   async stopRecording(): Promise<unknown> {
     return this.deps.engine.stopRecording();
+  }
+
+  getPipelineJob(jobId: string): PipelineJobInfo | null {
+    if (!hasPipelineJobEngine(this.deps.engine)) return null;
+    return this.deps.engine.getPipelineJob(jobId) ?? null;
   }
 
   // ─── Skill Operations ────────────────────────────────────────

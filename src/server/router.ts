@@ -17,6 +17,7 @@ import type {
 import { SkillStatus } from '../skill/types.js';
 import type { ContextOverrides } from '../browser/manager.js';
 import { shouldAutoConfirm } from './skill-helpers.js';
+import type { PipelineJobInfo } from '../app/service.js';
 
 const log = getLogger();
 
@@ -47,6 +48,14 @@ export interface RouterDeps {
   siteRepo: SiteRepository;
   config: SchruteConfig;
   confirmation: ConfirmationManager;
+}
+
+interface PipelineJobEngine {
+  getPipelineJob(jobId: string): PipelineJobInfo | undefined;
+}
+
+function hasPipelineJobEngine(engine: Engine): engine is Engine & PipelineJobEngine {
+  return typeof (engine as Partial<PipelineJobEngine>).getPipelineJob === 'function';
 }
 
 // ─── Unified Router ──────────────────────────────────────────────
@@ -244,6 +253,27 @@ export function createRouter(deps: RouterDeps) {
         log.error({ err }, 'Stop recording failed');
         return { success: false, error: message, statusCode: 400 };
       }
+    },
+
+    getPipelineStatus(jobId: string): RouterResult {
+      if (!hasPipelineJobEngine(engine)) {
+        return {
+          success: false,
+          error: 'Pipeline status is not supported by this engine build',
+          statusCode: 501,
+        };
+      }
+
+      const job = engine.getPipelineJob(jobId);
+      if (!job) {
+        return {
+          success: false,
+          error: `Pipeline job '${jobId}' not found`,
+          statusCode: 404,
+        };
+      }
+
+      return { success: true, data: job };
     },
 
     async recoverExplore(resumeToken: string, waitMs?: number): Promise<RouterResult> {

@@ -108,6 +108,23 @@ describe('RemoteClient', () => {
       const call = mockFetch.mock.calls[0];
       expect(call[1].body).toBeUndefined();
     });
+
+    it('gets pipeline status from the v1 endpoint', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ success: true, data: { jobId: 'job-1', status: 'running' } }),
+      });
+
+      const client = new RemoteClient('http://localhost:3000');
+      await client.getPipelineStatus('job-1');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/pipeline/job-1',
+        expect.objectContaining({
+          method: 'GET',
+        }),
+      );
+    });
   });
 
   describe('bearer token header', () => {

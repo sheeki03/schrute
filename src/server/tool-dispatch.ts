@@ -33,7 +33,7 @@ const log = getLogger();
 
 // Admin-only tool names — used in both buildToolList() and dispatchToolCall()
 const ADMIN_ONLY_TOOL_NAMES = new Set([
-  'schrute_explore', 'schrute_record', 'schrute_stop',
+  'schrute_explore', 'schrute_record', 'schrute_stop', 'schrute_pipeline_status',
   'schrute_import_cookies', 'schrute_export_cookies',
   'schrute_connect_cdp', 'schrute_recover_explore', 'schrute_webmcp_call',
   'schrute_delete_skill',
@@ -282,6 +282,18 @@ export async function dispatchToolCall(
         const result = await router.stopRecording();
         if (!result.success) {
           return { content: [{ type: 'text', text: result.error ?? 'Stop recording failed' }], isError: true };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+      }
+
+      case 'schrute_pipeline_status': {
+        const jobId = args?.jobId as string | undefined;
+        if (!jobId) {
+          return { content: [{ type: 'text', text: 'Error: jobId is required' }], isError: true };
+        }
+        const result = router.getPipelineStatus(jobId);
+        if (!result.success) {
+          return { content: [{ type: 'text', text: result.error ?? 'Pipeline status failed' }], isError: true };
         }
         return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
       }

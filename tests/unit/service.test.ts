@@ -50,6 +50,11 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
       explore: vi.fn().mockResolvedValue({ siteId: 'example.com', endpoints: [] }),
       startRecording: vi.fn().mockResolvedValue(undefined),
       stopRecording: vi.fn().mockResolvedValue({ steps: [] }),
+      getPipelineJob: vi.fn().mockImplementation((jobId: string) => (
+        jobId === 'job-1'
+          ? { jobId, recordingId: 'rec-1', siteId: 'example.com', status: 'running', startedAt: 123 }
+          : undefined
+      )),
       executeSkill: vi.fn().mockResolvedValue({ status: 'ok', data: {} }),
       getStatus: vi.fn().mockReturnValue({
         mode: 'idle',
@@ -116,6 +121,19 @@ describe('SchruteService', () => {
       expect(status.activeSession).toBeNull();
       expect(status.currentRecording).toBeNull();
       expect(deps.engine.getStatus).toHaveBeenCalled();
+    });
+  });
+
+  describe('getPipelineJob', () => {
+    it('returns a known pipeline job', () => {
+      const result = service.getPipelineJob('job-1');
+      expect(result?.jobId).toBe('job-1');
+      expect((deps.engine as any).getPipelineJob).toHaveBeenCalledWith('job-1');
+    });
+
+    it('returns null when the pipeline job is missing', () => {
+      const result = service.getPipelineJob('missing-job');
+      expect(result).toBeNull();
     });
   });
 

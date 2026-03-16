@@ -139,8 +139,12 @@ class SchruteClient:
     # ─── Stop ────────────────────────────────────────────────────
 
     def stop(self) -> Dict[str, Any]:
-        """Stop recording and generate skills."""
+        """Stop recording and return a background pipeline job handle."""
         return self._post("/api/stop", {})
+
+    def get_pipeline_status(self, job_id: str) -> Dict[str, Any]:
+        """Get the status of a background recording pipeline job."""
+        return self._get(f"/api/pipeline/{urllib.parse.quote(job_id, safe='')}")
 
     # ─── Health ──────────────────────────────────────────────────
 

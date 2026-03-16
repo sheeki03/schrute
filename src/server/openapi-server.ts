@@ -228,10 +228,25 @@ function addMetaRoutes(spec: OpenApiSpec): void {
   spec.paths['/api/stop'] = {
     post: {
       operationId: 'stop',
-      summary: 'Stop recording and generate skills',
+      summary: 'Stop recording and return a background pipeline job ID',
       tags: ['meta'],
       responses: {
         '200': { description: 'Recording stopped' },
+      },
+    },
+  };
+
+  spec.paths['/api/pipeline/{jobId}'] = {
+    get: {
+      operationId: 'getPipelineStatus',
+      summary: 'Get background pipeline job status',
+      tags: ['meta'],
+      parameters: [
+        { name: 'jobId', in: 'path', required: true, schema: { type: 'string' } },
+      ],
+      responses: {
+        '200': { description: 'Pipeline job status' },
+        '404': { description: 'Pipeline job not found' },
       },
     },
   };

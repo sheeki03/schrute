@@ -14,11 +14,20 @@ import type { Engine } from '../core/engine.js';
 import type { PidFileContent, TransportConfig } from '../shared/daemon-types.js';
 import { verifyBearerToken } from '../shared/auth-utils.js';
 import { withTimeout } from '../core/utils.js';
+import type { PipelineJobInfo } from '../app/service.js';
 
 function log() { return getLogger(); }
 
 const DAEMON_VERSION = '0.2.0';
 const API_VERSION = 1;
+
+interface PipelineJobEngine {
+  getPipelineJob(jobId: string): PipelineJobInfo | undefined;
+}
+
+function hasPipelineJobEngine(engine: Engine): engine is Engine & PipelineJobEngine {
+  return typeof (engine as Partial<PipelineJobEngine>).getPipelineJob === 'function';
+}
 
 // ─── Lifecycle Lock (instance-level) ─────────────────────────────
 
@@ -262,6 +271,22 @@ async function handleRequest(
         30_000, 'stopRecording',
       );
       sendJson(res, 200, result);
+      return;
+    }
+
+    const pipelineMatch = method === 'GET' ? url.match(/^\/ctl\/pipeline\/([^/?#]+)$/) : null;
+    if (pipelineMatch) {
+      if (!hasPipelineJobEngine(engine)) {
+        sendJson(res, 501, { error: 'Pipeline status is not supported by this engine build' });
+        return;
+      }
+      const jobId = decodeURIComponent(pipelineMatch[1]);
+      const job = engine.getPipelineJob(jobId);
+      if (!job) {
+        sendJson(res, 404, { error: `Pipeline job '${jobId}' not found` });
+        return;
+      }
+      sendJson(res, 200, job);
       return;
     }
 

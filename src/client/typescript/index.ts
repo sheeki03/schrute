@@ -12,6 +12,7 @@ export type {
   RecoverExploreResponse,
   RecordResponse,
   StopResponse,
+  PipelineJobResponse,
   HealthResponse,
   OpenApiSpec,
   SkillSearchResult,
@@ -29,6 +30,7 @@ import type {
   RecoverExploreResponse,
   RecordResponse,
   StopResponse,
+  PipelineJobResponse,
   HealthResponse,
   OpenApiSpec,
   SkillSearchResponse,
@@ -159,6 +161,10 @@ export class SchruteClient {
 
   async stop(): Promise<StopResponse> {
     return this.post<StopResponse>('/api/stop', {});
+  }
+
+  async getPipelineStatus(jobId: string): Promise<PipelineJobResponse> {
+    return this.get<PipelineJobResponse>(`/api/pipeline/${encodeURIComponent(jobId)}`);
   }
 
   // ─── Health ─────────────────────────────────────────────────────

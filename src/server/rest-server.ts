@@ -68,6 +68,14 @@ const siteIdParam = {
   },
 } as const;
 
+const pipelineJobParam = {
+  type: 'object',
+  required: ['jobId'],
+  properties: {
+    jobId: { type: 'string' },
+  },
+} as const;
+
 const siteSkillParams = {
   type: 'object',
   required: ['id', 'name'],
@@ -328,6 +336,16 @@ export async function createRestServer(options?: {
     const result = await withTimeout(router.stopRecording(), 30_000, 'stopRecording');
     routerResultToReply(result, reply);
   });
+
+  app.get<{ Params: { jobId: string } }>(
+    '/api/pipeline/:jobId',
+    { schema: { params: pipelineJobParam } },
+    async (request, reply) => {
+      if (!requireAdmin(config, reply)) return;
+      const result = router.getPipelineStatus(request.params.jobId);
+      routerResultToReply(result, reply);
+    },
+  );
 
   app.post<{ Body: { resumeToken: string; waitMs?: number } }>(
     '/api/recover-explore',
@@ -899,6 +917,25 @@ export async function createRestServer(options?: {
       reply.code(400).send(apiError('STOP_ERROR', message, reqId));
     }
   });
+
+  app.get<{ Params: { jobId: string } }>(
+    '/api/v1/pipeline/:jobId',
+    { schema: { params: pipelineJobParam } },
+    async (request, reply) => {
+      if (!requireAdmin(config, reply)) return;
+      const reqId = getRequestId(request);
+      const result = router.getPipelineStatus(request.params.jobId);
+      if (result.success) {
+        reply.code(200).send(apiResponse(result.data, reqId));
+      } else if (result.statusCode === 404) {
+        reply.code(404).send(apiError('PIPELINE_NOT_FOUND', result.error, reqId));
+      } else if (result.statusCode === 501) {
+        reply.code(501).send(apiError('PIPELINE_UNSUPPORTED', result.error, reqId));
+      } else {
+        reply.code(result.statusCode ?? 400).send(apiError('PIPELINE_ERROR', result.error, reqId));
+      }
+    },
+  );
 
   app.post<{ Body: { token: string; approve: boolean } }>(
     '/api/v1/confirm',

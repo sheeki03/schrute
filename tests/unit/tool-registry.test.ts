@@ -325,6 +325,7 @@ describe('tool-registry', () => {
       expect(names).toContain('schrute_recover_explore');
       expect(names).toContain('schrute_record');
       expect(names).toContain('schrute_stop');
+      expect(names).toContain('schrute_pipeline_status');
       expect(names).toContain('schrute_sites');
       expect(names).toContain('schrute_skills');
       expect(names).toContain('schrute_status');
