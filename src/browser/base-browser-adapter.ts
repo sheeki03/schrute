@@ -39,6 +39,7 @@ import {
 } from './modal-state.js';
 import { resizeScreenshotBuffer, estimateScale, DEFAULT_MAX_DIMENSION, DEFAULT_MAX_PIXELS } from './screenshot-resize.js';
 import { humanMousePreamble } from './human-input.js';
+import { isObviousNoise, shouldCaptureResponseBody } from '../capture/noise-filter.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -1652,25 +1653,33 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     }
   }
 
+  protected getCaptureSiteHost(requestUrl: string): string {
+    const firstAllowed = this.domainAllowlist[0];
+    if (firstAllowed) {
+      return firstAllowed;
+    }
+
+    try {
+      return new URL(this.page.url()).hostname;
+    } catch {
+      try {
+        return new URL(requestUrl).hostname;
+      } catch {
+        return '';
+      }
+    }
+  }
+
   protected setupNetworkCapture(): void {
     this.page.on('response', async (response: PwResponse) => {
       try {
         const request = response.request();
         const timing = request.timing();
-
-        let requestBody: string | undefined;
-        try {
-          requestBody = request.postData() ?? undefined;
-        } catch (err) {
-          log.debug({ err }, 'Failed to read request post data');
-        }
-
-        let responseBody: string | undefined;
-        try {
-          responseBody = await response.text();
-        } catch (err) {
-          log.debug({ err }, 'Failed to read response body');
-        }
+        const requestUrl = request.url();
+        const method = request.method();
+        const status = response.status();
+        const resourceType = request.resourceType();
+        const siteHost = this.getCaptureSiteHost(requestUrl);
 
         const requestHeaders: Record<string, string> = {};
         const reqHeaders = await request.allHeaders();
@@ -1684,20 +1693,47 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
           responseHeaders[k] = v;
         }
 
+        const obviousNoise = isObviousNoise(requestUrl, method, status, siteHost, resourceType);
+
+        let requestBody: string | undefined;
+        if (!obviousNoise.obvious) {
+          try {
+            requestBody = request.postData() ?? undefined;
+          } catch (err) {
+            log.debug({ err }, 'Failed to read request post data');
+          }
+        }
+
+        let responseBody: string | undefined;
+        if (shouldCaptureResponseBody(
+          requestUrl,
+          method,
+          status,
+          responseHeaders['content-type'] ?? responseHeaders['Content-Type'],
+          siteHost,
+          resourceType,
+        )) {
+          try {
+            responseBody = await response.text();
+          } catch (err) {
+            log.debug({ err }, 'Failed to read response body');
+          }
+        }
+
         const startTime = timing.startTime;
         const endTime = timing.responseEnd > 0
           ? timing.responseEnd
           : startTime + 1;
 
         this.networkEntries.push({
-          url: request.url(),
-          method: request.method(),
-          status: response.status(),
+          url: requestUrl,
+          method,
+          status,
           requestHeaders,
           responseHeaders,
           requestBody,
           responseBody,
-          resourceType: request.resourceType(),
+          resourceType,
           timing: {
             startTime,
             endTime,

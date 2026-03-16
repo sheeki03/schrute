@@ -3,6 +3,7 @@ import type { BrowserFeatureFlags } from './feature-flags.js';
 import type { BrowserBenchmark } from './benchmark.js';
 import { BaseBrowserAdapter } from './base-browser-adapter.js';
 import type { EngineCapabilities } from './engine.js';
+import { isObviousNoise, shouldCaptureResponseBody } from '../capture/noise-filter.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -58,19 +59,21 @@ export class AgentBrowserAdapter extends BaseBrowserAdapter {
 
         const request = response.request();
         const timing = request.timing();
+        const requestUrl = request.url();
+        const method = request.method();
+        const status = response.status();
+        const resourceType = request.resourceType();
+        const siteHost = this.getCaptureSiteHost(requestUrl);
+
+        const obviousNoise = isObviousNoise(requestUrl, method, status, siteHost, resourceType);
 
         let requestBody: string | undefined;
-        try {
-          requestBody = request.postData() ?? undefined;
-        } catch (err) {
-          log.debug({ err }, 'Failed to read request post data');
-        }
-
-        let responseBody: string | undefined;
-        try {
-          responseBody = await response.text();
-        } catch (err) {
-          log.debug({ err }, 'Failed to read response body');
+        if (!obviousNoise.obvious) {
+          try {
+            requestBody = request.postData() ?? undefined;
+          } catch (err) {
+            log.debug({ err }, 'Failed to read request post data');
+          }
         }
 
         const requestHeaders: Record<string, string> = {};
@@ -93,18 +96,34 @@ export class AgentBrowserAdapter extends BaseBrowserAdapter {
           log.debug({ err }, 'Failed to read response headers');
         }
 
+        let responseBody: string | undefined;
+        if (shouldCaptureResponseBody(
+          requestUrl,
+          method,
+          status,
+          responseHeaders['content-type'] ?? responseHeaders['Content-Type'],
+          siteHost,
+          resourceType,
+        )) {
+          try {
+            responseBody = await response.text();
+          } catch (err) {
+            log.debug({ err }, 'Failed to read response body');
+          }
+        }
+
         const startTime = timing.startTime;
         const endTime = timing.responseEnd > 0 ? timing.responseEnd : startTime + 1;
 
         this.networkEntries.push({
-          url: request.url(),
-          method: request.method(),
-          status: response.status(),
+          url: requestUrl,
+          method,
+          status,
           requestHeaders,
           responseHeaders,
           requestBody,
           responseBody,
-          resourceType: request.resourceType(),
+          resourceType,
           timing: { startTime, endTime, duration: endTime - startTime },
         });
       } catch (err) {

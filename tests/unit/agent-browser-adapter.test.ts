@@ -77,6 +77,40 @@ function mockPage(overrides: Record<string, unknown> = {}) {
   return page;
 }
 
+function getResponseHandler(page: ReturnType<typeof mockPage>) {
+  const call = (page.on as ReturnType<typeof vi.fn>).mock.calls.find(([event]) => event === 'response');
+  return call?.[1] as ((response: unknown) => Promise<void>) | undefined;
+}
+
+function makeResponseMock(overrides: Partial<{
+  url: string;
+  method: string;
+  status: number;
+  resourceType: string;
+  requestBody: string;
+  responseBody: string;
+  requestHeaders: Record<string, string>;
+  responseHeaders: Record<string, string>;
+}> = {}) {
+  const request = {
+    timing: vi.fn().mockReturnValue({ startTime: 1000, responseEnd: 1100 }),
+    url: vi.fn().mockReturnValue(overrides.url ?? 'https://api.example.com/users'),
+    method: vi.fn().mockReturnValue(overrides.method ?? 'GET'),
+    resourceType: vi.fn().mockReturnValue(overrides.resourceType ?? 'fetch'),
+    postData: vi.fn().mockReturnValue(overrides.requestBody),
+    allHeaders: vi.fn().mockResolvedValue(overrides.requestHeaders ?? { accept: 'application/json' }),
+  };
+
+  const response = {
+    request: vi.fn().mockReturnValue(request),
+    status: vi.fn().mockReturnValue(overrides.status ?? 200),
+    text: vi.fn().mockResolvedValue(overrides.responseBody ?? '{"ok":true}'),
+    allHeaders: vi.fn().mockResolvedValue(overrides.responseHeaders ?? { 'content-type': 'application/json' }),
+  };
+
+  return { request, response };
+}
+
 describe('AgentBrowserAdapter', () => {
   describe('constructor', () => {
     it('creates adapter with page and domain allowlist', () => {
@@ -199,6 +233,47 @@ describe('AgentBrowserAdapter', () => {
       const entries = await adapter.networkRequests();
 
       expect(entries).toEqual([]);
+    });
+
+    it('skips request and response bodies for obvious noise', async () => {
+      const page = mockPage();
+      new AgentBrowserAdapter(page as any, ['example.com'], { flags: LEGACY_FLAGS });
+
+      const handler = getResponseHandler(page)!;
+      const { request, response } = makeResponseMock({
+        url: 'https://cdn.example.com/app.js',
+        resourceType: 'script',
+        responseHeaders: { 'content-type': 'application/javascript' },
+      });
+
+      await handler(response as any);
+
+      expect(request.postData).not.toHaveBeenCalled();
+      expect(response.text).not.toHaveBeenCalled();
+    });
+
+    it('captures bodies for same-origin json api responses', async () => {
+      const page = mockPage();
+      const adapter = new AgentBrowserAdapter(page as any, ['example.com'], { flags: LEGACY_FLAGS });
+
+      const handler = getResponseHandler(page)!;
+      const { request, response } = makeResponseMock({
+        url: 'https://api.example.com/users',
+        method: 'POST',
+        requestBody: '{"name":"Dwight"}',
+        responseBody: '{"id":1}',
+        responseHeaders: { 'content-type': 'application/json' },
+      });
+
+      await handler(response as any);
+
+      expect(request.postData).toHaveBeenCalled();
+      expect(response.text).toHaveBeenCalled();
+
+      const entries = await adapter.networkRequests(true);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].requestBody).toBe('{"name":"Dwight"}');
+      expect(entries[0].responseBody).toBe('{"id":1}');
     });
   });
 
