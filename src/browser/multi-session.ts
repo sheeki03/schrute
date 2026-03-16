@@ -1,6 +1,10 @@
 import { BrowserManager } from './manager.js';
 import type { ContextOverrides } from './manager.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { BrowserPool } from './pool.js';
+import type { SchruteConfig } from '../skill/types.js';
+import type { BrowserAuthStore } from './auth-store.js';
+import type { AuthCoordinator } from './auth-coordinator.js';
+import { isAdminCaller } from '../shared/admin-auth.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -13,7 +17,11 @@ export interface NamedSession {
   browserManager: BrowserManager;
   isCdp: boolean;
   createdAt: number;
+  lastUsedAt: number;
+  ownedBy?: string;
   contextOverrides?: ContextOverrides;
+  selectedPageUrl?: string;
+  cdpPriorPolicyState?: Record<string, unknown>;
 }
 
 /**
@@ -23,18 +31,41 @@ export interface NamedSession {
 export class MultiSessionManager {
   private sessions = new Map<string, NamedSession>();
   private active: string = DEFAULT_SESSION_NAME;
-  private config?: OneAgentConfig;
+  private config?: SchruteConfig;
+  private pool?: BrowserPool;
+  private onSessionChangedCallback?: (name: string) => void;
+  private authStore?: BrowserAuthStore;
+  private authCoordinator?: AuthCoordinator;
 
-  constructor(defaultBrowserManager: BrowserManager, config?: OneAgentConfig) {
+  constructor(defaultBrowserManager: BrowserManager, config?: SchruteConfig, pool?: BrowserPool) {
     this.config = config;
+    this.pool = pool;
     // Create the default session entry
+    const now = Date.now();
     this.sessions.set(DEFAULT_SESSION_NAME, {
       name: DEFAULT_SESSION_NAME,
       siteId: '',
       browserManager: defaultBrowserManager,
       isCdp: false,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastUsedAt: now,
     });
+  }
+
+  /**
+   * Register a callback invoked after a session is closed.
+   */
+  setOnSessionChanged(callback: (name: string) => void): void {
+    this.onSessionChangedCallback = callback;
+  }
+
+  /**
+   * Wire auth store and coordinator into this manager.
+   * New sessions created via getOrCreate/connectCDP will receive auth integration.
+   */
+  setAuthIntegration(authStore: BrowserAuthStore, coordinator: AuthCoordinator): void {
+    this.authStore = authStore;
+    this.authCoordinator = coordinator;
   }
 
   /**
@@ -42,14 +73,23 @@ export class MultiSessionManager {
    */
   getOrCreate(name: string = DEFAULT_SESSION_NAME): NamedSession {
     const existing = this.sessions.get(name);
-    if (existing) return existing;
+    if (existing) {
+      existing.lastUsedAt = Date.now();
+      return existing;
+    }
 
+    const now = Date.now();
+    const manager = new BrowserManager(this.config, this.pool);
+    if (this.authStore && this.authCoordinator) {
+      manager.setAuthIntegration(this.authStore, this.authCoordinator, name);
+    }
     const session: NamedSession = {
       name,
       siteId: '',
-      browserManager: new BrowserManager(this.config),
+      browserManager: manager,
       isCdp: false,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastUsedAt: now,
     };
     this.sessions.set(name, session);
     log.info({ session: name }, 'Created named browser session');
@@ -63,6 +103,7 @@ export class MultiSessionManager {
     name: string,
     options: import('./cdp-connector.js').CdpConnectionOptions,
     siteId: string,
+    ownedBy?: string,
   ): Promise<NamedSession> {
     if (name === DEFAULT_SESSION_NAME) {
       throw new Error('Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.');
@@ -73,15 +114,21 @@ export class MultiSessionManager {
 
     const { connectViaCDP } = await import('./cdp-connector.js');
     const browser = await connectViaCDP(options);
-    const manager = new BrowserManager(this.config);
+    const manager = new BrowserManager(this.config, this.pool);
+    if (this.authStore && this.authCoordinator) {
+      manager.setAuthIntegration(this.authStore, this.authCoordinator, name);
+    }
     await manager.connectExisting(browser, siteId, options);
 
+    const now = Date.now();
     const session: NamedSession = {
       name,
       siteId,
       browserManager: manager,
       isCdp: true,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastUsedAt: now,
+      ownedBy,
     };
     this.sessions.set(name, session);
     log.info({ session: name, siteId }, 'Created CDP browser session');
@@ -92,14 +139,25 @@ export class MultiSessionManager {
    * Get a named session, or undefined if it doesn't exist.
    */
   get(name: string): NamedSession | undefined {
-    return this.sessions.get(name);
+    const session = this.sessions.get(name);
+    if (session) session.lastUsedAt = Date.now();
+    return session;
   }
 
   /**
-   * List all sessions.
+   * List sessions, optionally filtered by caller ownership.
+   * In multi-user mode, non-admin callers see only their own named sessions
+   * (default session is hidden as it contains the admin's browsing context).
    */
-  list(): NamedSession[] {
-    return [...this.sessions.values()];
+  list(callerId?: string, config?: SchruteConfig): NamedSession[] {
+    const all = [...this.sessions.values()];
+    if (!callerId) return all;  // admin/legacy — see everything
+    const effectiveConfig = config ?? this.config;
+    if (!effectiveConfig || isAdminCaller(callerId, effectiveConfig)) return all;  // admin — see everything
+    // Non-admin in multi-user mode: hide default + other callers' sessions
+    return all.filter(s =>
+      s.name !== DEFAULT_SESSION_NAME && (!s.ownedBy || s.ownedBy === callerId)
+    );
   }
 
   /**
@@ -123,7 +181,7 @@ export class MultiSessionManager {
         // Force mode: allow during exploring, but block during recording (HAR invariant protection)
         const mode = options?.engineMode;
         if (mode === 'recording') {
-          throw new Error('Cannot close during recording. Stop recording first with oneagent_stop.');
+          throw new Error('Cannot close during recording. Stop recording first with schrute_stop.');
         }
       }
 
@@ -150,6 +208,7 @@ export class MultiSessionManager {
     }
 
     log.info({ session: name }, 'Closed named browser session');
+    this.onSessionChangedCallback?.(name);
   }
 
   /**
@@ -174,12 +233,64 @@ export class MultiSessionManager {
 
   /**
    * Set the active session.
+   * In multi-user mode (server.network=true), only 'default' is allowed
+   * as the global active session to prevent cross-caller interference.
    */
-  setActive(name: string): void {
+  setActive(name: string, config?: SchruteConfig): void {
+    const effectiveConfig = config ?? this.config;
+    if (effectiveConfig?.server?.network && name !== DEFAULT_SESSION_NAME) {
+      throw new Error(
+        `Cannot switch global active session in multi-user mode. ` +
+        `Use the 'session' parameter on browser tools to target '${name}' explicitly.`
+      );
+    }
     if (!this.sessions.has(name)) {
       throw new Error(`Session "${name}" does not exist.`);
     }
     this.active = name;
+  }
+
+  /**
+   * Assert that a caller owns a session (or the session is shared/default).
+   * Throws if the caller doesn't own the session.
+   */
+  assertOwnership(name: string, callerId: string | undefined): void {
+    const session = this.sessions.get(name);
+    if (!session) return;
+    if (name === DEFAULT_SESSION_NAME) return;  // default is shared
+    if (!session.ownedBy) return;               // legacy, no owner
+    if (!callerId) return;                      // stdio/cli, no restriction
+    if (session.ownedBy !== callerId) {
+      throw new Error(`Session '${name}' belongs to a different client.`);
+    }
+  }
+
+  /**
+   * Sweep idle sessions that have not been used within maxIdleMs.
+   * Uses close() which calls browserManager.closeAll()/detachCdp() to properly
+   * clean up browser contexts (not just map entries).
+   */
+  private cdpIdleTimeoutMs = 20 * 60 * 1000; // 20 minutes
+
+  sweepIdleSessions(maxIdleMs: number = 3600_000): number {
+    const now = Date.now();
+    // Collect names first to avoid mutating the Map during iteration
+    // (close() calls this.sessions.delete())
+    const toSweep: string[] = [];
+    for (const [name, session] of this.sessions) {
+      if (name === DEFAULT_SESSION_NAME) continue;
+      const effectiveIdleMs = session.isCdp ? this.cdpIdleTimeoutMs : maxIdleMs;
+      if (now - session.lastUsedAt > effectiveIdleMs) {
+        toSweep.push(name);
+      }
+    }
+    for (const name of toSweep) {
+      // close() calls browserManager.closeAll()/detachCdp() — required for proper cleanup
+      this.close(name, { force: true }).catch(err =>
+        log.warn({ err, session: name }, 'Session sweep close failed'),
+      );
+    }
+    return toSweep.length;
   }
 
   /**

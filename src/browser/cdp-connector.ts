@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { getLogger } from '../core/logger.js';
 import type { Browser } from 'playwright';
 
@@ -40,8 +43,8 @@ export async function connectViaCDP(options: CdpConnectionOptions): Promise<Brow
       const found = await discoverCdpPort({ host });
       if (!found) {
         throw new Error(
-          `CDP auto-discovery found no endpoints. Scanned ports: ${COMMON_CDP_PORTS.join(', ')}. ` +
-          'Ensure a browser/Electron app is running with --remote-debugging-port.'
+          `No Chrome debugging endpoint found. Scanned ports: ${COMMON_CDP_PORTS.join(', ')}. ` +
+          'Enable remote debugging at chrome://inspect/#remote-debugging, or provide an explicit port/wsEndpoint.'
         );
       }
       wsEndpoint = found.wsEndpoint;
@@ -56,6 +59,34 @@ export async function connectViaCDP(options: CdpConnectionOptions): Promise<Brow
   const browser = await chromium.connectOverCDP(wsEndpoint);
   log.info('CDP connection established');
   return browser;
+}
+
+function readDevToolsActivePort(host: string): { wsEndpoint: string; port: number } | null {
+  const CHROME_DATA_DIRS: Record<string, string[]> = {
+    darwin: [
+      '~/Library/Application Support/Google/Chrome',
+      '~/Library/Application Support/Chromium',
+      '~/Library/Application Support/BraveSoftware/Brave-Browser',
+    ],
+    linux: [
+      '~/.config/google-chrome',
+      '~/.config/chromium',
+      '~/.config/BraveSoftware/Brave-Browser',
+    ],
+  };
+  const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
+  for (const dir of CHROME_DATA_DIRS[platform] ?? []) {
+    const portFile = path.join(dir.replace('~', os.homedir()), 'DevToolsActivePort');
+    try {
+      const lines = fs.readFileSync(portFile, 'utf-8').trim().split('\n');
+      if (lines.length >= 2) {
+        const port = parseInt(lines[0], 10);
+        const wsPath = lines[1];
+        if (port > 0 && wsPath) return { wsEndpoint: `ws://${host}:${port}${wsPath}`, port };
+      }
+    } catch { /* file doesn't exist or unreadable */ }
+  }
+  return null;
 }
 
 export async function discoverCdpPort(
@@ -79,6 +110,11 @@ export async function discoverCdpPort(
   for (const result of results) {
     if (result.status === 'fulfilled') return result.value;
   }
+
+  // 2. Fallback: DevToolsActivePort file (works for custom --user-data-dir launches only)
+  const portFileResult = readDevToolsActivePort(host);
+  if (portFileResult) return portFileResult;
+
   return null;
 }
 
