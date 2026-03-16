@@ -130,8 +130,17 @@ function detectCookieChain(requests: StructuredRecord[]): RequestChain | null {
 function extractResponseValues(record: StructuredRecord): Map<string, string> {
   const values = new Map<string, string>();
 
+  // Fast path for capture-time extracted candidates.
+  if (record.response.chainCandidates) {
+    for (const [path, value] of Object.entries(record.response.chainCandidates)) {
+      if (value && value.length > 3 && value.length < 2048) {
+        values.set(path, value);
+      }
+    }
+  }
+
   // Extract from response body (JSON)
-  if (record.response.body) {
+  if (values.size === 0 && record.response.body) {
     try {
       const parsed = JSON.parse(record.response.body);
       flattenValues(parsed, 'body', values);
@@ -150,7 +159,21 @@ function extractResponseValues(record: StructuredRecord): Map<string, string> {
   return values;
 }
 
-function flattenValues(
+export function extractChainCandidates(
+  body: string,
+  prefix = 'body',
+): Record<string, string> | undefined {
+  try {
+    const parsed = JSON.parse(body);
+    const values = new Map<string, string>();
+    flattenValues(parsed, prefix, values);
+    return values.size > 0 ? Object.fromEntries(values) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function flattenValues(
   obj: unknown,
   prefix: string,
   values: Map<string, string>,

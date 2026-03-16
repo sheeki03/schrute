@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectChains } from '../../src/capture/chain-detector.js';
+import { detectChains, extractChainCandidates } from '../../src/capture/chain-detector.js';
 import type { StructuredRecord } from '../../src/capture/har-extractor.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -41,6 +41,24 @@ function makeRecord(
 // ─── Tests ────────────────────────────────────────────────────────
 
 describe('chain-detector', () => {
+  describe('extractChainCandidates', () => {
+    it('extracts scalar values from JSON for capture-time reuse', () => {
+      const candidates = extractChainCandidates(JSON.stringify({
+        token: 'TOKEN-XYZ-123456',
+        nested: { id: 42 },
+      }));
+
+      expect(candidates).toEqual({
+        'body.token': 'TOKEN-XYZ-123456',
+        'body.nested.id': '42',
+      });
+    });
+
+    it('returns undefined for invalid JSON', () => {
+      expect(extractChainCandidates('{nope')).toBeUndefined();
+    });
+  });
+
   describe('detectChains', () => {
     it('returns empty array for fewer than 2 requests', () => {
       expect(detectChains([makeRecord()])).toEqual([]);
@@ -182,6 +200,37 @@ describe('chain-detector', () => {
       const cookieChain = chains.find(c => c.canReplayWithCookiesOnly);
       expect(cookieChain).toBeDefined();
       expect(cookieChain!.canReplayWithCookiesOnly).toBe(true);
+    });
+
+    it('uses chainCandidates fast path when response body is unavailable', () => {
+      const now = Date.now();
+      const records = [
+        makeRecord({
+          url: 'https://api.example.com/auth',
+          method: 'POST',
+          respBody: '{not-json',
+          startedAt: now,
+          // @ts-expect-error test-only: emulate pre-extracted chain candidates
+          respHeaders: {},
+        }),
+        makeRecord({
+          url: 'https://api.example.com/me',
+          reqHeaders: { authorization: 'Bearer TOKEN-XYZ-123456' },
+          startedAt: now + 1000,
+        }),
+      ];
+
+      records[0].response.chainCandidates = {
+        'body.token': 'TOKEN-XYZ-123456',
+      };
+
+      const chains = detectChains(records);
+      const valueChain = chains.find(c => !c.canReplayWithCookiesOnly);
+      expect(valueChain).toBeDefined();
+      const extractionStep = valueChain!.steps.find(s => s.extractsFrom.length > 0);
+      expect(extractionStep).toBeDefined();
+      expect(extractionStep!.extractsFrom[0].responsePath).toBe('body.token');
+      expect(extractionStep!.extractsFrom[0].injectsInto.location).toBe('header');
     });
   });
 });

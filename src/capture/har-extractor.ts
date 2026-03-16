@@ -99,12 +99,13 @@ export interface StructuredRequest {
   queryParams: Record<string, string>;
 }
 
-interface StructuredResponse {
+export interface StructuredResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
   body?: string;
   contentType?: string;
+  chainCandidates?: Record<string, string>;
 }
 
 export interface StructuredRecord {

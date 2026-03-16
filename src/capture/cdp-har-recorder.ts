@@ -1,5 +1,6 @@
 import { getLogger } from '../core/logger.js';
 import type { NetworkEntry } from '../skill/types.js';
+import type { StructuredRecord } from './har-extractor.js';
 
 const log = getLogger();
 
@@ -28,12 +29,45 @@ export interface HarEntry {
     headers: Array<{ name: string; value: string }>;
     content: { size: number; mimeType: string; text?: string };
     bodySize: number;
+    chainCandidates?: Record<string, string>;
   };
   timings: {
     send: number;
     wait: number;
     receive: number;
   };
+}
+
+/**
+ * Minimal HAR-like projection used for action-frame classification/quality score.
+ */
+export interface AuditableEntry {
+  startedDateTime: string;
+  request: {
+    method: string;
+    url: string;
+    headers: Array<{ name: string; value: string }>;
+    bodySize: number;
+    postData?: { text: string };
+  };
+  response: {
+    status: number;
+    headers: Array<{ name: string; value: string }>;
+    content: { size: number; mimeType: string };
+    bodySize: number;
+  };
+}
+
+export interface DirectCaptureResult {
+  records: StructuredRecord[];
+  auditEntries: AuditableEntry[];
+  totalCount: number;
+}
+
+export interface CapturedResponseBody {
+  body?: string;
+  bodySize?: number;
+  chainCandidates?: Record<string, string>;
 }
 
 /**
@@ -60,6 +94,31 @@ export class CdpHarRecorder {
    * Flush all pending body reads, then stop recording and return the HAR log.
    */
   async stop(): Promise<HarLog> {
+    const entries = await this.flushAndSeal();
+    return {
+      version: '1.2',
+      creator: { name: 'schrute-cdp', version: '1.0' },
+      entries,
+    };
+  }
+
+  /**
+   * Flush all pending body reads and return direct structured records/audit entries.
+   * Frees internal entry buffers immediately after conversion.
+   */
+  async stopAsStructuredRecords(): Promise<DirectCaptureResult> {
+    const entries = await this.flushAndSeal();
+    const records = entries.map(entry => this.harEntryToStructuredRecord(entry));
+    const auditEntries = entries.map(entry => this.harEntryToAuditableEntry(entry));
+
+    return {
+      records,
+      auditEntries,
+      totalCount: entries.length,
+    };
+  }
+
+  private async flushAndSeal(): Promise<HarEntry[]> {
     // Wait for all pending body reads to complete (best-effort, 5s timeout)
     if (this.pendingBodies.length > 0) {
       await Promise.race([
@@ -70,12 +129,10 @@ export class CdpHarRecorder {
     this.recording = false;
     this.generation++; // invalidate any still-pending body callbacks from this recording
     this.pendingBodies = [];
-    log.debug({ entryCount: this.entries.length }, 'CDP HAR recording stopped');
-    return {
-      version: '1.2',
-      creator: { name: 'schrute-cdp', version: '1.0' },
-      entries: [...this.entries],
-    };
+    const entries = this.entries;
+    this.entries = [];
+    log.debug({ entryCount: entries.length }, 'CDP HAR recording stopped');
+    return entries;
   }
 
   isRecording(): boolean {
@@ -99,7 +156,10 @@ export class CdpHarRecorder {
    * Ingest a network entry immediately, then patch in the body when the
    * promise resolves. The entry is recorded even if the body read fails.
    */
-  ingestWithPendingBody(entry: NetworkEntry, bodyPromise: Promise<string | undefined>): void {
+  ingestWithPendingBody(
+    entry: NetworkEntry,
+    bodyPromise: Promise<CapturedResponseBody | undefined>,
+  ): void {
     if (!this.recording) return;
 
     const harEntry = this.networkEntryToHar(entry);
@@ -111,9 +171,17 @@ export class CdpHarRecorder {
       // Guard: only patch if we're still in the same recording session.
       // A late body from recording A must never mutate recording B's entries.
       if (body !== undefined && this.generation === gen && this.entries[idx]) {
-        this.entries[idx].response.content.text = body;
-        this.entries[idx].response.content.size = Buffer.byteLength(body);
-        this.entries[idx].response.bodySize = Buffer.byteLength(body);
+        if (body.body !== undefined) {
+          this.entries[idx].response.content.text = body.body;
+        }
+        if (body.chainCandidates) {
+          Object.assign(this.entries[idx].response, {
+            chainCandidates: body.chainCandidates,
+          });
+        }
+        const effectiveSize = body.bodySize ?? (body.body !== undefined ? Buffer.byteLength(body.body) : 0);
+        this.entries[idx].response.content.size = effectiveSize;
+        this.entries[idx].response.bodySize = effectiveSize;
       }
     }).catch(err => log.debug({ err }, 'Response body unavailable during HAR recording'));
 
@@ -184,6 +252,68 @@ export class CdpHarRecorder {
         send: 0,
         wait: duration * 0.8, // approximate
         receive: duration * 0.2,
+      },
+    };
+  }
+
+  private harEntryToStructuredRecord(entry: HarEntry): StructuredRecord {
+    const requestHeaders: Record<string, string> = {};
+    for (const header of entry.request.headers) {
+      requestHeaders[header.name.toLowerCase()] = header.value;
+    }
+
+    const responseHeaders: Record<string, string> = {};
+    for (const header of entry.response.headers) {
+      responseHeaders[header.name.toLowerCase()] = header.value;
+    }
+
+    const queryParams: Record<string, string> = {};
+    for (const query of entry.request.queryString) {
+      queryParams[query.name] = query.value;
+    }
+
+    return {
+      request: {
+        method: entry.request.method,
+        url: entry.request.url,
+        headers: requestHeaders,
+        body: entry.request.postData?.text,
+        contentType: entry.request.postData?.mimeType ?? requestHeaders['content-type'],
+        queryParams,
+      },
+      response: {
+        status: entry.response.status,
+        statusText: entry.response.statusText,
+        headers: responseHeaders,
+        body: entry.response.content.text,
+        contentType: entry.response.content.mimeType,
+        chainCandidates: (entry.response as { chainCandidates?: Record<string, string> }).chainCandidates,
+      },
+      startedAt: new Date(entry.startedDateTime).getTime(),
+      duration: entry.time,
+    };
+  }
+
+  private harEntryToAuditableEntry(entry: HarEntry): AuditableEntry {
+    return {
+      startedDateTime: entry.startedDateTime,
+      request: {
+        method: entry.request.method,
+        url: entry.request.url,
+        headers: entry.request.headers,
+        bodySize: entry.request.bodySize,
+        ...(entry.request.postData?.text
+          ? { postData: { text: entry.request.postData.text } }
+          : {}),
+      },
+      response: {
+        status: entry.response.status,
+        headers: entry.response.headers,
+        content: {
+          size: entry.response.content.size,
+          mimeType: entry.response.content.mimeType,
+        },
+        bodySize: entry.response.bodySize,
       },
     };
   }

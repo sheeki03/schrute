@@ -94,4 +94,33 @@ describe('CdpHarRecorder', () => {
     const har = await recorder.stop();
     expect(har.entries).toHaveLength(2);
   });
+
+  it('returns direct structured records and auditable entries', async () => {
+    recorder.start();
+    recorder.ingestNetworkEntries([
+      makeNetworkEntry({
+        method: 'POST',
+        url: 'https://api.example.com/users?page=1',
+        requestBody: '{"name":"alice"}',
+        responseBody: '{"id":"u_123"}',
+        status: 201,
+      }),
+    ]);
+
+    const result = await recorder.stopAsStructuredRecords();
+
+    expect(result.totalCount).toBe(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.auditEntries).toHaveLength(1);
+
+    expect(result.records[0].request.method).toBe('POST');
+    expect(result.records[0].request.queryParams).toEqual({ page: '1' });
+    expect(result.records[0].request.body).toBe('{"name":"alice"}');
+    expect(result.records[0].response.status).toBe(201);
+
+    expect(result.auditEntries[0].request.method).toBe('POST');
+    expect(result.auditEntries[0].request.postData?.text).toBe('{"name":"alice"}');
+    expect(result.auditEntries[0].response.status).toBe(201);
+    expect(result.auditEntries[0].response.content.mimeType).toBe('application/json');
+  });
 });
