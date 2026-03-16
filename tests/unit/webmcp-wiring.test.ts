@@ -13,7 +13,7 @@ vi.mock('../../src/core/logger.js', () => ({
 // ─── Mock config ─────────────────────────────────────────────────
 vi.mock('../../src/core/config.js', () => ({
   getConfig: () => ({
-    dataDir: '/tmp/test-oneagent',
+    dataDir: '/tmp/test-schrute',
     logLevel: 'silent',
     features: { webmcp: false, httpTransport: false },
     daemon: { port: 19420, autoStart: false },
@@ -31,7 +31,7 @@ vi.mock('../../src/core/config.js', () => ({
     maxToolsPerSite: 20,
     toolShortlistK: 10,
   }),
-  getDataDir: () => '/tmp/test-oneagent',
+  getDataDir: () => '/tmp/test-schrute',
   getDbPath: () => ':memory:',
   ensureDirectories: vi.fn(),
   loadConfig: vi.fn(),
@@ -44,7 +44,7 @@ vi.mock('../../src/storage/database.js', () => ({
   AgentDatabase: class {},
 }));
 
-import type { BrowserProvider, SealedModelContextResponse, OneAgentConfig, CapabilityName } from '../../src/skill/types.js';
+import type { BrowserProvider, SealedModelContextResponse, SchruteConfig, CapabilityName } from '../../src/skill/types.js';
 import { Capability, DISABLED_BY_DEFAULT_CAPABILITIES } from '../../src/skill/types.js';
 import { checkCapability, invalidatePolicyCache, setSitePolicy } from '../../src/core/policy.js';
 import { scanWebMcp, loadCachedTools } from '../../src/discovery/webmcp-scanner.js';
@@ -67,6 +67,11 @@ function mockBrowser(modelContextResult?: SealedModelContextResponse): BrowserPr
 
   if (modelContextResult !== undefined) {
     base.evaluateModelContext = vi.fn().mockResolvedValue(modelContextResult);
+    // Scanner now uses listModelContextTools() — wrap result in { tools, testingTools } envelope
+    const toolsEnvelope = modelContextResult.error
+      ? modelContextResult
+      : { result: { tools: modelContextResult.result, testingTools: null }, error: modelContextResult.error };
+    base.listModelContextTools = vi.fn().mockResolvedValue(toolsEnvelope);
   }
 
   return base;
@@ -208,7 +213,7 @@ describe('webmcp-wiring', () => {
         capabilities: {
           enabled: [Capability.BROWSER_MODEL_CONTEXT] as CapabilityName[],
         },
-      } as OneAgentConfig;
+      } as SchruteConfig;
 
       const result = checkCapability('example.com', Capability.BROWSER_MODEL_CONTEXT, config);
       expect(result.allowed).toBe(true);
@@ -233,7 +238,7 @@ describe('webmcp-wiring', () => {
         capabilities: {
           enabled: [Capability.BROWSER_MODEL_CONTEXT] as CapabilityName[],
         },
-      } as OneAgentConfig;
+      } as SchruteConfig;
 
       const result = checkCapability('nope.com', Capability.BROWSER_MODEL_CONTEXT, config);
       expect(result.allowed).toBe(false);
@@ -247,7 +252,7 @@ describe('webmcp-wiring', () => {
 
   // ─── Dispatch-level tests ──────────────────────────────────────
 
-  describe('oneagent_webmcp_call dispatch logic', () => {
+  describe('schrute_webmcp_call dispatch logic', () => {
     it('requires features.webmcp to be enabled', () => {
       // The dispatch handler checks config.features.webmcp first
       const config = { features: { webmcp: false } } as any;
@@ -426,9 +431,9 @@ describe('webmcp-wiring', () => {
       );
       expect(insertCalls1.length).toBeGreaterThan(0);
 
-      // Second scan fails (evaluateModelContext throws)
+      // Second scan fails (listModelContextTools throws)
       const browser2 = mockBrowser();
-      browser2.evaluateModelContext = vi.fn().mockRejectedValue(new Error('Page crashed'));
+      browser2.listModelContextTools = vi.fn().mockRejectedValue(new Error('Page crashed'));
 
       // Clear mock to track only second scan's calls
       (db.run as ReturnType<typeof vi.fn>).mockClear();
@@ -470,14 +475,14 @@ describe('webmcp-wiring', () => {
 
   // ─── META_TOOLS schema validation ──────────────────────────────
 
-  describe('oneagent_webmcp_call in META_TOOLS', () => {
+  describe('schrute_webmcp_call in META_TOOLS', () => {
     it('is present in META_TOOLS array', () => {
-      const tool = META_TOOLS.find(t => t.name === 'oneagent_webmcp_call');
+      const tool = META_TOOLS.find(t => t.name === 'schrute_webmcp_call');
       expect(tool).toBeDefined();
     });
 
     it('has correct schema with required toolName', () => {
-      const tool = META_TOOLS.find(t => t.name === 'oneagent_webmcp_call')!;
+      const tool = META_TOOLS.find(t => t.name === 'schrute_webmcp_call')!;
       expect(tool.inputSchema.type).toBe('object');
       expect(tool.inputSchema.properties).toHaveProperty('toolName');
       expect(tool.inputSchema.properties).toHaveProperty('args');
@@ -485,7 +490,7 @@ describe('webmcp-wiring', () => {
     });
 
     it('has appropriate description', () => {
-      const tool = META_TOOLS.find(t => t.name === 'oneagent_webmcp_call')!;
+      const tool = META_TOOLS.find(t => t.name === 'schrute_webmcp_call')!;
       expect(tool.description).toContain('WebMCP');
     });
   });

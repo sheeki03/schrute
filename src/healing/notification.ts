@@ -1,18 +1,21 @@
 import { getLogger } from '../core/logger.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
 
 const log = getLogger();
 
 // ─── Types ──────────────────────────────────────────────────────
 
-export type SkillEventType =
+type SkillEventType =
   | 'skill_degraded'
   | 'skill_broken'
   | 'skill_relearned'
   | 'skill_promoted'
-  | 'skill_demoted';
+  | 'skill_demoted'
+  | 'skill_nudge'
+  | 'webmcp_tool_added'
+  | 'webmcp_tool_removed';
 
-export interface SkillEvent {
+interface SkillEvent {
   type: SkillEventType;
   skillId: string;
   siteId: string;
@@ -20,7 +23,7 @@ export interface SkillEvent {
   timestamp: number;
 }
 
-export interface NotificationSink {
+interface NotificationSink {
   name: string;
   send(event: SkillEvent): Promise<void>;
 }
@@ -139,7 +142,7 @@ export function drainMcpNotifications(): McpNotification[] {
  */
 export async function notify(
   event: SkillEvent,
-  config: OneAgentConfig,
+  config: SchruteConfig,
   webhookUrls?: string[],
 ): Promise<void> {
   const sinks: NotificationSink[] = [new LogSink(), new McpSink()];

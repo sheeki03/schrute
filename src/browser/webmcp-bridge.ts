@@ -70,6 +70,10 @@ export async function executeWebMcpTool(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error({ toolName: req.toolName, error: message }, 'WebMCP tool execution failed');
+    // Distinguish user cancellation from failure
+    if (message.includes('cancelled by user')) {
+      return { result: null, error: `Tool '${req.toolName}' was cancelled by the user` };
+    }
     return {
       result: null,
       error: `Execution failed: ${message}`,

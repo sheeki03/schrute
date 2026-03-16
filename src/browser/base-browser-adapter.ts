@@ -38,6 +38,7 @@ import {
   raceAgainstModals,
 } from './modal-state.js';
 import { resizeScreenshotBuffer, estimateScale, DEFAULT_MAX_DIMENSION, DEFAULT_MAX_PIXELS } from './screenshot-resize.js';
+import { humanMousePreamble } from './human-input.js';
 import { getLogger } from '../core/logger.js';
 
 const log = getLogger();
@@ -159,8 +160,8 @@ async function dismissCloudflareInterstitial(page: Page, timeoutMs: number): Pro
           await page.waitForLoadState('domcontentloaded', { timeout: deadline - Date.now() });
           return true;
         }
-      } catch {
-        // Button wait/click failed
+      } catch (err) {
+        log.debug({ err }, 'CF bypass: turnstile button wait/click failed');
       }
 
       // Strategy 2: Force-enable button and submit form (Turnstile may not
@@ -182,23 +183,23 @@ async function dismissCloudflareInterstitial(page: Page, timeoutMs: number): Pro
         if (navigated) {
           try {
             await page.waitForLoadState('domcontentloaded', { timeout: Math.max(deadline - Date.now(), 3000) });
-          } catch { /* navigation may not complete */ }
+          } catch (err) { log.debug({ err }, 'CF bypass: waitForLoadState after force-bypass failed'); }
           // Verify we reached the target site, not a CF error page
           const newUrl = page.url();
-          const newTitle = await page.title().catch(() => '');
+          const newTitle = await page.title().catch((err: unknown) => { log.debug({ err }, 'page.title() failed'); return ''; });
           const isBypassError = /\/cdn-cgi\/phish-bypass/i.test(newUrl);
           if (!isBypassError && !/phishing/i.test(newTitle) && newTitle.length > 0) return true;
           // Go back if we ended up on the bypass error page
           if (isBypassError) {
-            try { await page.goBack({ timeout: 5000 }); } catch { /* best effort */ }
+            try { await page.goBack({ timeout: 5000 }); } catch (err) { log.debug({ err }, 'CF bypass: goBack after phishing page failed'); }
           }
         }
-      } catch {
-        // Force bypass failed
+      } catch (err) {
+        log.debug({ err }, 'CF bypass: force-enable button strategy failed');
       }
     }
-  } catch {
-    // #bypass-button approach failed entirely
+  } catch (err) {
+    log.debug({ err }, 'CF bypass: #bypass-button approach failed entirely');
   }
 
   // Strategy 3: Generic fallback — try clicking any visible proceed-like button
@@ -215,11 +216,11 @@ async function dismissCloudflareInterstitial(page: Page, timeoutMs: number): Pro
         await el.click({ timeout: 3000 });
         await page.waitForLoadState('domcontentloaded', { timeout: Math.max(deadline - Date.now(), 3000) });
         const newUrl = page.url();
-        const newTitle = await page.title().catch(() => '');
+        const newTitle = await page.title().catch((err: unknown) => { log.debug({ err }, 'page.title() failed'); return ''; });
         if (!/cdn-cgi/i.test(newUrl) && !/phishing/i.test(newTitle) && newTitle.length > 0) return true;
       }
-    } catch {
-      // Selector not found — try next
+    } catch (err) {
+      log.debug({ err, selector }, 'CF bypass: fallback selector failed');
     }
   }
 
@@ -796,10 +797,22 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
         if (typeof args.interactiveOnly === 'boolean') options.interactiveOnly = args.interactiveOnly;
         return this.snapshotWithScreenshot(options);
       }
+      case 'browser_debug_trace':
+        return this.debugTrace();
       case 'browser_click': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
         return this.withRefLocator(args.ref, (loc) =>
-          this.withModalRace(async () => { await loc.click({ timeout: this.handlerTimeoutMs }); }));
+          this.withModalRace(async () => {
+            if (this.flags.humanCursor) {
+              const bbox = await loc.boundingBox();
+              if (bbox) {
+                const cx = bbox.x + bbox.width / 2;
+                const cy = bbox.y + bbox.height / 2;
+                await humanMousePreamble(this.page, cx, cy);
+              }
+            }
+            await loc.click({ timeout: this.handlerTimeoutMs });
+          }));
       }
       case 'browser_type': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
@@ -840,7 +853,17 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       case 'browser_hover': {
         if (typeof args.ref !== 'string') throw new Error('Expected ref to be a string');
         return this.withRefLocator(args.ref, (loc) =>
-          this.withModalRace(async () => { await loc.hover({ timeout: this.handlerTimeoutMs }); }));
+          this.withModalRace(async () => {
+            if (this.flags.humanCursor) {
+              const bbox = await loc.boundingBox();
+              if (bbox) {
+                const cx = bbox.x + bbox.width / 2;
+                const cy = bbox.y + bbox.height / 2;
+                await humanMousePreamble(this.page, cx, cy);
+              }
+            }
+            await loc.hover({ timeout: this.handlerTimeoutMs });
+          }));
       }
       case 'browser_drag': {
         if (typeof args.startRef !== 'string') throw new Error('Expected startRef to be a string');
@@ -958,7 +981,22 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   // ─── BrowserProvider Interface ─────────────────────────────────────
 
   async navigate(url: string, options?: { timeout?: number }): Promise<void> {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: options?.timeout });
+    const gotoOpts: Record<string, unknown> = { waitUntil: 'domcontentloaded', timeout: options?.timeout };
+
+    // Referrer spoofing: inject Google referer when navigating cross-origin
+    if (this.flags.referrerSpoofing) {
+      try {
+        const currentHost = new URL(this.page.url()).hostname;
+        const targetHost = new URL(url).hostname;
+        if (currentHost !== targetHost) {
+          gotoOpts.referer = 'https://www.google.com/';
+        }
+      } catch {
+        // Invalid URLs — skip spoofing
+      }
+    }
+
+    await this.page.goto(url, gotoOpts);
     await detectAndWaitForChallenge(this.page);
   }
 
@@ -1177,7 +1215,7 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
         'This page is showing a Cloudflare security interstitial.\n' +
         'Options:\n' +
         extra +
-        '- Import cookies: use oneagent_import_cookies with a cf_clearance cookie file\n' +
+        '- Import cookies: use schrute_import_cookies with a cf_clearance cookie file\n' +
         engineHint +
         '- Current engine: ' + currentEngine + '\n\n';
       content = warning + content;
@@ -1291,14 +1329,65 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
           return { result: null, error: 'WebMCP not available on this page' };
         }
         try {
-          const response = await mc.callTool(name, callArgs);
-          return { result: response, error: null };
+          // Set up cancel detection
+          const cancelPromise = new Promise((_, reject) => {
+            (globalThis as any).addEventListener('toolcancel', (evt: any) => {
+              if (evt.toolName === name) reject(new Error(`Tool '${name}' cancelled by user`));
+            }, { once: true });
+          });
+          const response = await Promise.race([
+            mc.callTool(name, callArgs),
+            cancelPromise,
+          ]);
+          return { result: response, error: null, hasStructuredResponse: typeof response === 'object' && response !== null };
         } catch (err: any) {
           return { result: null, error: err?.message ?? String(err) };
         }
       },
       { name: toolName, arguments: args },
     );
+    return result as SealedModelContextResponse;
+  }
+
+  async listModelContextTools(): Promise<SealedModelContextResponse> {
+    const result = await this.page.evaluate(async () => {
+      const mc = (navigator as any).modelContext;
+      if (!mc) return { result: null, error: 'WebMCP not available' };
+
+      if (typeof mc.listTools === 'function') {
+        try {
+          const tools = await mc.listTools();
+          const testing = (navigator as any).modelContextTesting;
+          let testingTools = null;
+          if (testing && typeof testing.listTools === 'function') {
+            try { testingTools = await testing.listTools(); } catch {}
+          }
+          return { result: { tools, testingTools }, error: null };
+        } catch (e: any) {
+          return { result: null, error: e?.message ?? String(e) };
+        }
+      }
+
+      const testing = (navigator as any).modelContextTesting;
+      if (testing && typeof testing.listTools === 'function') {
+        try {
+          return { result: { tools: await testing.listTools() }, error: null };
+        } catch (e: any) {
+          return { result: null, error: e?.message ?? String(e) };
+        }
+      }
+
+      if (typeof mc.callTool === 'function') {
+        try {
+          const r = await mc.callTool('__webmcp_probe__', { action: 'listTools' });
+          return { result: { tools: r }, error: null };
+        } catch (e: any) {
+          return { result: null, error: e?.message ?? String(e) };
+        }
+      }
+
+      return { result: null, error: 'No tool enumeration API found' };
+    });
     return result as SealedModelContextResponse;
   }
 
@@ -1360,6 +1449,25 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
 
   getNetworkEntryCount(): number {
     return this.networkEntries.length;
+  }
+
+  consoleMessages(): SnapshotEvent[] {
+    return this.consoleLog.map(m => ({
+      type: 'console' as const,
+      level: (m.level === 'error' || m.level === 'warning' || m.level === 'info' || m.level === 'debug')
+        ? m.level
+        : 'info' as const,
+      text: m.text,
+    }));
+  }
+
+  async debugTrace(): Promise<{ snapshot: PageSnapshot; console: SnapshotEvent[]; network: NetworkEntry[] }> {
+    const [snapshot, consoleEvents, network] = await Promise.all([
+      this.snapshot(),
+      Promise.resolve(this.consoleMessages()),
+      this.networkRequests(),
+    ]);
+    return { snapshot, console: consoleEvents, network };
   }
 
   async networkRequests(includeStatic?: boolean): Promise<NetworkEntry[]> {

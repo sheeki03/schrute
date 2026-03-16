@@ -1,18 +1,30 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getDbPath, ensureDirectories } from '../core/config.js';
-import type { OneAgentConfig } from '../skill/types.js';
+import type { SchruteConfig } from '../skill/types.js';
+
+// Lazy-loaded constructor. require() is synchronous — no async propagation.
+const esmRequire = createRequire(import.meta.url);
+let _Ctor: typeof Database | null = null;
+
+function loadSqlite(): typeof Database {
+  if (!_Ctor) {
+    _Ctor = esmRequire('better-sqlite3');
+  }
+  return _Ctor!;
+}
 
 // ─── Embedded Migrations ──────────────────────────────────────────────
 // SQL files are not emitted by tsc, so we embed them as string constants.
 // The original .sql files are kept in src/storage/migrations/ for reference.
 
-const MIGRATIONS: Array<{ filename: string; sql: string }> = [
+export const MIGRATIONS: Array<{ filename: string; sql: string }> = [
   {
     filename: '001_initial.sql',
     sql: `
--- OneAgent initial schema
+-- Schrute initial schema
 
 CREATE TABLE IF NOT EXISTS sites (
   id              TEXT PRIMARY KEY,
@@ -175,13 +187,113 @@ ALTER TABLE skills ADD COLUMN redaction TEXT NOT NULL DEFAULT '{"piiClassesFound
 ALTER TABLE skills ADD COLUMN replay_strategy TEXT NOT NULL DEFAULT 'prefer_tier_3';
 `,
   },
+  {
+    filename: '004_skill_exemplars.sql',
+    sql: `
+CREATE TABLE IF NOT EXISTS skill_exemplars (
+  skill_id TEXT PRIMARY KEY,
+  response_status INTEGER NOT NULL,
+  response_schema_hash TEXT NOT NULL,
+  redacted_response_body TEXT NOT NULL,
+  captured_at INTEGER NOT NULL
+);
+`,
+  },
+  {
+    filename: '005_skill_amendments.sql',
+    sql: `
+CREATE TABLE IF NOT EXISTS skill_amendments (
+  id TEXT PRIMARY KEY,
+  skill_id TEXT NOT NULL,
+  failure_cause TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  snapshot_fields TEXT NOT NULL,
+  success_rate_before REAL NOT NULL,
+  success_rate_after REAL,
+  executions_since INTEGER DEFAULT 0,
+  evaluation_window INTEGER NOT NULL DEFAULT 10,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_amendment
+  ON skill_amendments(skill_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_amendments_cause_strategy
+  ON skill_amendments(failure_cause, strategy, status);
+`,
+  },
+  {
+    filename: '006_execution_policy.sql',
+    sql: `
+ALTER TABLE policies ADD COLUMN execution_backend TEXT;
+ALTER TABLE policies ADD COLUMN execution_session_name TEXT;
+`,
+  },
+  {
+    filename: '007_canary_and_stats.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN avg_latency_ms REAL;
+ALTER TABLE skills ADD COLUMN last_successful_tier TEXT;
+ALTER TABLE skills ADD COLUMN direct_canary_eligible INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN direct_canary_attempts INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN validations_since_last_canary INTEGER DEFAULT 0;
+ALTER TABLE skills ADD COLUMN last_canary_error_type TEXT;
+`,
+  },
+  {
+    filename: '008_rate_limit_backoffs.sql',
+    sql: `
+CREATE TABLE IF NOT EXISTS rate_limit_backoffs (
+  site_id TEXT PRIMARY KEY,
+  backoff_until INTEGER NOT NULL,
+  multiplier REAL NOT NULL DEFAULT 1
+);
+`,
+  },
+  {
+    filename: '009_fts_and_review.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN review_required INTEGER DEFAULT 0;
+
+-- Requires daemon restart. searchFts() falls back to LIKE when unavailable.
+CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+  skill_id UNINDEXED, name, description, path_template, site_id UNINDEXED,
+  tokenize='porter unicode61'
+);
+INSERT INTO skills_fts(skill_id, name, description, path_template, site_id)
+  SELECT id, name, COALESCE(description, ''), path_template, site_id FROM skills;
+
+CREATE TRIGGER IF NOT EXISTS skills_fts_insert AFTER INSERT ON skills BEGIN
+  INSERT INTO skills_fts(skill_id, name, description, path_template, site_id)
+    VALUES (new.id, new.name, COALESCE(new.description, ''), new.path_template, new.site_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_fts_update AFTER UPDATE ON skills BEGIN
+  DELETE FROM skills_fts WHERE skill_id = old.id;
+  INSERT INTO skills_fts(skill_id, name, description, path_template, site_id)
+    VALUES (new.id, new.name, COALESCE(new.description, ''), new.path_template, new.site_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS skills_fts_delete AFTER DELETE ON skills BEGIN
+  DELETE FROM skills_fts WHERE skill_id = old.id;
+END;
+`,
+  },
+  {
+    filename: '010_webmcp_declarative.sql',
+    sql: `
+-- WebMCP declarative tool metadata (Chrome 146)
+ALTER TABLE webmcp_tools ADD COLUMN declarative INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE webmcp_tools ADD COLUMN auto_submit INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];
 
 export class AgentDatabase {
   private db: Database.Database | null = null;
   private dbPath: string;
 
-  constructor(config?: OneAgentConfig) {
+  constructor(config?: SchruteConfig) {
     this.dbPath = getDbPath(config);
     ensureDirectories(config);
   }
@@ -204,7 +316,17 @@ export class AgentDatabase {
       dbOptions.nativeBinding = addonPath;
     }
 
-    this.db = new Database(this.dbPath, dbOptions);
+    try {
+      this.db = new (loadSqlite())(this.dbPath, dbOptions);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('NODE_MODULE_VERSION') || msg.includes('was compiled against') || msg.includes('ERR_DLOPEN_FAILED')) {
+        throw new Error(
+          `${msg}\n\nNative module ABI mismatch.\nFix with: npm rebuild better-sqlite3\nOr run: schrute doctor`,
+        );
+      }
+      throw err;
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
@@ -286,7 +408,7 @@ let defaultDb: AgentDatabase | null = null;
 let defaultDbPath: string | null = null;
 let exitHandler: (() => void) | null = null;
 
-export function getDatabase(config?: OneAgentConfig): AgentDatabase {
+export function getDatabase(config?: SchruteConfig): AgentDatabase {
   const requestedPath = getDbPath(config);
 
   if (defaultDb) {
@@ -310,7 +432,7 @@ export function getDatabase(config?: OneAgentConfig): AgentDatabase {
     exitHandler = () => {
       if (defaultDb) {
         try { defaultDb.close(); } catch (err) {
-          try { console.error('[oneagent] Failed to close database on exit:', err); } catch { /* truly best effort */ }
+          try { console.error('[schrute] Failed to close database on exit:', err); } catch { /* truly best effort */ }
         }
         defaultDb = null;
         defaultDbPath = null;
