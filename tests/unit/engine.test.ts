@@ -141,8 +141,27 @@ vi.mock('../../src/browser/playwright-mcp-adapter.js', () => ({
 
 // Mock detectAndWaitForChallenge from base-browser-adapter
 const mockDetectAndWaitForChallenge = vi.fn().mockResolvedValue(false);
+const mockIsCloudflareChallengePage = vi.fn().mockResolvedValue(false);
 vi.mock('../../src/browser/base-browser-adapter.js', () => ({
   detectAndWaitForChallenge: (...args: unknown[]) => mockDetectAndWaitForChallenge(...args),
+  isCloudflareChallengePage: (...args: unknown[]) => mockIsCloudflareChallengePage(...args),
+}));
+
+const mockCleanupManagedChromeLaunches = vi.fn().mockResolvedValue(undefined);
+const mockLaunchManagedChrome = vi.fn();
+const mockRemoveManagedChromeMetadata = vi.fn();
+const mockTerminateManagedChrome = vi.fn().mockResolvedValue(undefined);
+const mockWaitForDevToolsActivePort = vi.fn();
+const mockWriteManagedChromeMetadata = vi.fn();
+const mockListManagedChromeMetadata = vi.fn().mockReturnValue([]);
+vi.mock('../../src/browser/real-browser-handoff.js', () => ({
+  cleanupManagedChromeLaunches: (...args: unknown[]) => mockCleanupManagedChromeLaunches(...args),
+  launchManagedChrome: (...args: unknown[]) => mockLaunchManagedChrome(...args),
+  removeManagedChromeMetadata: (...args: unknown[]) => mockRemoveManagedChromeMetadata(...args),
+  terminateManagedChrome: (...args: unknown[]) => mockTerminateManagedChrome(...args),
+  waitForDevToolsActivePort: (...args: unknown[]) => mockWaitForDevToolsActivePort(...args),
+  writeManagedChromeMetadata: (...args: unknown[]) => mockWriteManagedChromeMetadata(...args),
+  listManagedChromeMetadata: (...args: unknown[]) => mockListManagedChromeMetadata(...args),
 }));
 
 // Mock session manager dependencies
@@ -235,6 +254,11 @@ vi.mock('../../src/core/policy.js', () => ({
     domainAllowlist: ['example.com'],
     capabilities: [],
   }),
+  mergeSitePolicy: vi.fn().mockImplementation((siteId: string, overlay: Record<string, unknown>) => ({
+    merged: { siteId, domainAllowlist: ['example.com'], capabilities: [], ...overlay },
+    prior: {},
+    persisted: true,
+  })),
   setSitePolicy: vi.fn(),
 }));
 
@@ -320,7 +344,7 @@ vi.mock('node:fs', async () => {
 import { Engine, buildEnforcementSchema } from '../../src/core/engine.js';
 import { ContextOverrideMismatchError } from '../../src/browser/manager.js';
 import { PlaywrightMcpAdapter } from '../../src/browser/playwright-mcp-adapter.js';
-import { checkMethodAllowed, checkPathRisk } from '../../src/core/policy.js';
+import { checkMethodAllowed, checkPathRisk, mergeSitePolicy } from '../../src/core/policy.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
 import { MetricsRepository } from '../../src/storage/metrics-repository.js';
 import { retryWithEscalation } from '../../src/replay/retry.js';
@@ -341,6 +365,37 @@ describe('Engine', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    const defaultPage = {
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn().mockReturnValue('main-frame'),
+      url: vi.fn().mockReturnValue('about:blank'),
+      goto: vi.fn().mockResolvedValue(undefined),
+      title: vi.fn().mockResolvedValue(''),
+      evaluate: vi.fn().mockResolvedValue(false),
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+      waitForLoadState: vi.fn().mockResolvedValue(undefined),
+      isClosed: vi.fn().mockReturnValue(false),
+    };
+    const defaultContext = {
+      pages: () => [defaultPage],
+      newPage: vi.fn().mockResolvedValue(defaultPage),
+    };
+    mockBrowserManager.getOrCreateContext.mockResolvedValue(defaultContext as any);
+    mockBrowserManager.getSelectedOrFirstPage.mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+      const pages = context?.pages?.() ?? [];
+      if (pages.length > 0) return pages[0];
+      return context?.newPage ? context.newPage() : ({} as any);
+    });
+    mockBrowserManager.tryGetContext.mockReturnValue(undefined);
+    mockBrowserManager.withLease.mockImplementation(async (fn: () => Promise<unknown>) => fn());
+    mockBrowserManager.getCapabilities.mockReturnValue(null);
+    mockBrowserManager.hasContext.mockReturnValue(false);
+    mockBrowserManager.snapshotAuth.mockResolvedValue(undefined);
+    mockSessionGetSession.mockReturnValue(undefined);
+    mockDetectAndWaitForChallenge.mockResolvedValue(false);
+    mockIsCloudflareChallengePage.mockResolvedValue(false);
+    mockListManagedChromeMetadata.mockReturnValue([]);
     engine = new Engine(makeConfig());
   });
 
@@ -373,6 +428,45 @@ describe('Engine', () => {
     it('reports uptime >= 0', () => {
       const status = engine.getStatus();
       expect(status.uptime).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('startup recovery cleanup', () => {
+    it('restores stale recovery-owned policy overlays from persisted metadata during startup', async () => {
+      mockDb.all.mockImplementation((sql: string) => (
+        sql.includes("execution_session_name GLOB '__recovery_*'")
+          ? [{ site_id: 'example.com', execution_session_name: '__recovery_deadbeef' }]
+          : []
+      ));
+      mockListManagedChromeMetadata.mockReturnValue([{
+        profileDir: '/tmp/schrute-engine-test/browser-data/live-chrome/recovery-1',
+        siteId: 'example.com',
+        createdAt: Date.now(),
+        sessionName: '__recovery_deadbeef',
+        priorPolicySnapshot: {
+          domainAllowlist: ['example.com'],
+          executionBackend: 'playwright',
+          executionSessionName: 'manual-cdp',
+        },
+      }]);
+
+      const freshEngine = new Engine(makeConfig());
+
+      expect(mergeSitePolicy).toHaveBeenCalledWith(
+        'example.com',
+        expect.objectContaining({
+          domainAllowlist: ['example.com'],
+          executionBackend: 'playwright',
+          executionSessionName: 'manual-cdp',
+        }),
+        expect.anything(),
+      );
+      expect(mockRemoveManagedChromeMetadata).toHaveBeenCalledWith(
+        '/tmp/schrute-engine-test/browser-data/live-chrome/recovery-1',
+      );
+
+      await freshEngine.close();
+      mockDb.all.mockReturnValue([]);
     });
   });
 
@@ -434,6 +528,56 @@ describe('Engine', () => {
       expect(result.siteId).toBe('example.com');
       expect(result.sessionId).toBe('sess-1');
       expect(engine.getStatus().mode).toBe('exploring');
+    });
+
+    it('returns browser_handoff_required when the header probe detects a Cloudflare challenge', async () => {
+      const listeners = new Map<string, (response: unknown) => void>();
+      const page = {
+        on: vi.fn((event: string, listener: (response: unknown) => void) => {
+          listeners.set(event, listener);
+        }),
+        off: vi.fn((event: string) => {
+          listeners.delete(event);
+        }),
+        mainFrame: vi.fn().mockReturnValue('main-frame'),
+        url: vi.fn().mockReturnValue('https://example.com/cdn-cgi/challenge-platform'),
+        goto: vi.fn().mockImplementation(async () => {
+          listeners.get('response')?.({
+            request: () => ({
+              isNavigationRequest: () => true,
+              frame: () => 'main-frame',
+            }),
+            url: () => 'https://example.com/cdn-cgi/challenge-platform',
+            headers: () => ({ 'cf-mitigated': 'challenge' }),
+          });
+        }),
+        title: vi.fn().mockResolvedValue(''),
+        evaluate: vi.fn().mockResolvedValue(false),
+        waitForFunction: vi.fn().mockResolvedValue(undefined),
+        waitForLoadState: vi.fn().mockResolvedValue(undefined),
+        isClosed: vi.fn().mockReturnValue(false),
+      };
+      const context = {
+        pages: () => [page],
+        newPage: vi.fn().mockResolvedValue(page),
+      };
+      mockBrowserManager.getOrCreateContext
+        .mockResolvedValueOnce(context as any)
+        .mockResolvedValueOnce(context as any);
+      mockBrowserManager.getSelectedOrFirstPage
+        .mockResolvedValueOnce(page as any)
+        .mockResolvedValueOnce(page as any);
+      mockBrowserManager.getCapabilities.mockReturnValueOnce({ effectiveEngine: 'playwright' });
+
+      const result = await engine.explore('https://example.com');
+
+      expect(result.status).toBe('browser_handoff_required');
+      if (result.status === 'browser_handoff_required') {
+        expect(result.reason).toBe('cloudflare_challenge');
+        expect(result.resumeToken).toBeTruthy();
+        expect(result.advisoryHint).toContain('patchright');
+      }
+      expect(engine.getStatus().pendingRecovery?.siteId).toBe('example.com');
     });
 
     it('creates a browser session', async () => {
@@ -508,16 +652,14 @@ describe('Engine', () => {
       expect(engine.getStatus().mode).toBe('exploring');
     });
 
-    it('rejects recording when active session is not default', async () => {
+    it('records against the explore session even when another named session is active', async () => {
       await engine.explore('https://example.com');
       const msm = engine.getMultiSessionManager();
       msm.getOrCreate('other-session');
       msm.setActive('other-session');
-      await expect(engine.startRecording('test')).rejects.toThrow(
-        /Recording with Playwright HAR is only supported on the default session/,
-      );
-      // Restore for other tests
-      msm.setActive('default');
+      const result = await engine.startRecording('test');
+      expect(result.name).toBe('test');
+      expect(engine.getRecordingSessionName()).toBe('default');
     });
 
     it('counts responses via context-level listener across new pages', async () => {
@@ -551,6 +693,22 @@ describe('Engine', () => {
 
       // Restore mock
       mockBrowserManager.tryGetContext.mockReturnValue(undefined);
+    });
+
+    it('rejects recovery while a recording is active and preserves recording state', async () => {
+      await engine.explore('https://example.com');
+      await engine.startRecording('recording-in-progress');
+      const recovery = (engine as any).upsertPendingRecovery(
+        'example.com',
+        'https://example.com/cdn-cgi/challenge-platform',
+      );
+
+      const result = await engine.recoverExplore(recovery.resumeToken);
+
+      expect(result.status).toBe('failed');
+      expect(result.hint).toContain('schrute_stop');
+      expect(engine.getStatus().mode).toBe('recording');
+      expect(engine.getStatus().currentRecording?.name).toBe('recording-in-progress');
     });
   });
 
@@ -1327,20 +1485,69 @@ describe('Engine', () => {
     it('returns appliedOverrides when proxy is provided', async () => {
       const overrides = { proxy: { server: 'http://proxy.example.com:8080' } };
       const result = await engine.explore('https://example.com', overrides);
-      expect(result.appliedOverrides).toBeDefined();
-      expect(result.appliedOverrides!.proxy).toEqual({ server: 'http://proxy.example.com:8080' });
+      expect(result.status).toBe('ready');
+      if (result.status === 'ready') {
+        expect(result.appliedOverrides).toBeDefined();
+        expect(result.appliedOverrides!.proxy).toEqual({ server: 'http://proxy.example.com:8080' });
+      }
     });
 
     it('returns appliedOverrides with geo when provided', async () => {
       const overrides = { geo: { timezoneId: 'America/New_York', locale: 'en-US' } };
       const result = await engine.explore('https://example.com', overrides);
-      expect(result.appliedOverrides).toBeDefined();
-      expect(result.appliedOverrides!.geo).toEqual({ timezoneId: 'America/New_York', locale: 'en-US' });
+      expect(result.status).toBe('ready');
+      if (result.status === 'ready') {
+        expect(result.appliedOverrides).toBeDefined();
+        expect(result.appliedOverrides!.geo).toEqual({ timezoneId: 'America/New_York', locale: 'en-US' });
+      }
     });
 
     it('returns undefined appliedOverrides when none provided', async () => {
       const result = await engine.explore('https://example.com');
-      expect(result.appliedOverrides).toBeUndefined();
+      expect(result.status).toBe('ready');
+      if (result.status === 'ready') {
+        expect(result.appliedOverrides).toBeUndefined();
+      }
+    });
+  });
+
+  describe('recovery policy binding', () => {
+    it('reapplies the live-chrome overlay when reconnecting with an existing snapshot', async () => {
+      const sessionName = '__recovery_deadbeef';
+      const session = engine.getMultiSessionManager().getOrCreate(sessionName);
+      session.siteId = 'example.com';
+      const entry = {
+        siteId: 'example.com',
+        cdpSessionName: sessionName,
+        managedProfileDir: '/tmp/schrute-engine-test/browser-data/live-chrome/recovery-bind',
+        priorPolicySnapshot: {
+          domainAllowlist: ['example.com'],
+          executionBackend: undefined,
+          executionSessionName: undefined,
+        },
+      } as any;
+
+      (mergeSitePolicy as ReturnType<typeof vi.fn>).mockClear();
+      await (engine as any).bindRecoveryPolicy(entry);
+
+      expect(mergeSitePolicy).toHaveBeenCalledWith(
+        'example.com',
+        expect.objectContaining({
+          executionBackend: 'live-chrome',
+          executionSessionName: sessionName,
+        }),
+        expect.anything(),
+      );
+      expect(mockWriteManagedChromeMetadata).toHaveBeenCalledWith(
+        '/tmp/schrute-engine-test/browser-data/live-chrome/recovery-bind',
+        undefined,
+        'example.com',
+        expect.objectContaining({
+          sessionName,
+          priorPolicySnapshot: entry.priorPolicySnapshot,
+        }),
+      );
+      expect(session.cdpPriorPolicyState).toEqual(entry.priorPolicySnapshot);
     });
   });
 
@@ -1361,8 +1568,11 @@ describe('Engine', () => {
 
       // Second explore to same site should reuse
       const result = await engine.explore('https://example.com/page2');
-      expect(result.reused).toBe(true);
-      expect(result.sessionId).toBe('sess-1');
+      expect(result.status).toBe('ready');
+      if (result.status === 'ready') {
+        expect(result.reused).toBe(true);
+        expect(result.sessionId).toBe('sess-1');
+      }
       // sessionManager.create should only have been called once (first explore)
       expect(mockSessionCreate).toHaveBeenCalledTimes(1);
     });
@@ -1400,16 +1610,16 @@ describe('Engine', () => {
       expect(status.activeNamedSession!.overrides).toEqual(overrides);
     });
 
-    it('includes activeNamedSession when non-default session is active', async () => {
+    it('includes activeNamedSession when explore is bound to a non-default named session', async () => {
       await engine.explore('https://example.com');
       const msm = engine.getMultiSessionManager();
       const sess = msm.getOrCreate('cdp-session');
-      msm.setActive('cdp-session');
+      sess.siteId = 'example.com';
+      sess.isCdp = true;
+      (engine as any).exploreSessionName = 'cdp-session';
       const status = engine.getStatus();
       expect(status.activeNamedSession).toBeDefined();
       expect(status.activeNamedSession!.name).toBe('cdp-session');
-      // Restore
-      msm.setActive('default');
     });
 
     it('omits activeNamedSession for default session without overrides', async () => {
@@ -1460,6 +1670,7 @@ describe('Engine', () => {
         newPage: vi.fn(),
       };
       mockBrowserManager.getOrCreateContext.mockResolvedValue(mockContext);
+      mockBrowserManager.getSelectedOrFirstPage.mockResolvedValue(mockPage as any);
       mockBrowserManager.withLease.mockImplementation(async (fn: () => Promise<unknown>) => fn());
       mockDetectAndWaitForChallenge.mockClear();
 

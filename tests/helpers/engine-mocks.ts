@@ -51,11 +51,30 @@ export function createMockSiteRepoInstance() {
 // ─── Mock BrowserManager ────────────────────────────────────────
 
 export function createMockBrowserManager() {
+  const page = {
+    on: vi.fn(),
+    off: vi.fn(),
+    mainFrame: vi.fn().mockReturnValue('main-frame'),
+    url: vi.fn().mockReturnValue('about:blank'),
+    goto: vi.fn().mockResolvedValue(undefined),
+    title: vi.fn().mockResolvedValue(''),
+    evaluate: vi.fn().mockResolvedValue(false),
+    waitForFunction: vi.fn().mockResolvedValue(undefined),
+    waitForLoadState: vi.fn().mockResolvedValue(undefined),
+    isClosed: vi.fn().mockReturnValue(false),
+  };
+  const context = {
+    pages: () => [page],
+    newPage: vi.fn().mockResolvedValue(page),
+  };
+
   return {
     launchBrowser: vi.fn().mockResolvedValue({}),
-    getOrCreateContext: vi.fn().mockResolvedValue({
-      pages: () => [],
-      newPage: vi.fn().mockResolvedValue({}),
+    getOrCreateContext: vi.fn().mockResolvedValue(context),
+    getSelectedOrFirstPage: vi.fn().mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+      const pages = context?.pages?.() ?? [];
+      if (pages.length > 0) return pages[0];
+      return context?.newPage ? context.newPage() : {};
     }),
     hasContext: vi.fn().mockReturnValue(false),
     tryGetContext: vi.fn().mockReturnValue(undefined),

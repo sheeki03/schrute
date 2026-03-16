@@ -78,6 +78,24 @@ describe('RemoteClient', () => {
       expect(call[1].body).toBe(JSON.stringify({ url: 'https://example.com' }));
     });
 
+    it('posts recoverExplore to the v1 recovery endpoint', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ success: true, data: { status: 'awaiting_user' } }),
+      });
+
+      const client = new RemoteClient('http://localhost:3000');
+      await client.recoverExplore('recover-token', 5000);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/recover-explore',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ resumeToken: 'recover-token', waitMs: 5000 }),
+        }),
+      );
+    });
+
     it('does not include body for GET requests', async () => {
       mockFetch.mockResolvedValue({
         ok: true,

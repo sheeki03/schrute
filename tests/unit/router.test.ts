@@ -169,7 +169,8 @@ function makeDeps(): RouterDeps {
       currentRecording: null,
       uptime: 1000,
     }),
-    explore: vi.fn().mockResolvedValue({ sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
+    explore: vi.fn().mockResolvedValue({ status: 'ready', sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
+    recoverExplore: vi.fn().mockResolvedValue({ status: 'ready', siteId: 'example.com', url: 'https://example.com', session: '__recovery' }),
     startRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 0 }),
     stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5 }),
     executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' }, latencyMs: 100 }),
@@ -274,6 +275,15 @@ describe('router', () => {
       const router = createRouter(deps);
       const result = await router.executeSkill('example.com', 'get_users', { id: '123' });
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('recoverExplore', () => {
+    it('delegates to engine.recoverExplore', async () => {
+      const router = createRouter(deps);
+      const result = await router.recoverExplore('recover-token', 5000);
+      expect(result.success).toBe(true);
+      expect((deps.engine.recoverExplore as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('recover-token', 5000);
     });
   });
 

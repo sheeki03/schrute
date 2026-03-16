@@ -322,6 +322,7 @@ describe('tool-registry', () => {
     it('includes all expected meta tools', () => {
       const names = META_TOOLS.map((t) => t.name);
       expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_recover_explore');
       expect(names).toContain('schrute_record');
       expect(names).toContain('schrute_stop');
       expect(names).toContain('schrute_sites');

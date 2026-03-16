@@ -442,6 +442,7 @@ vi.mock('../../src/skill/dependency-graph.js', () => ({
 }));
 vi.mock('../../src/browser/base-browser-adapter.js', () => ({
   detectAndWaitForChallenge: vi.fn().mockResolvedValue(false),
+  isCloudflareChallengePage: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('node:fs', async () => {

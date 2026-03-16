@@ -50,6 +50,7 @@ vi.mock('../../src/replay/dry-run.js', () => ({
 vi.mock('../../src/server/tool-registry.js', () => ({
   META_TOOLS: [
     { name: 'schrute_explore', description: 'Explore', inputSchema: {} },
+    { name: 'schrute_recover_explore', description: 'Recover Explore', inputSchema: {} },
     { name: 'schrute_record', description: 'Record', inputSchema: {} },
     { name: 'schrute_stop', description: 'Stop', inputSchema: {} },
     { name: 'schrute_sites', description: 'Sites', inputSchema: {} },
@@ -206,7 +207,18 @@ function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
         currentRecording: null,
         uptime: 100,
       }),
+      getMode: vi.fn().mockReturnValue('idle'),
+      getExploreSessionName: vi.fn().mockReturnValue('default'),
+      getRecordingSessionName: vi.fn().mockReturnValue(null),
       executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' } }),
+      recoverExplore: vi.fn().mockResolvedValue({
+        status: 'ready',
+        siteId: 'example.com',
+        url: 'https://example.com',
+        session: '__recovery_test',
+        managedBrowser: false,
+        hint: 'Recovery complete.',
+      }),
       getSessionManager: vi.fn().mockReturnValue({
         getBrowserManager: vi.fn().mockReturnValue({
           hasContext: vi.fn().mockReturnValue(false),
@@ -407,6 +419,7 @@ describe('tool-dispatch', () => {
       const tools = buildToolList(deps);
       const names = tools.map(t => t.name);
       expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_recover_explore');
       expect(names).toContain('schrute_record');
       expect(names).toContain('schrute_stop');
       expect(names).toContain('schrute_confirm');
@@ -495,6 +508,12 @@ describe('tool-dispatch', () => {
       const deps = makeDeps();
       await dispatchToolCall('schrute_record', { name: 'my-recording', inputs: { key: 'val' } }, deps);
       expect(mockRouter.startRecording).toHaveBeenCalledWith('my-recording', { key: 'val' });
+    });
+
+    it('routes schrute_recover_explore to engine.recoverExplore', async () => {
+      const deps = makeDeps();
+      await dispatchToolCall('schrute_recover_explore', { resumeToken: 'recover-token', waitMs: 2000 }, deps);
+      expect((deps.engine as any).recoverExplore).toHaveBeenCalledWith('recover-token', 2000);
     });
 
     it('routes schrute_stop to router.stopRecording', async () => {
@@ -1048,6 +1067,7 @@ describe('tool-dispatch', () => {
       expect(names).not.toContain('schrute_import_cookies');
       expect(names).not.toContain('schrute_export_cookies');
       expect(names).not.toContain('schrute_connect_cdp');
+      expect(names).not.toContain('schrute_recover_explore');
       expect(names).not.toContain('schrute_webmcp_call');
 
       // Should still include non-admin meta tools
@@ -1064,6 +1084,7 @@ describe('tool-dispatch', () => {
       expect(names).toContain('schrute_explore');
       expect(names).toContain('schrute_record');
       expect(names).toContain('schrute_stop');
+      expect(names).not.toContain('schrute_recover_explore');
 
       // Should include browser tools
       expect(names).toContain('browser_click');
@@ -1076,8 +1097,16 @@ describe('tool-dispatch', () => {
 
       // In single-user mode, everyone gets all tools
       expect(names).toContain('schrute_explore');
+      expect(names).toContain('schrute_recover_explore');
       expect(names).toContain('schrute_record');
       expect(names).toContain('browser_click');
+    });
+
+    it('schrute_recover_explore rejects runtime calls in network mode', async () => {
+      const deps = makeNetworkDeps();
+      const result = await dispatchToolCall('schrute_recover_explore', { resumeToken: 'recover-token' }, deps, 'stdio');
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('local desktop mode');
     });
 
     it('non-admin caller schrute_close_session with name=default when server.network=true returns error', async () => {

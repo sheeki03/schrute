@@ -69,7 +69,8 @@ vi.mock('../../src/core/engine.js', () => {
         currentRecording: null,
         uptime: 1000,
       }),
-      explore: vi.fn().mockResolvedValue({ sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
+      explore: vi.fn().mockResolvedValue({ status: 'ready', sessionId: 's1', siteId: 'example.com', url: 'https://example.com' }),
+      recoverExplore: vi.fn().mockResolvedValue({ status: 'ready', siteId: 'example.com', url: 'https://example.com', session: '__recovery' }),
       startRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 0 }),
       stopRecording: vi.fn().mockResolvedValue({ id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 5 }),
       executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' }, latencyMs: 100 }),
@@ -175,6 +176,20 @@ describe('rest-server', () => {
         payload: { name: 'test-recording' },
       });
       expect(response.statusCode).toBe(200);
+    });
+  });
+
+  describe('POST /api/recover-explore', () => {
+    it('accepts a recovery token and returns recovery status', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/recover-explore',
+        payload: { resumeToken: 'recover-token', waitMs: 5000 },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.status).toBe('ready');
+      expect(body.session).toBe('__recovery');
     });
   });
 

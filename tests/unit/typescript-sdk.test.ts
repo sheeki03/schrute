@@ -186,7 +186,7 @@ describe('SchruteClient', () => {
 
   describe('explore', () => {
     it('posts URL to the explore endpoint', async () => {
-      const response = { siteId: 'example.com', sources: [], endpoints: [] };
+      const response = { status: 'ready', siteId: 'example.com', sessionId: 'sess-1', url: 'https://example.com' };
       mockFetch.mockResolvedValueOnce(mockResponse(response));
 
       const result = await client.explore('https://example.com');
@@ -196,6 +196,49 @@ describe('SchruteClient', () => {
         expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({ url: 'https://example.com' }),
+        }),
+      );
+    });
+
+    it('returns the browser handoff union when explore is blocked by Cloudflare', async () => {
+      const response = {
+        status: 'browser_handoff_required',
+        reason: 'cloudflare_challenge',
+        recoveryMode: 'real_browser_cdp',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        hint: 'Cloudflare challenge detected.',
+        resumeToken: 'recover-token',
+      };
+      mockFetch.mockResolvedValueOnce(mockResponse(response));
+
+      const result = await client.explore('https://example.com');
+      expect(result.status).toBe('browser_handoff_required');
+      if (result.status === 'browser_handoff_required') {
+        expect(result.resumeToken).toBe('recover-token');
+      }
+    });
+  });
+
+  describe('recoverExplore', () => {
+    it('posts the recovery token to the recover explore endpoint', async () => {
+      const response = {
+        status: 'awaiting_user',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        session: '__recovery',
+        managedBrowser: true,
+        hint: 'Chrome is waiting for challenge clearance.',
+      };
+      mockFetch.mockResolvedValueOnce(mockResponse(response));
+
+      const result = await client.recoverExplore('recover-token', 5000);
+      expect(result.status).toBe('awaiting_user');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/recover-explore',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ resumeToken: 'recover-token', waitMs: 5000 }),
         }),
       );
     });
