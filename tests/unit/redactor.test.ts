@@ -48,7 +48,7 @@ describe('redactor', () => {
     });
 
     it('strips generic API keys', async () => {
-      const result = await redactString('api_key=sk_live_abc123def456ghi789jkl012');
+      const result = await redactString('api_key=sk_test_FAKE000000000000000000000');
       expect(result).toMatch(/^\[REDACTED:[a-f0-9]{12}\]$/);
     });
 
