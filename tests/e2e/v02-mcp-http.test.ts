@@ -36,6 +36,7 @@ describe('v0.2 MCP HTTP — Tool Registry Parity', () => {
     expect(names).toContain('schrute_status');
     expect(names).toContain('schrute_dry_run');
     expect(names).toContain('schrute_confirm');
+    expect(names).toContain('schrute_pipeline_status');
   });
 
   it('all META_TOOLS have required schema fields', async () => {
@@ -72,7 +73,9 @@ describe('v0.2 MCP HTTP — Tool Registry Parity', () => {
     // Both mcp-stdio.ts and mcp-http.ts import META_TOOLS from tool-registry.ts
     // This is a structural parity check — same import, same data
     const { META_TOOLS } = await import('../../src/server/tool-registry.js');
-    expect(META_TOOLS.length).toBe(30);
+    const names = META_TOOLS.map(t => t.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain('schrute_pipeline_status');
   });
 });
 

@@ -75,6 +75,7 @@ describe('v0.2 OpenAPI — Spec Structure', () => {
     expect(spec.paths).toHaveProperty('/api/explore');
     expect(spec.paths).toHaveProperty('/api/record');
     expect(spec.paths).toHaveProperty('/api/stop');
+    expect(spec.paths).toHaveProperty('/api/pipeline/{jobId}');
     expect(spec.paths).toHaveProperty('/api/audit');
   });
 
@@ -134,7 +135,7 @@ describe('v0.2 OpenAPI — Active Skills Only', () => {
     const skillPaths = paths.filter(p =>
       !p.startsWith('/api/sites/{') &&
       !p.startsWith('/api/sites') &&
-      !['/api/health', '/api/explore', '/api/record', '/api/stop', '/api/audit'].includes(p)
+      !['/api/health', '/api/explore', '/api/record', '/api/stop', '/api/pipeline/{jobId}', '/api/audit'].includes(p)
     );
     expect(skillPaths.length).toBe(0);
   });

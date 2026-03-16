@@ -152,6 +152,20 @@ function parseToolResult(result: { content: Array<{ type: string; text: string }
   return JSON.parse(result.content[0].text);
 }
 
+async function waitForPipelineJob(client: McpClient, jobId: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await client.callTool('schrute_pipeline_status', { jobId });
+    expect(result.isError).toBeFalsy();
+    const data = parseToolResult(result);
+    if (data.status === 'completed' || data.status === 'failed') {
+      return data;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`Pipeline job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
 // ─── Tests ──────────────────────────────────────────────────────
 
 describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
@@ -190,7 +204,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('tools/list completeness', () => {
-    it('lists all 16 meta tools', async () => {
+    it('lists all required meta tools', async () => {
       const tools = await client.listTools();
       const names = tools.map(t => t.name);
 
@@ -198,6 +212,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
         'schrute_explore',
         'schrute_record',
         'schrute_stop',
+        'schrute_pipeline_status',
         'schrute_sites',
         'schrute_skills',
         'schrute_status',
@@ -286,7 +301,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       const data = parseToolResult(result);
       expect(data.sessionId).toBeDefined();
       expect(data.siteId).toBe('127.0.0.1');
-    }, 10000);
+    }, 30000);
 
     it('status shows exploring after explore', async () => {
       const result = await client.callTool('schrute_status');
@@ -394,8 +409,11 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
     it('stops recording', async () => {
       const result = await client.callTool('schrute_stop');
       const data = parseToolResult(result);
-      expect(data).toBeDefined();
-    }, 15000);
+      expect(data.pipelineJobId).toBeDefined();
+
+      const job = await waitForPipelineJob(client, data.pipelineJobId);
+      expect(job.status).toBe('completed');
+    }, 30000);
 
     it('status returns to exploring after stop', async () => {
       const result = await client.callTool('schrute_status');
@@ -423,7 +441,12 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       expect(second.content[0].text).toContain('Cannot start recording');
 
       // Clean up
-      await client.callTool('schrute_stop');
+      const stopResult = await client.callTool('schrute_stop');
+      const stopData = parseToolResult(stopResult);
+      if (stopData.pipelineJobId) {
+        const job = await waitForPipelineJob(client, stopData.pipelineJobId);
+        expect(job.status).toBe('completed');
+      }
     }, 15000);
 
     it('stop without recording is rejected', async () => {

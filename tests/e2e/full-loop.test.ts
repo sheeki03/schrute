@@ -36,6 +36,11 @@ const mockContext = {
 const mockBrowserManager = {
   launchBrowser: vi.fn().mockResolvedValue({}),
   getOrCreateContext: vi.fn().mockResolvedValue(mockContext),
+  getSelectedOrFirstPage: vi.fn().mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+    const pages = context?.pages?.() ?? [];
+    if (pages.length > 0) return pages[0];
+    return context?.newPage?.();
+  }),
   hasContext: vi.fn().mockReturnValue(true),
   tryGetContext: vi.fn().mockReturnValue(mockContext),
   closeContext: vi.fn().mockResolvedValue(undefined),
@@ -166,6 +171,7 @@ function makeTestConfig(): SchruteConfig {
     promotionConsecutivePasses: 5,
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
+    maxSkillsPerRecording: 15,
     toolShortlistK: 10,
   };
 }

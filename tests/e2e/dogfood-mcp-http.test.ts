@@ -122,6 +122,11 @@ function createMockDeps(authToken: string): McpHttpDeps {
     hasContext: vi.fn().mockReturnValue(false),
     tryGetContext: vi.fn().mockReturnValue(undefined),
     getOrCreateContext: vi.fn().mockResolvedValue({ pages: () => [], newPage: vi.fn() }),
+    getSelectedOrFirstPage: vi.fn().mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+      const pages = context?.pages?.() ?? [];
+      if (pages.length > 0) return pages[0];
+      return context?.newPage?.();
+    }),
     closeContext: vi.fn().mockResolvedValue(undefined),
     closeBrowser: vi.fn().mockResolvedValue(undefined),
     closeAll: vi.fn().mockResolvedValue(undefined),
@@ -241,6 +246,7 @@ function createMockDeps(authToken: string): McpHttpDeps {
       promotionConsecutivePasses: 5,
       promotionVolatilityThreshold: 0.2,
       maxToolsPerSite: 20,
+      maxSkillsPerRecording: 15,
       toolShortlistK: 10,
     } as any,
   };

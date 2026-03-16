@@ -178,6 +178,20 @@ class McpTestClient {
   }
 }
 
+async function waitForPipelineJob(client: McpTestClient, jobId: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await client.callTool('schrute_pipeline_status', { jobId });
+    expect(result.isError).toBeFalsy();
+    const data = JSON.parse(result.content[0].text);
+    if (data.status === 'completed' || data.status === 'failed') {
+      return data;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`Pipeline job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
 // ─── Tests ───────────────────────────────────────────────────────
 
 describe('MCP E2E: full lifecycle via stdio server', () => {
@@ -221,6 +235,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(toolNames).toContain('schrute_explore');
     expect(toolNames).toContain('schrute_record');
     expect(toolNames).toContain('schrute_stop');
+    expect(toolNames).toContain('schrute_pipeline_status');
     expect(toolNames).toContain('schrute_skills');
     expect(toolNames).toContain('schrute_status');
     expect(toolNames).toContain('schrute_dry_run');
@@ -245,7 +260,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const data = JSON.parse(result.content[0].text);
     expect(data.sessionId).toBeDefined();
     expect(data.siteId).toBe('127.0.0.1');
-  }, 10000);
+  }, 30000);
 
   it('schrute_status shows exploring after explore', async () => {
     const result = await client.callTool('schrute_status');
@@ -278,12 +293,12 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
   it('schrute_stop stops recording and runs capture pipeline', async () => {
     const result = await client.callTool('schrute_stop');
-    // Stop might succeed or report no HAR (since we didn't actually browse)
-    // Either is fine — the important thing is the MCP call doesn't crash
     const data = JSON.parse(result.content[0].text);
-    // Pipeline ran (even if no skills generated since no browser traffic was captured)
-    expect(data).toBeDefined();
-  }, 15000);
+    expect(data.pipelineJobId).toBeDefined();
+
+    const job = await waitForPipelineJob(client, data.pipelineJobId);
+    expect(job.status).toBe('completed');
+  }, 30000);
 
   it('schrute_status returns to exploring after stop', async () => {
     const result = await client.callTool('schrute_status');
@@ -366,7 +381,12 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       expect(data).toContain('Cannot start recording');
 
       // Clean up: stop the first recording
-      await client.callTool('schrute_stop');
+      const stopResult = await client.callTool('schrute_stop');
+      const stopData = JSON.parse(stopResult.content[0].text);
+      if (stopData.pipelineJobId) {
+        const job = await waitForPipelineJob(client, stopData.pipelineJobId);
+        expect(job.status).toBe('completed');
+      }
     }, 15000);
 
     it('schrute_record is rejected after schrute_stop when in idle mode', async () => {

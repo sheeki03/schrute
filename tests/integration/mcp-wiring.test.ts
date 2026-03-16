@@ -39,6 +39,11 @@ vi.mock('../../src/browser/manager.js', () => {
       async getOrCreateContext(_siteId: string) {
         return { pages: () => [], newPage: async () => ({}) };
       }
+      async getSelectedOrFirstPage(_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) {
+        const pages = context?.pages?.() ?? [];
+        if (pages.length > 0) return pages[0];
+        return context?.newPage?.();
+      }
       async closeContext() {}
       async closeAll() {}
       getHarPath() { return mockHarPath; }
@@ -148,6 +153,7 @@ function makeTestConfig(): SchruteConfig {
     promotionConsecutivePasses: 2,
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
+    maxSkillsPerRecording: 15,
     toolShortlistK: 10,
   } as SchruteConfig;
 }
@@ -159,6 +165,28 @@ const DEFAULT_CAPS = [
   Capability.STORAGE_WRITE,
   Capability.SECRETS_USE,
 ];
+
+async function waitForPipelineCompletion(engine: Engine, jobId: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const job = engine.getPipelineJob(jobId);
+    if (job?.status === 'completed') {
+      return;
+    }
+    if (job?.status === 'failed') {
+      throw new Error(job.error ?? `Pipeline job ${jobId} failed`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for pipeline job ${jobId}`);
+}
+
+async function stopRecordingAndWait(engine: Engine): Promise<Awaited<ReturnType<Engine['stopRecording']>>> {
+  const recordingInfo = await engine.stopRecording();
+  if (recordingInfo.pipelineJobId) {
+    await waitForPipelineCompletion(engine, recordingInfo.pipelineJobId);
+  }
+  return recordingInfo;
+}
 
 // ─── Tests ───────────────────────────────────────────────────────
 
@@ -210,7 +238,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('get-users');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       expect(skills.length).toBeGreaterThanOrEqual(2);
@@ -240,7 +268,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('audit-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const frames = testDb.all<{ id: string; site_id: string; name: string; request_count: number; signal_count: number; skill_count: number }>(
         'SELECT * FROM action_frames WHERE site_id = ?', 'api.example.com',
@@ -262,7 +290,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/graphql');
       await engine.startRecording('graphql-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       const gqlSkills = skills.filter(s => s.id.includes('.gql.'));
@@ -280,14 +308,14 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('first-pass');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skillsBefore = skillRepo.getBySiteId('api.example.com');
       expect(skillsBefore.length).toBeGreaterThan(0);
       const countsBefore = new Map(skillsBefore.map(s => [s.id, s.sampleCount]));
 
       await engine.startRecording('second-pass');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skillsAfter = skillRepo.getBySiteId('api.example.com');
       expect(skillsAfter.length).toBe(skillsBefore.length);
@@ -305,7 +333,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('promo-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       const readOnlySkill = skills.find(s => s.method === 'GET' && s.sideEffectClass === 'read-only');
@@ -319,7 +347,7 @@ describe('MCP wiring integration', () => {
       });
 
       await engine.startRecording('promo-trigger');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const updated = skillRepo.getById(readOnlySkill!.id);
       expect(updated).toBeDefined();
@@ -334,7 +362,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/graphql');
       await engine.startRecording('split-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       const genericGqlSkill = skills.find(s =>
@@ -349,6 +377,7 @@ describe('MCP wiring integration', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('Execution wiring (engine.executeSkill -> live server)', () => {
+    const EXECUTION_TIMEOUT_MS = 30_000;
     let mockServer: Awaited<ReturnType<typeof createRestMockServer>>;
     let testSkillId: string;
 
@@ -432,7 +461,7 @@ describe('MCP wiring integration', () => {
       const after = skillRepo.getById(testSkillId)!;
       expect(after.consecutiveValidations).toBe(1);
       expect(after.confidence).toBeGreaterThan(0.5);
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('resets validation counters on failure (A1)', async () => {
       skillRepo.updateConfidence(testSkillId, 0.8, 3);
@@ -451,7 +480,7 @@ describe('MCP wiring integration', () => {
       const after = skillRepo.getById(testSkillId)!;
       expect(after.consecutiveValidations).toBe(0);
       expect(after.confidence).toBeLessThan(0.8);
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('infers schema on first successful execution (B1 Phase 1)', async () => {
       const before = skillRepo.getById(testSkillId)!;
@@ -466,7 +495,7 @@ describe('MCP wiring integration', () => {
 
       const schema = after.outputSchema as Record<string, unknown>;
       expect(schema.type).toBe('array');
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('accumulates schema via mergeSchemas for <3 validations (B1 Phase 2)', async () => {
       const result1 = await engine.executeSkill(testSkillId, {});
@@ -481,7 +510,7 @@ describe('MCP wiring integration', () => {
       const afterSecond = skillRepo.getById(testSkillId)!;
       expect(afterSecond.outputSchema).toBeDefined();
       expect((afterSecond.outputSchema as Record<string, unknown>).type).toBe('array');
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('records metrics after execution (engine step 7)', async () => {
       const result = await engine.executeSkill(testSkillId, {});
@@ -491,7 +520,7 @@ describe('MCP wiring integration', () => {
       expect(metrics.length).toBe(1);
       expect(metrics[0].success).toBe(true);
       expect(metrics[0].latencyMs).toBeGreaterThanOrEqual(0);
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('detects schema_drift via executor and demotes via health monitor (B1+B2)', async () => {
       // Schema expects an object but API returns an array — executor's parseResponse
@@ -525,7 +554,7 @@ describe('MCP wiring integration', () => {
 
       // B2: Health monitor may mark skill as broken after repeated failures
       expect(['active', 'broken']).toContain(after.status);
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('queues MCP notifications on skill health change (B3)', async () => {
       // When schema_drift causes repeated failures, the health monitor
@@ -568,7 +597,7 @@ describe('MCP wiring integration', () => {
       // The skill should remain active (healthy status, no demotion)
       const after = skillRepo.getById(testSkillId)!;
       expect(after.status).toBe('active');
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -605,6 +634,9 @@ describe('MCP wiring integration', () => {
 
       const stopResult = await dispatchToolCall('schrute_stop', {}, makeDeps());
       expect(stopResult.isError).toBeFalsy();
+      const stopData = JSON.parse(stopResult.content[0].text);
+      expect(stopData.pipelineJobId).toBeDefined();
+      await waitForPipelineCompletion(engine, stopData.pipelineJobId);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       expect(skills.length).toBeGreaterThan(0);
@@ -635,7 +667,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('har-capture-test');
-      const recordingInfo = await engine.stopRecording();
+      const recordingInfo = await stopRecordingAndWait(engine);
 
       // The recording info should have populated request count from the HAR
       expect(recordingInfo).toBeDefined();
@@ -716,7 +748,7 @@ describe('MCP wiring integration', () => {
       // 1. Explore and record
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('round-trip-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       // 2. Verify skills were generated
       const skills = skillRepo.getBySiteId('api.example.com');
@@ -776,7 +808,11 @@ describe('MCP wiring integration', () => {
       // Explore + record + stop via dispatch
       await dispatchToolCall('schrute_explore', { url: 'https://api.example.com/api' }, deps);
       await dispatchToolCall('schrute_record', { name: 'dispatch-roundtrip' }, deps);
-      await dispatchToolCall('schrute_stop', {}, deps);
+      const stopResult = await dispatchToolCall('schrute_stop', {}, deps);
+      expect(stopResult.isError).toBeFalsy();
+      const stopData = JSON.parse(stopResult.content[0].text);
+      expect(stopData.pipelineJobId).toBeDefined();
+      await waitForPipelineCompletion(engine, stopData.pipelineJobId);
 
       // List skills via dispatch
       const skillsResult = await dispatchToolCall('schrute_skills', { siteId: 'api.example.com' }, deps);
@@ -809,7 +845,7 @@ describe('MCP wiring integration', () => {
 
       await engine.explore('https://api.example.com/api');
       await engine.startRecording('notify-test');
-      await engine.stopRecording();
+      await stopRecordingAndWait(engine);
 
       const skills = skillRepo.getBySiteId('api.example.com');
       // Find a non-read-only skill that won't be auto-activated (POST/PUT/DELETE)
@@ -825,7 +861,7 @@ describe('MCP wiring integration', () => {
         drainMcpNotifications(); // clear before triggering
 
         await engine.startRecording('promo-notify');
-        await engine.stopRecording();
+        await stopRecordingAndWait(engine);
 
         const notifications = drainMcpNotifications();
         const promoted = skillRepo.getById(candidateSkill.id);

@@ -53,10 +53,11 @@ vi.mock('../../src/core/config.js', () => ({
     gcIntervalMs: 900000,
     confirmationTimeoutMs: 30000,
     confirmationExpiryMs: 60000,
-    promotionConsecutivePasses: 5,
-    promotionVolatilityThreshold: 0.2,
-    maxToolsPerSite: 20,
-    toolShortlistK: 10,
+  promotionConsecutivePasses: 5,
+  promotionVolatilityThreshold: 0.2,
+  maxToolsPerSite: 20,
+  maxSkillsPerRecording: 15,
+  toolShortlistK: 10,
   }),
   loadConfig: vi.fn().mockReturnValue({
     dataDir: '/tmp/schrute-e2e-features',
@@ -167,6 +168,11 @@ const mockBrowserManager = {
       evaluate: vi.fn().mockResolvedValue('Europe/Paris'),
       close: vi.fn().mockResolvedValue(undefined),
     }),
+  }),
+  getSelectedOrFirstPage: vi.fn().mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+    const pages = context?.pages?.() ?? [];
+    if (pages.length > 0) return pages[0];
+    return context?.newPage?.();
   }),
   hasContext: vi.fn().mockReturnValue(false),
   tryGetContext: vi.fn().mockReturnValue(undefined),
@@ -499,6 +505,7 @@ describe('e2e features', () => {
     promotionConsecutivePasses: 5,
     promotionVolatilityThreshold: 0.2,
     maxToolsPerSite: 20,
+    maxSkillsPerRecording: 15,
     toolShortlistK: 10,
   });
 

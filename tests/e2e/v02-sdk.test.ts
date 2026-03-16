@@ -35,7 +35,19 @@ vi.mock('../../src/core/engine.js', () => ({
       return { id: 'r1', name, siteId: 'example.com', startedAt: Date.now(), requestCount: 0 };
     }
     async stopRecording() {
-      return { id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 3 };
+      return { id: 'r1', name: 'test', siteId: 'example.com', startedAt: Date.now(), requestCount: 3, pipelineJobId: 'job-1' };
+    }
+    getPipelineJob(jobId: string) {
+      if (jobId !== 'job-1') return undefined;
+      return {
+        jobId,
+        recordingId: 'r1',
+        siteId: 'example.com',
+        status: 'completed',
+        startedAt: Date.now() - 1000,
+        completedAt: Date.now(),
+        result: { skillsGenerated: 1, signalCount: 1, noiseCount: 2, totalCount: 3 },
+      };
     }
     async executeSkill() {
       return { success: true, data: { users: [{ id: 1 }] }, latencyMs: 20 };
