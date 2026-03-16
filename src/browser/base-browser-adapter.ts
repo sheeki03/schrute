@@ -52,6 +52,35 @@ const CF_PHISHING_TITLE_RE = /Suspected phishing|phishing site.*Cloudflare/i;
 declare const document: { querySelector(sel: string): unknown; title: string };
 
 /**
+ * Detect whether the current page is showing a Cloudflare challenge or interstitial.
+ */
+export async function isCloudflareChallengePage(page: Page): Promise<boolean> {
+  const indicators = [
+    '#challenge-running',
+    '#challenge-spinner',
+    '#cf-please-wait',
+    '#turnstile-wrapper',
+    '#cf-challenge-running',
+  ];
+
+  let challengeElements: boolean;
+  let title: string;
+  try {
+    [challengeElements, title] = await Promise.all([
+      page.evaluate((selectors: string[]) => {
+        return selectors.some(sel => document.querySelector(sel) !== null);
+      }, indicators),
+      page.title(),
+    ]);
+  } catch {
+    // Page context destroyed or closed — safe to return false
+    return false;
+  }
+
+  return challengeElements || CF_CHALLENGE_TITLE_RE.test(title) || CF_PHISHING_TITLE_RE.test(title);
+}
+
+/**
  * Detect Cloudflare challenge pages (JS challenges, Turnstile, interstitials)
  * and wait for them to resolve. Returns true if a challenge was detected.
  */

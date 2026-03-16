@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Browser, BrowserContext } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import { getConfig, getBrowserDataDir, getTmpDir } from '../core/config.js';
 import type { SchruteConfig, ProxyConfig, GeoEmulationConfig } from '../skill/types.js';
 import { ANALYTICS_DOMAINS, FEATURE_FLAG_DOMAINS } from '../skill/types.js';
@@ -16,6 +16,7 @@ import type { BrowserAuthStore } from './auth-store.js';
 import type { AuthCoordinator } from './auth-coordinator.js';
 import { ParallelismGovernor } from './parallelism-governor.js';
 import { NetworkRingBuffer } from '../capture/network-ring-buffer.js';
+import { withTimeout } from '../core/utils.js';
 
 const log = getLogger();
 
@@ -305,10 +306,21 @@ export class BrowserManager {
   /**
    * Centralized lease scope — the ONLY way callers should bracket browser operations.
    * Prevents imbalanced lease from missed finally blocks.
+   *
+   * @param fn        The async work to perform under the lease.
+   * @param timeoutMs Optional timeout in milliseconds.  When set, the lease
+   *                  rejects with a `LeaseTimeoutError` if `fn` hasn't settled
+   *                  within the window.  The underlying operation is NOT
+   *                  cancelled (Playwright has no abort API), but the caller
+   *                  is unblocked so it can proceed with cleanup.
    */
-  async withLease<T>(fn: () => Promise<T>): Promise<T> {
+  async withLease<T>(fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
     this.touchActivity();
     try {
+      if (timeoutMs != null && timeoutMs > 0) {
+        return await withTimeout(fn(), timeoutMs,
+          `Browser lease timed out after ${timeoutMs}ms`);
+      }
       return await fn();
     } finally {
       this.releaseActivity();
@@ -1109,6 +1121,28 @@ export class BrowserManager {
 
   getNetworkRingBuffer(): NetworkRingBuffer | undefined {
     return this.networkRingBuffer;
+  }
+
+  async getSelectedOrFirstPage(siteId: string, context?: BrowserContext): Promise<Page> {
+    const managed = this.contexts.get(siteId);
+    const resolvedContext = context ?? managed?.context;
+    if (!resolvedContext) {
+      throw new Error(`No browser context for site '${siteId}'`);
+    }
+
+    const openPages = resolvedContext.pages().filter(page => !page.isClosed());
+    if (managed?.selectedPageUrl) {
+      const selectedPage = openPages.find(page => page.url() === managed.selectedPageUrl);
+      if (selectedPage) {
+        return selectedPage;
+      }
+    }
+
+    const page = openPages[0] ?? await resolvedContext.newPage();
+    if (managed) {
+      managed.selectedPageUrl = page.url();
+    }
+    return page;
   }
 
   selectPage(siteId: string, pageUrl: string): void {

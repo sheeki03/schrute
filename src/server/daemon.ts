@@ -13,6 +13,7 @@ import type { SchruteConfig } from '../skill/types.js';
 import type { Engine } from '../core/engine.js';
 import type { PidFileContent, TransportConfig } from '../shared/daemon-types.js';
 import { verifyBearerToken } from '../shared/auth-utils.js';
+import { withTimeout } from '../core/utils.js';
 
 function log() { return getLogger(); }
 
@@ -256,7 +257,10 @@ async function handleRequest(
 
     // POST /ctl/stop
     if (method === 'POST' && url === '/ctl/stop') {
-      const result = await lifecycle.withLock(() => engine.stopRecording());
+      const result = await withTimeout(
+        lifecycle.withLock(() => engine.stopRecording()),
+        30_000, 'stopRecording',
+      );
       sendJson(res, 200, result);
       return;
     }

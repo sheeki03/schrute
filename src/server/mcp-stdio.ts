@@ -13,6 +13,7 @@ import type { ConfirmationManager } from './confirmation.js';
 import type { SchruteConfig } from '../skill/types.js';
 import { SkillStatus } from '../skill/types.js';
 import { buildToolList, dispatchToolCall } from './tool-dispatch.js';
+import { withTimeout } from '../core/utils.js';
 import { createRouter } from './router.js';
 import { registerResourceHandlers, registerPromptHandlers } from './mcp-handlers.js';
 import { drainMcpNotifications } from '../healing/notification.js';
@@ -87,9 +88,24 @@ export async function startMcpServer(deps: McpStdioDeps): Promise<{ close: () =>
 
   // ─── Call Tool Handler ────────────────────────────────────────
 
+  const MCP_TOOL_CALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — safety net for hung tool calls
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return dispatchToolCall(name, args as Record<string, unknown> | undefined, depsWithRouter, 'stdio');
+    try {
+      return await withTimeout(
+        dispatchToolCall(name, args as Record<string, unknown> | undefined, depsWithRouter, 'stdio'),
+        MCP_TOOL_CALL_TIMEOUT_MS,
+        `Tool call '${name}'`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('timed out')) {
+        log.error({ tool: name }, msg);
+        return { content: [{ type: 'text', text: `Error: ${msg}. The operation may still be running in the background.` }], isError: true };
+      }
+      throw err;
+    }
   });
 
   // ─── Periodic Tool List Change Detection ──────────────────────

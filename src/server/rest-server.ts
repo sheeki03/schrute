@@ -16,6 +16,8 @@ import { setupCdpSitePolicy, validateProxyConfig, validateGeoConfig } from './sh
 import { SchruteService } from '../app/service.js';
 import type { SkillStatusName } from '../skill/types.js';
 import { getSkillExecutability, searchAndProjectSkills } from './skill-helpers.js';
+import { getShapedStatus } from './status-response.js';
+import { withTimeout } from '../core/utils.js';
 
 const log = getLogger();
 
@@ -46,6 +48,15 @@ const recordBody = {
   properties: {
     name: { type: 'string' },
     inputs: { type: 'object', additionalProperties: { type: 'string' } },
+  },
+} as const;
+
+const recoverExploreBody = {
+  type: 'object',
+  required: ['resumeToken'],
+  properties: {
+    resumeToken: { type: 'string' },
+    waitMs: { type: 'number' },
   },
 } as const;
 
@@ -314,9 +325,23 @@ export async function createRestServer(options?: {
 
   app.post('/api/stop', async (_request, reply) => {
     if (!requireAdmin(config, reply)) return;
-    const result = await router.stopRecording();
+    const result = await withTimeout(router.stopRecording(), 30_000, 'stopRecording');
     routerResultToReply(result, reply);
   });
+
+  app.post<{ Body: { resumeToken: string; waitMs?: number } }>(
+    '/api/recover-explore',
+    { schema: { body: recoverExploreBody } },
+    async (request, reply) => {
+      if (!requireAdmin(config, reply)) return;
+      if (config.server.network) {
+        reply.code(403).send({ error: 'Automatic Chrome handoff is only supported in local desktop mode. Use schrute_connect_cdp manually on the local machine.' });
+        return;
+      }
+      const result = await router.recoverExplore(request.body.resumeToken, request.body.waitMs);
+      routerResultToReply(result, reply);
+    },
+  );
 
   // ─── Sessions ──────────────────────────────────────────
   app.get('/api/sessions', async (_request, reply) => {
@@ -342,7 +367,7 @@ export async function createRestServer(options?: {
         const expectedId = name === DEFAULT_SESSION_NAME && force
           ? engine.getActiveSessionId()
           : null;
-        await multiSession.close(name, { engineMode: engine.getStatus().mode, force });
+        await multiSession.close(name, { engineMode: engine.getMode(), force });
         if (name === DEFAULT_SESSION_NAME && force) {
           engine.resetExploreState(expectedId);
         }
@@ -448,11 +473,13 @@ export async function createRestServer(options?: {
             ...(userDomains ? sanitizeImplicitAllowlist(userDomains) : []),
           ])],
           executionBackend: 'live-chrome' as const,
+          executionSessionName: name,
         }, config);
         if (!mergeResult.persisted) policyPersisted = false;
         session.cdpPriorPolicyState = {
           domainAllowlist: priorPolicy.domainAllowlist,
           executionBackend: priorPolicy.executionBackend,
+          executionSessionName: priorPolicy.executionSessionName,
         };
 
         // Rebind from synthetic to final and clean up synthetic policy.
@@ -617,9 +644,9 @@ export async function createRestServer(options?: {
   });
 
   // ─── Status ──────────────────────────────────────────────
-  app.get('/api/status', async (_request, reply) => {
-    const result = router.getStatus();
-    routerResultToReply(result, reply);
+  app.get('/api/status', async (request, reply) => {
+    const status = await getShapedStatus(engine, config, getCallerId(request));
+    reply.code(200).send(status);
   });
 
   // ─── Versioned API v1 ────────────────────────────────────
@@ -651,26 +678,7 @@ export async function createRestServer(options?: {
 
   app.get('/api/v1/status', async (request, reply) => {
     const reqId = getRequestId(request);
-    // In network mode, don't drain warnings (non-destructive peek)
-    // so admin callers don't lose visibility.
-    const status = appService.getStatus({ drainWarnings: !config.server.network });
-    if (config.server.network) {
-      // Sanitize for non-admin callers in network mode
-      const s = status as unknown as Record<string, unknown>;
-      if (s.currentRecording && typeof s.currentRecording === 'object') {
-        const rec = s.currentRecording as Record<string, unknown>;
-        s.currentRecording = {
-          id: rec.id, name: rec.name, siteId: rec.siteId,
-          startedAt: rec.startedAt, requestCount: rec.requestCount,
-        };
-      }
-      s.activeSession = null;
-      s.activeNamedSession = undefined;
-      s.warnings = undefined;
-      if (s.webmcp) {
-        s.webmcp = { enabled: true };
-      }
-    }
+    const status = await getShapedStatus(engine, config, getCallerId(request));
     reply.code(200).send(apiResponse(status, reqId));
   });
 
@@ -727,6 +735,26 @@ export async function createRestServer(options?: {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         reply.code(400).send(apiError('EXPLORE_ERROR', message, reqId));
+      }
+    },
+  );
+
+  app.post<{ Body: { resumeToken: string; waitMs?: number } }>(
+    '/api/v1/recover-explore',
+    { schema: { body: recoverExploreBody } },
+    async (request, reply) => {
+      if (!requireAdmin(config, reply)) return;
+      const reqId = getRequestId(request);
+      if (config.server.network) {
+        reply.code(403).send(apiError('RECOVERY_UNSUPPORTED', 'Automatic Chrome handoff is only supported in local desktop mode. Use schrute_connect_cdp manually on the local machine.', reqId));
+        return;
+      }
+      try {
+        const data = await appService.recoverExplore(request.body.resumeToken, request.body.waitMs);
+        reply.code(200).send(apiResponse(data, reqId));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        reply.code(400).send(apiError('RECOVERY_ERROR', message, reqId));
       }
     },
   );
@@ -864,7 +892,7 @@ export async function createRestServer(options?: {
     if (!requireAdmin(config, reply)) return;
     const reqId = getRequestId(request);
     try {
-      const result = await appService.stopRecording();
+      const result = await withTimeout(appService.stopRecording(), 30_000, 'stopRecording');
       reply.code(200).send(apiResponse(result, reqId));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

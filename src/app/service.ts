@@ -82,6 +82,10 @@ export class SchruteService {
     return this.deps.engine.explore(url, overrides);
   }
 
+  async recoverExplore(resumeToken: string, waitMs?: number): Promise<import('../core/engine.js').RecoverExploreResult> {
+    return this.deps.engine.recoverExplore(resumeToken, waitMs);
+  }
+
   async discover(url: string): Promise<DiscoveryResult> {
     const { discoverSite } = await import('../discovery/cold-start.js');
     return discoverSite(url, this.deps.config);
@@ -241,7 +245,7 @@ export class SchruteService {
 
   async closeSession(name: string, force = false): Promise<void> {
     const msm = this.deps.engine.getMultiSessionManager();
-    await msm.close(name, { engineMode: this.deps.engine.getStatus().mode, force });
+    await msm.close(name, { engineMode: this.deps.engine.getMode(), force });
   }
 
   // ─── Cookie Management ─────────────────────────────────────

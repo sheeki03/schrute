@@ -337,6 +337,18 @@ export const META_TOOLS = [
     },
   },
   {
+    name: 'schrute_recover_explore',
+    description: 'Recover an explore session blocked by Cloudflare by handing off to a real local Chrome session',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        resumeToken: { type: 'string', description: 'Recovery token returned by schrute_explore when browser handoff is required' },
+        waitMs: { type: 'number', description: 'How long to wait for the user to clear the challenge before returning (default 90000, max 300000)' },
+      },
+      required: ['resumeToken'],
+    },
+  },
+  {
     name: 'schrute_sessions',
     description: 'List all named browser sessions',
     inputSchema: {

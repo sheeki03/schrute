@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getLogger } from './logger.js';
@@ -10,6 +10,7 @@ import {
   checkMethodAllowed,
   checkPathRisk,
   getSitePolicy,
+  mergeSitePolicy,
 } from './policy.js';
 import { Capability } from '../skill/types.js';
 import { getDatabase } from '../storage/database.js';
@@ -27,7 +28,7 @@ import { refreshCookies } from '../automation/cookie-refresh.js';
 import { SideEffectClass, FailureCause, INFRA_FAILURE_CAUSES, TierState } from '../skill/types.js';
 import type { BrowserProvider } from '../skill/types.js';
 import { PlaywrightMcpAdapter } from '../browser/playwright-mcp-adapter.js';
-import { detectAndWaitForChallenge } from '../browser/base-browser-adapter.js';
+import { detectAndWaitForChallenge, isCloudflareChallengePage } from '../browser/base-browser-adapter.js';
 import { getFlags } from '../browser/feature-flags.js';
 import { BrowserManager, ContextOverrideMismatchError, stableStringify } from '../browser/manager.js';
 import type { ContextOverrides } from '../browser/manager.js';
@@ -39,6 +40,16 @@ import { AuthCoordinator } from '../browser/auth-coordinator.js';
 import { AgentBrowserBackend } from '../browser/agent-browser-backend.js';
 import { PlaywrightBackend } from '../browser/playwright-backend.js';
 import { LiveChromeBackend } from '../browser/live-chrome-backend.js';
+import { BoundedMap } from '../shared/bounded-map.js';
+import {
+  cleanupManagedChromeLaunches,
+  listManagedChromeMetadata,
+  launchManagedChrome,
+  removeManagedChromeMetadata,
+  terminateManagedChrome,
+  waitForDevToolsActivePort,
+  writeManagedChromeMetadata,
+} from '../browser/real-browser-handoff.js';
 import { detectAuth } from '../capture/auth-detector.js';
 import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
 import { detectChains } from '../capture/chain-detector.js';
@@ -78,6 +89,7 @@ export interface EngineStatus {
   mode: EngineMode;
   activeSession: SessionInfo | null;
   activeNamedSession?: { name: string; siteId: string; isCdp: boolean; overrides?: ContextOverrides };
+  pendingRecovery?: PendingRecoveryStatus;
   currentRecording: RecordingInfo | null;
   uptime: number;
   warnings?: string[];
@@ -98,13 +110,66 @@ interface RecordingInfo {
   dedupedRequests?: number;
 }
 
-export interface ExploreResult {
+export interface ExploreReadyResult {
+  status: 'ready';
   sessionId: string;
   siteId: string;
   url: string;
   reused?: boolean;
   appliedOverrides?: { proxy?: { server: string }; geo?: GeoEmulationConfig };
   hint: string;
+}
+
+export interface ExploreHandoffRequiredResult {
+  status: 'browser_handoff_required';
+  reason: 'cloudflare_challenge';
+  recoveryMode: 'real_browser_cdp';
+  siteId: string;
+  url: string;
+  hint: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+}
+
+export type ExploreResult = ExploreReadyResult | ExploreHandoffRequiredResult;
+
+export interface PendingRecoveryStatus {
+  reason: 'cloudflare_challenge';
+  recoveryMode: 'real_browser_cdp';
+  siteId: string;
+  url: string;
+  hint: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+}
+
+export interface RecoverExploreResult {
+  status: 'ready' | 'awaiting_user' | 'expired' | 'failed';
+  siteId: string;
+  url: string;
+  session?: string;
+  managedBrowser?: boolean;
+  hint: string;
+}
+
+interface RecoveryState {
+  resumeToken: string;
+  recoveryId: string;
+  siteId: string;
+  url: string;
+  hint: string;
+  createdAt: number;
+  cdpSessionName: string;
+  managedProfileDir: string;
+  managedPid?: number;
+  managedBrowser: boolean;
+  priorPolicySnapshot?: Record<string, unknown>;
+  exploreSessionNameBeforeRecovery: string;
+  currentState: 'pending' | 'awaiting_user' | 'ready' | 'failed';
+  failureReason?: string;
+  advisoryHint?: string;
+  overrides?: ContextOverrides;
+  autoRecoverSupported: boolean;
 }
 
 export interface SkillExecutionResult {
@@ -163,6 +228,8 @@ export class Engine {
   private sessionManager: SessionManager;
   private mode: EngineMode = 'idle';
   private activeSessionId: string | null = null;
+  private exploreSessionName = DEFAULT_SESSION_NAME;
+  private recordingSessionName: string | null = null;
   private currentRecording: RecordingInfo | null = null;
   private recordingBrowserManager: BrowserManager | null = null;
   private startedAt: number;
@@ -190,6 +257,11 @@ export class Engine {
   private pendingBackgroundOps = new Set<Promise<void>>();
   private warnings: string[] = [];
   private static readonly MAX_WARNINGS = 100;
+  private static readonly RECOVERY_TTL_MS = 15 * 60 * 1000;
+  private readonly recoveries = new BoundedMap<string, RecoveryState>({
+    maxSize: 100,
+    ttlMs: Engine.RECOVERY_TTL_MS,
+  });
   private sessionSweepInterval: ReturnType<typeof setInterval> | null = null;
   private backoffPersistInterval: ReturnType<typeof setInterval> | null = null;
   private sweepInterval: ReturnType<typeof setInterval> | null = null;
@@ -221,6 +293,12 @@ export class Engine {
     this.multiSessionManager = new MultiSessionManager(browserManager, config, this.pool ?? undefined);
     this.multiSessionManager.setOnSessionChanged((name) => {
       this.sharedPlaywrightBackends.delete(name);
+      if (this.exploreSessionName === name) {
+        this.exploreSessionName = DEFAULT_SESSION_NAME;
+      }
+      if (this.recordingSessionName === name) {
+        this.recordingSessionName = null;
+      }
     });
     this.startedAt = Date.now();
 
@@ -257,6 +335,11 @@ export class Engine {
 
     // LiveChromeBackend: fallback to CDP sessions for WebMCP skills
     this.liveChromeBackend = new LiveChromeBackend(this.multiSessionManager, this.authStore);
+
+    this.cleanupStaleRecoveryPolicies();
+    cleanupManagedChromeLaunches(config).catch(err => {
+      this.log.debug({ err }, 'Managed Chrome cleanup failed during startup');
+    });
 
     // HMAC key init is deferred to first skill execution (lazy) to avoid
     // blocking constructor and leaking promises when no skills are executed.
@@ -335,6 +418,23 @@ export class Engine {
     return this.activeSessionId;
   }
 
+  getMode(): EngineMode {
+    return this.mode;
+  }
+
+  getExploreSessionName(): string {
+    return this.exploreSessionName;
+  }
+
+  getRecordingSessionName(): string | null {
+    return this.recordingSessionName;
+  }
+
+  private getExploreBrowserManager(): BrowserManager {
+    const session = this.multiSessionManager.get(this.exploreSessionName);
+    return session?.browserManager ?? this.sessionManager.getBrowserManager();
+  }
+
   getMetricsRepo(): MetricsRepository {
     return this.metricsRepo;
   }
@@ -353,6 +453,57 @@ export class Engine {
 
   getAuthStore(): BrowserAuthStore { return this.authStore; }
   getAuthCoordinator(): AuthCoordinator { return this.authCoordinator; }
+
+  private cleanupStaleRecoveryPolicies(): void {
+    try {
+      const db = getDatabase(this.config);
+      const metadataBySession = new Map(
+        listManagedChromeMetadata(this.config)
+          .filter(meta => meta.sessionName)
+          .map(meta => [meta.sessionName as string, meta]),
+      );
+      const staleRecoveryPolicies = db.all<{ site_id: string; execution_session_name: string }>(
+        `SELECT site_id, execution_session_name
+           FROM policies
+          WHERE execution_backend = 'live-chrome'
+            AND execution_session_name GLOB '__recovery_*'`,
+      );
+
+      for (const row of staleRecoveryPolicies) {
+        if (this.multiSessionManager.get(row.execution_session_name)) {
+          continue;
+        }
+        const recoveryMetadata = metadataBySession.get(row.execution_session_name);
+        const overlay = recoveryMetadata?.priorPolicySnapshot
+          ? recoveryMetadata.priorPolicySnapshot
+          : {
+              executionBackend: undefined,
+              executionSessionName: undefined,
+            };
+        const result = mergeSitePolicy(row.site_id, overlay as any, this.config);
+        if (result.persisted) {
+          this.log.warn(
+            { siteId: row.site_id, sessionName: row.execution_session_name },
+            recoveryMetadata?.priorPolicySnapshot
+              ? 'Restored stale recovery-owned policy overlay during startup'
+              : 'Cleared stale recovery-owned live-chrome policy overlay during startup',
+          );
+        } else {
+          this.log.warn(
+            { siteId: row.site_id, sessionName: row.execution_session_name },
+            recoveryMetadata?.priorPolicySnapshot
+              ? 'Restored stale recovery-owned policy overlay in-memory but failed to persist during startup'
+              : 'Cleared stale recovery-owned live-chrome policy overlay in-memory but failed to persist during startup',
+          );
+        }
+        if (recoveryMetadata?.profileDir && !recoveryMetadata.pid) {
+          removeManagedChromeMetadata(recoveryMetadata.profileDir);
+        }
+      }
+    } catch (err) {
+      this.log.debug({ err }, 'Stale recovery policy cleanup failed during startup');
+    }
+  }
 
   /**
    * Per-site execution backend router.
@@ -434,6 +585,167 @@ export class Engine {
     this.warnings.push(msg);
   }
 
+  private isAutomaticRecoverySupported(overrides?: ContextOverrides): boolean {
+    return !this.config.server.network && !overrides?.proxy && !overrides?.geo;
+  }
+
+  private getCloudflareAdvisoryHint(browserManager?: BrowserManager): string | undefined {
+    const effectiveEngine =
+      browserManager?.getCapabilities()?.effectiveEngine
+      ?? this.getExploreBrowserManager().getCapabilities()?.effectiveEngine
+      ?? this.config.browser?.engine
+      ?? 'patchright';
+    if (effectiveEngine === 'playwright') {
+      return 'Retrying with patchright may avoid the Cloudflare challenge on some sites.';
+    }
+    return undefined;
+  }
+
+  private buildRecoveryHint(overrides?: ContextOverrides): string {
+    if (this.config.server.network) {
+      return 'Cloudflare challenge detected. Automatic Chrome handoff is only supported in local desktop mode. Use schrute_connect_cdp manually on the local machine.';
+    }
+    if (overrides?.proxy || overrides?.geo) {
+      return 'Cloudflare challenge detected. Automatic recovery is unavailable for proxy/geo explore sessions. Retry without overrides or use schrute_connect_cdp manually.';
+    }
+    return 'Cloudflare challenge detected. Call schrute_recover_explore to continue in real Chrome.';
+  }
+
+  private getRecoveryBySiteId(siteId: string): RecoveryState | undefined {
+    let match: RecoveryState | undefined;
+    for (const entry of this.recoveries.values()) {
+      if (entry.siteId === siteId && entry.currentState !== 'ready') {
+        if (!match || entry.createdAt > match.createdAt) {
+          match = entry;
+        }
+      }
+    }
+    return match;
+  }
+
+  private getPendingRecoveryStatus(): PendingRecoveryStatus | undefined {
+    let newest: RecoveryState | undefined;
+    for (const entry of this.recoveries.values()) {
+      if (entry.currentState === 'ready') continue;
+      if (!newest || entry.createdAt > newest.createdAt) {
+        newest = entry;
+      }
+    }
+    if (!newest) return undefined;
+    return {
+      reason: 'cloudflare_challenge',
+      recoveryMode: 'real_browser_cdp',
+      siteId: newest.siteId,
+      url: newest.url,
+      hint: newest.hint,
+      ...(newest.autoRecoverSupported ? { resumeToken: newest.resumeToken } : {}),
+      ...(newest.advisoryHint ? { advisoryHint: newest.advisoryHint } : {}),
+    };
+  }
+
+  private upsertPendingRecovery(siteId: string, url: string, overrides?: ContextOverrides): RecoveryState {
+    const existing = this.getRecoveryBySiteId(siteId);
+    const autoRecoverSupported = this.isAutomaticRecoverySupported(overrides);
+    const advisoryHint = this.getCloudflareAdvisoryHint();
+    const hint = this.buildRecoveryHint(overrides);
+    if (existing) {
+      existing.url = url;
+      existing.hint = hint;
+      existing.overrides = overrides;
+      existing.currentState = 'pending';
+      existing.failureReason = undefined;
+      existing.autoRecoverSupported = autoRecoverSupported;
+      existing.advisoryHint = advisoryHint;
+      this.recoveries.set(existing.resumeToken, existing);
+      return existing;
+    }
+
+    const recoveryId = randomUUID();
+    const resumeToken = randomUUID();
+    const cdpSessionName = `__recovery_${createHash('sha256').update(recoveryId).digest('hex').slice(0, 16)}`;
+    const managedProfileDir = path.join(this.config.dataDir, 'browser-data', 'live-chrome', recoveryId);
+    const createdAt = Date.now();
+    const entry: RecoveryState = {
+      resumeToken,
+      recoveryId,
+      siteId,
+      url,
+      hint,
+      createdAt,
+      cdpSessionName,
+      managedProfileDir,
+      managedBrowser: false,
+      exploreSessionNameBeforeRecovery: this.exploreSessionName,
+      currentState: 'pending',
+      advisoryHint,
+      overrides,
+      autoRecoverSupported,
+    };
+    this.recoveries.set(resumeToken, entry);
+    return entry;
+  }
+
+  private toHandoffResult(entry: RecoveryState): ExploreHandoffRequiredResult {
+    return {
+      status: 'browser_handoff_required',
+      reason: 'cloudflare_challenge',
+      recoveryMode: 'real_browser_cdp',
+      siteId: entry.siteId,
+      url: entry.url,
+      hint: entry.hint,
+      ...(entry.autoRecoverSupported ? { resumeToken: entry.resumeToken } : {}),
+      ...(entry.advisoryHint ? { advisoryHint: entry.advisoryHint } : {}),
+    };
+  }
+
+  private startCloudflareHeaderProbe(
+    page: { on(event: 'response', listener: (response: any) => void): void; off(event: 'response', listener: (response: any) => void): void; mainFrame(): unknown },
+    siteId: string,
+    url: string,
+    overrides?: ContextOverrides,
+    signal?: AbortSignal,
+  ): Promise<ExploreHandoffRequiredResult | undefined> {
+    if (typeof page.on !== 'function' || typeof page.off !== 'function' || typeof page.mainFrame !== 'function') {
+      return Promise.resolve(undefined);
+    }
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    return new Promise((resolve) => {
+      const finish = (value: ExploreHandoffRequiredResult | undefined) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        page.off('response', onResponse);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+
+      const onAbort = () => finish(undefined);
+      const onResponse = (response: any) => {
+        try {
+          const request = response.request?.();
+          if (!request?.isNavigationRequest?.()) return;
+          if (request.frame?.() !== page.mainFrame()) return;
+          const responseUrl = response.url?.() ?? '';
+          const headers = response.headers?.() ?? {};
+          const cfMitigated = String(headers['cf-mitigated'] ?? headers['CF-Mitigated'] ?? '').toLowerCase();
+          if (cfMitigated === 'challenge' || responseUrl.includes('/cdn-cgi/')) {
+            const recovery = this.upsertPendingRecovery(siteId, responseUrl || url, overrides);
+            finish(this.toHandoffResult(recovery));
+          }
+        } catch (err) {
+          this.log.debug({ err, siteId }, 'Cloudflare header probe failed (non-blocking)');
+        }
+      };
+
+      page.on('response', onResponse);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      timeout = setTimeout(() => finish(undefined), 1500);
+      timeout.unref?.();
+    });
+  }
+
   private getProviderCacheForManager(manager: BrowserManager): Map<string, { adapter: PlaywrightMcpAdapter; page: CachedPage; domainsKey: string }> {
     let cache = this.providerCache.get(manager);
     if (!cache) {
@@ -478,6 +790,8 @@ export class Engine {
       this.sessionManager.remove(this.activeSessionId);
     }
     this.activeSessionId = null;
+    this.exploreSessionName = DEFAULT_SESSION_NAME;
+    this.recordingSessionName = null;
     this.mode = 'idle';
     this.multiSessionManager.updateSiteId(DEFAULT_SESSION_NAME, '');
     this.multiSessionManager.updateContextOverrides(DEFAULT_SESSION_NAME, undefined);
@@ -494,7 +808,7 @@ export class Engine {
     domains?: string[],
     options?: { browserManager?: BrowserManager; lazy?: boolean; overrides?: ContextOverrides },
   ): Promise<PlaywrightMcpAdapter | undefined> {
-    const manager = options?.browserManager ?? this.sessionManager.getBrowserManager();
+    const manager = options?.browserManager ?? this.getExploreBrowserManager();
     const providerCache = this.getProviderCacheForManager(manager);
 
     // Non-lazy path: return existing context atomically (no TOCTOU race).
@@ -506,24 +820,29 @@ export class Engine {
         providerCache.delete(siteId);
         return undefined;
       }
-      const pages = existing.pages();
-      const page = pages[0] ?? await existing.newPage();
+      const page = await manager.getSelectedOrFirstPage(siteId, existing);
       return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
     }
 
     const context = await manager.getOrCreateContext(siteId, options?.overrides);
-    const pages = context.pages();
-    const page = pages[0] ?? await context.newPage();
+    const page = await manager.getSelectedOrFirstPage(siteId, context);
     return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
   }
 
-  private navigateFireAndForget(siteId: string, url: string, overrides?: ContextOverrides, sessionId?: string, signal?: AbortSignal): Promise<void> {
-    const bm = this.sessionManager.getBrowserManager();
+  private navigateFireAndForget(
+    siteId: string,
+    url: string,
+    overrides?: ContextOverrides,
+    sessionId?: string,
+    signal?: AbortSignal,
+    browserManager?: BrowserManager,
+  ): Promise<void> {
+    const bm = browserManager ?? this.getExploreBrowserManager();
     return bm.withLease(async () => {
       if (signal?.aborted) return;
       const context = await bm.getOrCreateContext(siteId, overrides);
       if (signal?.aborted) return;
-      const page = context.pages()[0] ?? await context.newPage();
+      const page = await bm.getSelectedOrFirstPage(siteId, context);
 
       const gotoOpts: Record<string, unknown> = { waitUntil: 'domcontentloaded', timeout: 30000 };
       // Referrer spoofing for explore navigation
@@ -542,7 +861,16 @@ export class Engine {
       if (signal?.aborted) return;
       await page.goto(url, gotoOpts);
       if (signal?.aborted) return;
-      await detectAndWaitForChallenge(page, 3000);
+      const challengePresent = await isCloudflareChallengePage(page);
+      if (challengePresent) {
+        const resolved = await detectAndWaitForChallenge(page, 3000);
+        if (!resolved) {
+          const recovery = this.upsertPendingRecovery(siteId, page.url() || url, overrides);
+          this.addWarning(`Cloudflare challenge is blocking ${siteId}. ${recovery.hint}`);
+        }
+      } else {
+        await detectAndWaitForChallenge(page, 3000);
+      }
       if (sessionId) this.sessionManager.updateUrl(sessionId, page.url());
     }).catch(err => {
       if (signal?.aborted && String(err).includes('TargetClosedError')) return;
@@ -567,11 +895,25 @@ export class Engine {
       const currentSession = this.sessionManager.getSession(this.activeSessionId);
       if (currentSession?.siteId === siteId) {
         try {
-          await this.sessionManager.getBrowserManager().getOrCreateContext(siteId, overrides);
-          const navOp = this.navigateFireAndForget(siteId, url, overrides, currentSession.id, signal)
+          const browserManager = this.getExploreBrowserManager();
+          const context = await browserManager.getOrCreateContext(siteId, overrides);
+          const page = await browserManager.getSelectedOrFirstPage(siteId, context);
+          const probe = this.startCloudflareHeaderProbe(page as any, siteId, url, overrides, signal);
+          const navOp = this.navigateFireAndForget(siteId, url, overrides, currentSession.id, signal, browserManager)
             .finally(() => this.pendingBackgroundOps.delete(navOp));
           this.pendingBackgroundOps.add(navOp);
-          return { sessionId: currentSession.id, siteId, url, reused: true, hint: 'Session reused. Navigate or call schrute_record to capture.' };
+          const handoffResult = await probe;
+          if (handoffResult) {
+            return handoffResult;
+          }
+          return {
+            status: 'ready',
+            sessionId: currentSession.id,
+            siteId,
+            url,
+            reused: true,
+            hint: 'Session reused. Navigate or call schrute_record to capture.',
+          };
         } catch (err) {
           if (err instanceof ContextOverrideMismatchError) {
             throw new Error(
@@ -648,6 +990,8 @@ export class Engine {
         );
       }
       this.activeSessionId = session.id;
+      this.exploreSessionName = DEFAULT_SESSION_NAME;
+      this.recordingSessionName = null;
       this.mode = 'exploring';
 
       // Sync default session siteId
@@ -657,9 +1001,18 @@ export class Engine {
       this.log.info({ sessionId: session.id, url, siteId }, 'Explore session started');
 
       // Track background ops so startRecording/close can await them
-      const navOp = this.navigateFireAndForget(siteId, url, overrides, session.id, signal)
+      const exploreManager = this.getExploreBrowserManager();
+      const context = await exploreManager.getOrCreateContext(siteId, overrides);
+      const page = await exploreManager.getSelectedOrFirstPage(siteId, context);
+      const probe = this.startCloudflareHeaderProbe(page as any, siteId, url, overrides, signal);
+      const navOp = this.navigateFireAndForget(siteId, url, overrides, session.id, signal, exploreManager)
         .finally(() => this.pendingBackgroundOps.delete(navOp));
       this.pendingBackgroundOps.add(navOp);
+
+      const handoffResult = await probe;
+      if (handoffResult) {
+        return handoffResult;
+      }
 
       // Fire-and-forget cold-start discovery (non-blocking)
       const discoveryOp = this.runColdStartDiscovery(url, siteId, signal)
@@ -678,6 +1031,7 @@ export class Engine {
       } : undefined;
 
       return {
+        status: 'ready',
         sessionId: session.id,
         siteId,
         url,
@@ -688,6 +1042,282 @@ export class Engine {
       this.mode = previousMode;
       this.activeSessionId = previousSessionId;
       throw err;
+    }
+  }
+
+  private async cancelBackgroundExploreOps(): Promise<void> {
+    if (this.exploreAbortController) {
+      this.exploreAbortController.abort();
+      this.exploreAbortController = null;
+    }
+    if (this.pendingBackgroundOps.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...this.pendingBackgroundOps]),
+        new Promise(resolve => setTimeout(resolve, 500)),
+      ]);
+      this.pendingBackgroundOps.clear();
+    }
+  }
+
+  private async connectRecoverySession(entry: RecoveryState): Promise<{ sessionName: string; managedBrowser: boolean }> {
+    const multiSession = this.multiSessionManager;
+    const existing = multiSession.get(entry.cdpSessionName);
+    if (existing) {
+      const browser = existing.browserManager.getBrowser();
+      if (browser?.isConnected()) {
+        return { sessionName: entry.cdpSessionName, managedBrowser: !!existing.managedPid };
+      }
+      await multiSession.close(entry.cdpSessionName, { force: true });
+    }
+
+    if (entry.managedPid && fs.existsSync(entry.managedProfileDir)) {
+      try {
+        const { wsEndpoint } = await waitForDevToolsActivePort(entry.managedProfileDir);
+        const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint }, entry.siteId);
+        session.managedPid = entry.managedPid;
+        session.managedProfileDir = entry.managedProfileDir;
+        session.cdpPriorPolicyState = entry.priorPolicySnapshot;
+        return { sessionName: session.name, managedBrowser: true };
+      } catch (err) {
+        this.log.debug({ err, siteId: entry.siteId }, 'Managed recovery reconnect failed, will launch a new Chrome session');
+      }
+    }
+
+    try {
+      const attached = await multiSession.connectCDP(entry.cdpSessionName, { autoDiscover: true }, entry.siteId);
+      attached.managedProfileDir = entry.managedProfileDir;
+      return { sessionName: attached.name, managedBrowser: false };
+    } catch (attachErr) {
+      const launch = await launchManagedChrome({
+        config: this.config,
+        siteId: entry.siteId,
+        url: entry.url,
+        profileDir: entry.managedProfileDir,
+      });
+      entry.managedPid = launch.pid;
+      entry.managedBrowser = true;
+      const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint: launch.wsEndpoint }, entry.siteId);
+      session.managedPid = launch.pid;
+      session.managedProfileDir = entry.managedProfileDir;
+      session.cdpPriorPolicyState = entry.priorPolicySnapshot;
+      return { sessionName: session.name, managedBrowser: true };
+    }
+  }
+
+  private async bindRecoveryPolicy(entry: RecoveryState): Promise<void> {
+    const currentPolicy = getSitePolicy(entry.siteId, this.config);
+    if (!entry.priorPolicySnapshot) {
+      entry.priorPolicySnapshot = {
+        domainAllowlist: currentPolicy.domainAllowlist,
+        executionBackend: currentPolicy.executionBackend,
+        executionSessionName: currentPolicy.executionSessionName,
+      };
+    }
+
+    const mergeResult = mergeSitePolicy(entry.siteId, {
+      domainAllowlist: [...new Set([
+        ...currentPolicy.domainAllowlist,
+        '127.0.0.1',
+        'localhost',
+        '[::1]',
+      ])],
+      executionBackend: 'live-chrome',
+      executionSessionName: entry.cdpSessionName,
+    }, this.config);
+    if (!mergeResult.persisted) {
+      this.log.warn({ siteId: entry.siteId }, 'Recovery policy applied in-memory but failed to persist');
+    }
+    try {
+      writeManagedChromeMetadata(entry.managedProfileDir, entry.managedPid, entry.siteId, {
+        sessionName: entry.cdpSessionName,
+        priorPolicySnapshot: entry.priorPolicySnapshot,
+      });
+    } catch (err) {
+      this.log.warn({ err, siteId: entry.siteId }, 'Failed to persist recovery cleanup metadata');
+    }
+
+    const session = this.multiSessionManager.get(entry.cdpSessionName);
+    if (session) {
+      session.cdpPriorPolicyState = entry.priorPolicySnapshot;
+    }
+  }
+
+  private async alignRecoveryPage(entry: RecoveryState): Promise<void> {
+    const session = this.multiSessionManager.get(entry.cdpSessionName);
+    if (!session) {
+      throw new Error(`Recovery session '${entry.cdpSessionName}' is not available`);
+    }
+
+    const browser = session.browserManager.getBrowser();
+    if (!browser) {
+      throw new Error('Recovery browser is not connected');
+    }
+
+    let selectedPage: Awaited<ReturnType<BrowserManager['getSelectedOrFirstPage']>> | undefined;
+    for (const context of browser.contexts()) {
+      for (const page of context.pages()) {
+        try {
+          const pageUrl = page.url();
+          if (!pageUrl || pageUrl === 'about:blank') continue;
+          const hostname = new URL(pageUrl).hostname;
+          if (pageUrl.startsWith(entry.url) || hostname === entry.siteId || hostname.endsWith(`.${entry.siteId}`)) {
+            session.browserManager.selectPage(entry.siteId, pageUrl);
+            selectedPage = page;
+            break;
+          }
+        } catch {
+          // Ignore invalid URLs.
+        }
+      }
+      if (selectedPage) break;
+    }
+
+    const page = selectedPage ?? await session.browserManager.getSelectedOrFirstPage(entry.siteId);
+    if (!page.url() || page.url() === 'about:blank') {
+      await page.goto(entry.url, { waitUntil: 'commit', timeout: 30000 });
+    } else {
+      try {
+        const currentHost = new URL(page.url()).hostname;
+        if (currentHost !== entry.siteId && !currentHost.endsWith(`.${entry.siteId}`)) {
+          await page.goto(entry.url, { waitUntil: 'commit', timeout: 30000 });
+        }
+      } catch {
+        await page.goto(entry.url, { waitUntil: 'commit', timeout: 30000 });
+      }
+    }
+    session.browserManager.selectPage(entry.siteId, page.url());
+  }
+
+  private async finalizeRecovery(entry: RecoveryState): Promise<void> {
+    await this.cancelBackgroundExploreOps();
+
+    this.exploreSessionName = entry.cdpSessionName;
+    this.mode = 'exploring';
+    if (!this.config.server.network) {
+      try {
+        this.multiSessionManager.setActive(entry.cdpSessionName, this.config);
+      } catch (err) {
+        this.log.debug({ err, siteId: entry.siteId }, 'Setting recovery session active failed');
+      }
+    }
+
+    const defaultSession = this.multiSessionManager.get(DEFAULT_SESSION_NAME);
+    defaultSession?.browserManager.discardContext(entry.siteId);
+
+    const discoveryOp = this.runColdStartDiscovery(entry.url, entry.siteId)
+      .catch(err => this.log.debug({ err, siteId: entry.siteId }, 'Post-recovery discovery failed'))
+      .finally(() => this.pendingBackgroundOps.delete(discoveryOp));
+    this.pendingBackgroundOps.add(discoveryOp);
+  }
+
+  async recoverExplore(resumeToken: string, waitMs = 90_000): Promise<RecoverExploreResult> {
+    const entry = this.recoveries.get(resumeToken);
+    if (!entry) {
+      return {
+        status: 'expired',
+        siteId: '',
+        url: '',
+        hint: 'Recovery token is missing or expired. Start explore again.',
+      };
+    }
+
+    if (this.config.server.network) {
+      return {
+        status: 'failed',
+        siteId: entry.siteId,
+        url: entry.url,
+        hint: 'Automatic Chrome handoff is only supported in local desktop mode. Use schrute_connect_cdp manually on the local machine.',
+      };
+    }
+
+    if (!entry.autoRecoverSupported) {
+      return {
+        status: 'failed',
+        siteId: entry.siteId,
+        url: entry.url,
+        hint: entry.hint,
+      };
+    }
+
+    if (this.mode === 'recording' || this.currentRecording) {
+      return {
+        status: 'failed',
+        siteId: entry.siteId,
+        url: entry.url,
+        hint: 'Automatic recovery is unavailable while recording. Call schrute_stop first, then retry schrute_recover_explore.',
+      };
+    }
+
+    const boundedWaitMs = Math.max(1_000, Math.min(waitMs, 300_000));
+
+    if (entry.currentState === 'ready') {
+      return {
+        status: 'ready',
+        siteId: entry.siteId,
+        url: entry.url,
+        session: entry.cdpSessionName,
+        managedBrowser: entry.managedBrowser,
+        hint: 'Recovery is already complete. Continue using browser tools or call schrute_record.',
+      };
+    }
+
+    try {
+      const { sessionName, managedBrowser } = await this.connectRecoverySession(entry);
+      await this.bindRecoveryPolicy(entry);
+      await this.alignRecoveryPage(entry);
+
+      const deadline = Date.now() + boundedWaitMs;
+      const session = this.multiSessionManager.get(sessionName);
+      if (!session) {
+        throw new Error(`Recovery session '${sessionName}' was not found after connect`);
+      }
+
+      entry.currentState = 'awaiting_user';
+      entry.managedBrowser = managedBrowser;
+
+      while (Date.now() < deadline) {
+        const page = await session.browserManager.getSelectedOrFirstPage(entry.siteId);
+        const challengePresent = await isCloudflareChallengePage(page as any);
+        const currentUrl = page.url() || entry.url;
+        if (!challengePresent) {
+          entry.currentState = 'ready';
+          entry.url = currentUrl;
+          await session.browserManager.snapshotAuth(entry.siteId);
+          await this.finalizeRecovery(entry);
+          this.recoveries.set(entry.resumeToken, entry);
+          return {
+            status: 'ready',
+            siteId: entry.siteId,
+            url: currentUrl,
+            session: sessionName,
+            managedBrowser,
+            hint: 'Recovery complete. Continue using browser tools or call schrute_record.',
+          };
+        }
+        entry.url = currentUrl;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      entry.currentState = 'awaiting_user';
+      this.recoveries.set(entry.resumeToken, entry);
+      return {
+        status: 'awaiting_user',
+        siteId: entry.siteId,
+        url: entry.url,
+        session: sessionName,
+        managedBrowser,
+        hint: 'Chrome is open and waiting for you to clear the Cloudflare challenge. Run schrute_recover_explore again after you finish.',
+      };
+    } catch (err) {
+      entry.currentState = 'failed';
+      entry.failureReason = err instanceof Error ? err.message : String(err);
+      this.recoveries.set(entry.resumeToken, entry);
+      return {
+        status: 'failed',
+        siteId: entry.siteId,
+        url: entry.url,
+        hint: entry.failureReason,
+      };
     }
   }
 
@@ -720,7 +1350,7 @@ export class Engine {
 
     // Recording can use the default session (launch-based, Playwright HAR)
     // or the active named session if it's CDP (uses CDP HAR recorder)
-    const activeName = this.multiSessionManager.getActive();
+    const activeName = this.exploreSessionName;
     const activeSession = this.multiSessionManager.get(activeName);
     if (!activeSession) {
       throw new Error('No active session available for recording.');
@@ -811,6 +1441,7 @@ export class Engine {
       }
 
       this.mode = 'recording';
+      this.recordingSessionName = activeName;
       this.log.info(
         { recordingId: this.currentRecording.id, name, siteId: session.siteId },
         'Recording started',
@@ -840,6 +1471,7 @@ export class Engine {
     const recording = { ...this.currentRecording };
     this.currentRecording = null;
     this.mode = 'exploring';
+    this.recordingSessionName = null;
 
     // Detach response listeners from the recording cycle
     for (const cleanup of this.recordingListenerCleanups) {
@@ -878,10 +1510,23 @@ export class Engine {
           throw new Error('Missing HAR path during recording — invariant violation');
         }
 
-        // Close context -> flushes HAR to disk (browser-touching, use lease)
-        await browserManager.withLease(async () => {
-          await browserManager.closeContext(siteId);
-        });
+        // Close context -> flushes HAR to disk (browser-touching, use lease).
+        // Timeout prevents indefinite hang when the browser is stuck (e.g. Cloudflare challenge).
+        const STOP_LEASE_TIMEOUT_MS = 10_000;
+        try {
+          await browserManager.withLease(async () => {
+            await browserManager.closeContext(siteId);
+          }, STOP_LEASE_TIMEOUT_MS);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.log.warn({ siteId, err }, 'closeContext timed out during stopRecording — proceeding with HAR on disk');
+          // Force-discard the stuck context so it doesn't block future operations
+          try { browserManager.discardContext(siteId); } catch { /* best-effort */ }
+          // If the HAR file was already partially flushed we can still try the pipeline
+          if (!fs.existsSync(harPath)) {
+            throw new Error(`stopRecording aborted: context close timed out (${msg}) and no HAR file found`);
+          }
+        }
       }
 
       // 3. Run capture pipeline with explicit HAR path (CPU/IO only, no lease)
@@ -893,11 +1538,12 @@ export class Engine {
       }
 
       // 4. Re-open context so explore mode remains usable (browser-touching, use lease)
+      const REOPEN_LEASE_TIMEOUT_MS = 10_000;
       if (!this.isClosing) {
         try {
           await browserManager.withLease(async () => {
             await browserManager.getOrCreateContext(siteId);
-          });
+          }, REOPEN_LEASE_TIMEOUT_MS);
           this.log.info({ siteId }, 'Browser context re-opened after recording stop');
         } catch (err) {
           this.log.warn({ siteId, err }, 'Failed to re-open browser context after recording');
@@ -1766,7 +2412,11 @@ export class Engine {
 
     // Active named session info
     let activeNamedSession: EngineStatus['activeNamedSession'];
-    const activeName = this.multiSessionManager.getActive();
+    const activeName = this.mode === 'recording'
+      ? (this.recordingSessionName ?? this.exploreSessionName)
+      : this.mode === 'exploring'
+        ? this.exploreSessionName
+        : this.multiSessionManager.getActive();
     const activeNamed = this.multiSessionManager.get(activeName);
     if (activeNamed && (activeName !== DEFAULT_SESSION_NAME || activeNamed.contextOverrides)) {
       activeNamedSession = {
@@ -1785,7 +2435,7 @@ export class Engine {
 
     // P2-10: Compute skill summary
     const allSkills = this.skillRepo.getAll();
-    const browserManager = this.sessionManager.getBrowserManager();
+    const browserManager = this.getExploreBrowserManager();
     let executable = 0;
     let blocked = 0;
     for (const s of allSkills) {
@@ -1805,6 +2455,7 @@ export class Engine {
       mode: this.mode,
       activeSession,
       activeNamedSession,
+      ...(this.getPendingRecoveryStatus() ? { pendingRecovery: this.getPendingRecoveryStatus() } : {}),
       currentRecording: this.currentRecording ? { ...this.currentRecording } : null,
       uptime: Date.now() - this.startedAt,
       ...(warnings.length > 0 ? { warnings } : {}),
@@ -1822,7 +2473,7 @@ export class Engine {
     const browserProvider = await this.createBrowserProvider(siteId);
 
     // Provide scrape context factory so discovery can render JS-heavy pages
-    const browserManager = this.sessionManager.getBrowserManager();
+    const browserManager = this.getExploreBrowserManager();
     const scrapeFactory = (id: string) => browserManager.createScrapeContext(id);
 
     if (signal?.aborted) return;

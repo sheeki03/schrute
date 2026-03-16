@@ -1,6 +1,6 @@
 // Core
 export { Engine } from './core/engine.js';
-export type { EngineStatus, ExploreResult } from './core/engine.js';
+export type { EngineStatus, ExploreResult, RecoverExploreResult } from './core/engine.js';
 
 // Browser
 export { BrowserManager } from './browser/manager.js';

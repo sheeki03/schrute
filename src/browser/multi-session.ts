@@ -6,6 +6,7 @@ import type { BrowserAuthStore } from './auth-store.js';
 import type { AuthCoordinator } from './auth-coordinator.js';
 import { isAdminCaller } from '../shared/admin-auth.js';
 import { getLogger } from '../core/logger.js';
+import { removeManagedChromeMetadata, terminateManagedChrome } from './real-browser-handoff.js';
 
 const log = getLogger();
 
@@ -22,6 +23,8 @@ export interface NamedSession {
   contextOverrides?: ContextOverrides;
   selectedPageUrl?: string;
   cdpPriorPolicyState?: Record<string, unknown>;
+  managedProfileDir?: string;
+  managedPid?: number;
 }
 
 /**
@@ -214,6 +217,12 @@ export class MultiSessionManager {
       await session.browserManager.detachCdp();
     } else {
       await session.browserManager.closeAll();
+    }
+    if (session.managedPid) {
+      await terminateManagedChrome(session.managedPid);
+    }
+    if (session.managedProfileDir) {
+      removeManagedChromeMetadata(session.managedProfileDir);
     }
     this.sessions.delete(name);
 

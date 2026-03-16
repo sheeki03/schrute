@@ -27,6 +27,7 @@ import type { Router } from './router.js';
 import { sanitizeSiteId } from '../core/utils.js';
 import { setupCdpSitePolicy, validateProxyConfig, validateGeoConfig } from './shared-validation.js';
 import { isAdminCaller } from '../shared/admin-auth.js';
+import { getShapedStatus } from './status-response.js';
 
 const log = getLogger();
 
@@ -34,7 +35,7 @@ const log = getLogger();
 const ADMIN_ONLY_TOOL_NAMES = new Set([
   'schrute_explore', 'schrute_record', 'schrute_stop',
   'schrute_import_cookies', 'schrute_export_cookies',
-  'schrute_connect_cdp', 'schrute_webmcp_call',
+  'schrute_connect_cdp', 'schrute_recover_explore', 'schrute_webmcp_call',
   'schrute_delete_skill',
 ]);
 
@@ -92,7 +93,7 @@ export function buildToolList(deps: ToolDispatchDeps, callerId?: string): ToolDe
 
   // 1. Meta tools — filter admin-only in multi-user mode
   if (isAdmin) {
-    tools.push(...META_TOOLS);
+    tools.push(...META_TOOLS.filter(t => t.name !== 'schrute_recover_explore' || !config.server.network));
   } else {
     tools.push(...META_TOOLS.filter(t => !ADMIN_ONLY_TOOL_NAMES.has(t.name)));
   }
@@ -330,86 +331,8 @@ export async function dispatchToolCall(
       }
 
       case 'schrute_status': {
-        const statusIsAdmin = isAdminCaller(callerId, config);
-        // Non-admin callers peek at warnings (non-destructive) so admins
-        // don't lose visibility into explore/discovery failures.
-        const statusData = engine.getStatus({ drainWarnings: statusIsAdmin });
-        const result = { success: true as const, data: statusData };
-
-        // Cast once for property manipulation
-        const statusRecord = result.data as unknown as Record<string, unknown>;
-
-        // Sanitize for non-admin callers: strip sensitive details
-        if (!statusIsAdmin && result.data) {
-          // 1. Strip recording details (inputs may contain secrets, workflow details are admin-only)
-          if (statusRecord.currentRecording && typeof statusRecord.currentRecording === 'object') {
-            const rec = statusRecord.currentRecording as Record<string, unknown>;
-            statusRecord.currentRecording = {
-              id: rec.id,
-              name: rec.name,
-              siteId: rec.siteId,
-              startedAt: rec.startedAt,
-              requestCount: rec.requestCount,
-            };
-          }
-
-          // 2. Strip activeSession (internal session IDs)
-          statusRecord.activeSession = null;
-
-          // 3. Strip activeNamedSession — overrides contains ProxyConfig (username/password)
-          statusRecord.activeNamedSession = undefined;
-
-          // 4. Strip warnings — they contain full URLs and siteIds from admin browsing
-          statusRecord.warnings = undefined;
-        }
-
-        // WebMCP augmentation — only for admin callers
-        if (config.features.webmcp && statusIsAdmin) {
-          const multiSessionStatus = engine.getMultiSessionManager();
-          const activeNameStatus = multiSessionStatus.getActive();
-          const activeNamedStatus = multiSessionStatus.get(activeNameStatus);
-          const activeSiteIdStatus = activeNamedStatus?.siteId;
-
-          if (activeSiteIdStatus) {
-            try {
-              const { getDatabase } = await import('../storage/database.js');
-              const { loadCachedTools } = await import('../discovery/webmcp-scanner.js');
-              const db = getDatabase(config);
-
-              // Derive origin from existing browser context (no lease, no context creation)
-              let statusOrigin: string | undefined;
-              if (activeNamedStatus) {
-                const existingCtx = activeNamedStatus.browserManager.tryGetContext(activeSiteIdStatus);
-                if (existingCtx) {
-                  const pages = existingCtx.pages();
-                  if (pages.length > 0) {
-                    try { statusOrigin = new URL(pages[0].url()).origin; } catch { /* hostname fallback */ }
-                  }
-                }
-              }
-
-              const cachedTools = loadCachedTools(activeSiteIdStatus, db, statusOrigin);
-              statusRecord.webmcp = {
-                enabled: true,
-                toolCount: cachedTools.length,
-                tools: cachedTools.map(t => t.name),
-                note: cachedTools.length > 0 ? 'Tools cached by origin. Only tools on current page will execute.' : undefined,
-              };
-            } catch (err) {
-              statusRecord.webmcp = {
-                enabled: true, toolCount: 0, tools: [],
-                error: 'Failed to load WebMCP tools',
-              };
-            }
-          } else {
-            statusRecord.webmcp = { enabled: true, toolCount: 0, tools: [] };
-          }
-        } else if (config.features.webmcp && !statusIsAdmin) {
-          // Non-admin callers see that WebMCP is enabled but get no tool details
-          statusRecord.webmcp = { enabled: true };
-        }
-
-        return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+        const statusData = await getShapedStatus(engine, config, callerId);
+        return { content: [{ type: 'text', text: JSON.stringify(statusData, null, 2) }] };
       }
 
       case 'schrute_dry_run': {
@@ -749,6 +672,7 @@ export async function dispatchToolCall(
         const priorSnapshot: Record<string, unknown> = {
           domainAllowlist: priorPolicy.domainAllowlist,
           executionBackend: priorPolicy.executionBackend,
+          executionSessionName: priorPolicy.executionSessionName,
         };
 
         // Step 4: Overlay CDP-specific fields onto the real site's policy
@@ -759,6 +683,7 @@ export async function dispatchToolCall(
             ...(userDomains ? sanitizeImplicitAllowlist(userDomains) : []),
           ])],
           executionBackend: 'live-chrome' as const,
+          executionSessionName: name,
         }, config);
         if (!mergeResult.persisted) policyPersisted = false;
         session.cdpPriorPolicyState = priorSnapshot;
@@ -798,6 +723,28 @@ export async function dispatchToolCall(
         };
       }
 
+      case 'schrute_recover_explore': {
+        if (config.server.network) {
+          return {
+            content: [{ type: 'text', text: 'Error: Automatic Chrome handoff is only supported in local desktop mode. Use schrute_connect_cdp manually on the local machine.' }],
+            isError: true,
+          };
+        }
+        const resumeToken = args?.resumeToken as string | undefined;
+        const waitMs = args?.waitMs as number | undefined;
+        if (!resumeToken) {
+          return { content: [{ type: 'text', text: 'Error: resumeToken is required' }], isError: true };
+        }
+        if (waitMs !== undefined && (!Number.isInteger(waitMs) || waitMs < 1000)) {
+          return { content: [{ type: 'text', text: 'Error: waitMs must be an integer >= 1000' }], isError: true };
+        }
+        const result = await engine.recoverExplore(resumeToken, waitMs);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          ...(result.status === 'failed' ? { isError: true } : {}),
+        };
+      }
+
       case 'schrute_sessions': {
         const multiSession = engine.getMultiSessionManager();
         const sessions = multiSession.list(callerId, config).map(s => ({
@@ -829,7 +776,7 @@ export async function dispatchToolCall(
         const expectedId = name === DEFAULT_SESSION_NAME && force
           ? engine.getActiveSessionId()
           : null;
-        await multiSession.close(name, { engineMode: engine.getStatus().mode, force });
+        await multiSession.close(name, { engineMode: engine.getMode(), force });
         if (name === DEFAULT_SESSION_NAME && force) {
           engine.resetExploreState(expectedId);
         }
@@ -1139,8 +1086,10 @@ export async function dispatchToolCall(
       const explicitSession = args?.session as string | undefined;
 
       // During recording, force default session
-      if (engine.getStatus().mode === 'recording') {
-        sessionName = DEFAULT_SESSION_NAME;
+      if (engine.getMode() === 'recording') {
+        sessionName = engine.getRecordingSessionName() ?? DEFAULT_SESSION_NAME;
+      } else if (engine.getMode() === 'exploring') {
+        sessionName = explicitSession ?? engine.getExploreSessionName();
       } else if (explicitSession) {
         sessionName = explicitSession;
       } else {

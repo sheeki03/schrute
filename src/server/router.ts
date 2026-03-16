@@ -246,6 +246,17 @@ export function createRouter(deps: RouterDeps) {
       }
     },
 
+    async recoverExplore(resumeToken: string, waitMs?: number): Promise<RouterResult> {
+      try {
+        const result = await engine.recoverExplore(resumeToken, waitMs);
+        return { success: true, data: result };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.error({ err }, 'Recover explore failed');
+        return { success: false, error: message, statusCode: 400 };
+      }
+    },
+
     // ─── Status ────────────────────────────────────────────
     getStatus(): RouterResult {
       const status = engine.getStatus();
