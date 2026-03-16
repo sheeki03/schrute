@@ -43,6 +43,7 @@ import { LiveChromeBackend } from '../browser/live-chrome-backend.js';
 import { BoundedMap } from '../shared/bounded-map.js';
 import {
   cleanupManagedChromeLaunches,
+  cleanupManagedChromeLaunchesSync,
   listManagedChromeMetadata,
   launchManagedChrome,
   removeManagedChromeMetadata,
@@ -50,12 +51,9 @@ import {
   waitForDevToolsActivePort,
   writeManagedChromeMetadata,
 } from '../browser/real-browser-handoff.js';
-import { detectAuth } from '../capture/auth-detector.js';
-import { discoverParamsNative as discoverParams } from '../native/param-discoverer.js';
-import { detectChains } from '../capture/chain-detector.js';
-import { parseHar, extractRequestResponse, type StructuredRecord } from '../capture/har-extractor.js';
-import { filterRequestsNative as filterRequests } from '../native/noise-filter.js';
-import { clusterEndpoints } from '../capture/api-extractor.js';
+import type { DirectCaptureResult } from '../capture/cdp-har-recorder.js';
+import type { StructuredRecord } from '../capture/har-extractor.js';
+import { clusterEndpoints, scoreAndRankClusters } from '../capture/api-extractor.js';
 import { PathTrie } from '../capture/path-trie.js';
 import { generateSkill, generateSkillReferences, generateSkillTemplates, generateActionName } from '../skill/generator.js';
 import { getSkillsDir } from './config.js';
@@ -73,13 +71,20 @@ import { AmendmentRepository } from '../storage/amendment-repository.js';
 import { scanSkill } from '../skill/security-scanner.js';
 import { buildDependencyGraph, getCascadeAffected } from '../skill/dependency-graph.js';
 import { notify, createEvent } from '../healing/notification.js';
-import { clusterByOperation, canReplayPersistedQuery, extractGraphQLInfo, isGraphQL } from '../capture/graphql-extractor.js';
-import { canonicalizeRequest } from '../capture/canonicalizer.js';
-import { recordFilteredEntries } from '../capture/noise-filter.js';
+import { clusterByOperation, canReplayPersistedQuery, extractGraphQLInfo } from '../capture/graphql-extractor.js';
+import {
+  isObviousNoise,
+  recordFilteredEntries,
+  shouldCaptureResponseBody,
+} from '../capture/noise-filter.js';
+import { extractChainCandidates } from '../capture/chain-detector.js';
 import { inferSchema, mergeSchemas } from '../capture/schema-inferrer.js';
+import { PipelinePool } from '../capture/pipeline-pool.js';
+import type { PipelineWorkerInput, PipelineWorkerOutput } from '../capture/pipeline-worker.js';
 import { loadCachedTools } from '../discovery/webmcp-scanner.js';
 import { SkillStatus } from '../skill/types.js';
 import type { GeoEmulationConfig, PermanentTierLock, ExecutionTierName } from '../skill/types.js';
+import { withTimeout } from './utils.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -102,12 +107,29 @@ interface RecordingInfo {
   siteId: string;
   startedAt: number;
   requestCount: number;
+  pipelineJobId?: string;
   inputs?: Record<string, string>;
   skillsGenerated?: number;
   signalRequests?: number;
   noiseRequests?: number;
   generatedSkills?: Array<{ id: string; method: string; pathTemplate: string; status: string }>;
   dedupedRequests?: number;
+}
+
+export interface PipelineJob {
+  jobId: string;
+  recordingId: string;
+  siteId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  result?: {
+    skillsGenerated: number;
+    signalCount: number;
+    noiseCount: number;
+    totalCount: number;
+  };
 }
 
 export interface ExploreReadyResult {
@@ -244,6 +266,7 @@ export class Engine {
   private budgetTracker: ToolBudgetTracker;
   private rateLimiter: RateLimiter;
   private isClosing = false;
+  private exitCleanupHandler: (() => void) | null = null;
   private pool: BrowserPool | null = null;
   private multiSessionManager: MultiSessionManager;
   private recordingListenerCleanups: Array<() => void> = [];
@@ -255,6 +278,12 @@ export class Engine {
   private inflightDedup = new Map<string, Promise<SkillExecutionResult>>();
   private exploreAbortController: AbortController | null = null;
   private pendingBackgroundOps = new Set<Promise<void>>();
+  private pipelineBackgroundOps = new Set<Promise<void>>();
+  private pipelinePool: PipelinePool | null = null;
+  private readonly pipelineJobs = new BoundedMap<string, PipelineJob>({
+    maxSize: 100,
+    ttlMs: 60 * 60 * 1000,
+  });
   private warnings: string[] = [];
   private static readonly MAX_WARNINGS = 100;
   private static readonly RECOVERY_TTL_MS = 15 * 60 * 1000;
@@ -340,6 +369,14 @@ export class Engine {
     cleanupManagedChromeLaunches(config).catch(err => {
       this.log.debug({ err }, 'Managed Chrome cleanup failed during startup');
     });
+
+    // Last-resort exit handler: send SIGTERM to any managed Chrome processes
+    // when the MCP server exits unexpectedly (crash, uncaught exception, OOM).
+    // process.on('exit') only allows synchronous code, so we use the sync variant.
+    this.exitCleanupHandler = () => {
+      try { cleanupManagedChromeLaunchesSync(config); } catch { /* best-effort */ }
+    };
+    process.on('exit', this.exitCleanupHandler);
 
     // HMAC key init is deferred to first skill execution (lazy) to avoid
     // blocking constructor and leaking promises when no skills are executed.
@@ -829,6 +866,61 @@ export class Engine {
     return this.resolveAdapter(providerCache, siteId, page, domains ?? [siteId], manager);
   }
 
+  getPipelineJob(jobId: string): PipelineJob | undefined {
+    const job = this.pipelineJobs.get(jobId);
+    if (!job) return undefined;
+    return {
+      ...job,
+      result: job.result ? { ...job.result } : undefined,
+    };
+  }
+
+  private trackBackgroundOp(op: Promise<void>, kind: 'general' | 'pipeline' = 'general'): void {
+    this.pendingBackgroundOps.add(op);
+    if (kind === 'pipeline') {
+      this.pipelineBackgroundOps.add(op);
+    }
+    op.finally(() => {
+      this.pendingBackgroundOps.delete(op);
+      this.pipelineBackgroundOps.delete(op);
+    });
+  }
+
+  private hasActivePipelineJobs(): boolean {
+    for (const job of this.pipelineJobs.values()) {
+      if (job.status === 'pending' || job.status === 'running') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async drainPendingBackgroundOps(includePipeline = true): Promise<void> {
+    if (this.pendingBackgroundOps.size === 0) return;
+
+    const ops = [...this.pendingBackgroundOps].filter(op => includePipeline || !this.pipelineBackgroundOps.has(op));
+    if (ops.length === 0) return;
+
+    const drainTimeoutMs = includePipeline && this.hasActivePipelineJobs() ? 10_000 : 500;
+    const drainResult = await Promise.race([
+      Promise.allSettled(ops).then(() => 'settled' as const),
+      new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), drainTimeoutMs)),
+    ]);
+
+    if (drainResult === 'timeout') {
+      this.log.warn(
+        { includePipeline, pendingOps: ops.length, drainTimeoutMs },
+        'Timed out draining background operations',
+      );
+    }
+
+    if (!includePipeline) {
+      for (const op of ops) {
+        this.pendingBackgroundOps.delete(op);
+      }
+    }
+  }
+
   private navigateFireAndForget(
     siteId: string,
     url: string,
@@ -1050,13 +1142,7 @@ export class Engine {
       this.exploreAbortController.abort();
       this.exploreAbortController = null;
     }
-    if (this.pendingBackgroundOps.size > 0) {
-      await Promise.race([
-        Promise.allSettled([...this.pendingBackgroundOps]),
-        new Promise(resolve => setTimeout(resolve, 500)),
-      ]);
-      this.pendingBackgroundOps.clear();
-    }
+    await this.drainPendingBackgroundOps(false);
   }
 
   private async connectRecoverySession(entry: RecoveryState): Promise<{ sessionName: string; managedBrowser: boolean }> {
@@ -1330,13 +1416,7 @@ export class Engine {
       this.exploreAbortController.abort();
       this.exploreAbortController = null;
     }
-    if (this.pendingBackgroundOps.size > 0) {
-      await Promise.race([
-        Promise.allSettled([...this.pendingBackgroundOps]),
-        new Promise(resolve => setTimeout(resolve, 500)),
-      ]);
-      this.pendingBackgroundOps.clear();
-    }
+    await this.drainPendingBackgroundOps(false);
 
     if (this.mode !== 'exploring') {
       throw new Error(
@@ -1357,17 +1437,21 @@ export class Engine {
     }
     const browserManager = activeSession.browserManager;
 
-    // CDP sessions don't support Playwright HAR — use CDP HAR recorder instead
-    if (!browserManager.supportsHarRecording()) {
-      const { CdpHarRecorder } = await import('../capture/cdp-har-recorder.js');
-      this.cdpHarRecorder = new CdpHarRecorder();
-      this.cdpHarRecorder.start();
-      this.log.info({ session: activeName }, 'Using CDP HAR recorder for non-launch-based session');
-    } else if (activeName !== DEFAULT_SESSION_NAME) {
+    if (activeName !== DEFAULT_SESSION_NAME && browserManager.supportsHarRecording()) {
       throw new Error(
         'Recording with Playwright HAR is only supported on the default session. ' +
         'Switch to the default session first with schrute_switch_session.',
       );
+    }
+
+    const { CdpHarRecorder } = await import('../capture/cdp-har-recorder.js');
+    this.cdpHarRecorder = new CdpHarRecorder();
+    this.cdpHarRecorder.start();
+
+    if (!browserManager.supportsHarRecording()) {
+      this.log.info({ session: activeName }, 'Using direct capture recorder for non-launch-based session');
+    } else {
+      this.log.info({ session: activeName }, 'Using direct capture recorder with minimal Playwright HAR');
     }
 
     const previousMode = this.mode;
@@ -1406,33 +1490,85 @@ export class Engine {
           if (this.currentRecording === recording) {
             recording.requestCount++;
 
-            // CDP HAR: ingest entry immediately, patch body asynchronously
+            // Record all network metadata eagerly and only read bodies for
+            // likely-signal JSON responses.
             if (cdpRecorder) {
               try {
                 const req = response.request();
-                const timing = response.timing?.();
+                const url = req?.url?.() ?? response.url();
+                const method = req?.method?.() ?? 'GET';
+                const status = response.status();
+                const resourceType = req?.resourceType?.();
+                const requestHeaders = req?.headers?.() ?? {};
+                const responseHeaders = response.headers();
+                const requestTiming = typeof req?.timing === 'function'
+                  ? req.timing()
+                  : undefined;
                 const now = Date.now();
                 const entry: NetworkEntry = {
-                  url: req?.url?.() ?? response.url(),
-                  method: req?.method?.() ?? 'GET',
-                  status: response.status(),
-                  requestHeaders: req?.headers?.() ?? {},
-                  responseHeaders: response.headers(),
-                  requestBody: req?.postData?.() ?? undefined,
+                  url,
+                  method,
+                  status,
+                  requestHeaders,
+                  responseHeaders,
                   responseBody: undefined,
+                  resourceType,
                   timing: {
-                    startTime: timing?.startTime ?? now,
+                    startTime: requestTiming?.startTime ?? now,
                     endTime: now,
-                    duration: timing?.responseEnd ?? 0,
+                    duration: requestTiming?.responseEnd > 0
+                      ? requestTiming.responseEnd
+                      : Math.max(now - (requestTiming?.startTime ?? now), 1),
                   },
                 };
-                // Two-phase ingest: record entry now, patch body when promise resolves.
-                // stop() flushes pending bodies before returning the HAR.
+
+                const obviousNoise = isObviousNoise(
+                  url,
+                  method,
+                  status,
+                  session.siteId,
+                  resourceType,
+                );
+                if (obviousNoise.obvious) {
+                  cdpRecorder.ingestNetworkEntries([entry]);
+                  return;
+                }
+
+                try {
+                  entry.requestBody = req?.postData?.() ?? undefined;
+                } catch (err) {
+                  this.log.debug({ err, url }, 'Request body unavailable during recording');
+                }
+
+                const contentType = responseHeaders['content-type'] ?? responseHeaders['Content-Type'];
+                if (!shouldCaptureResponseBody(url, method, status, contentType, session.siteId, resourceType)) {
+                  cdpRecorder.ingestNetworkEntries([entry]);
+                  return;
+                }
+
                 const bodyPromise = response.body()
-                  .then((buf: Buffer) => buf.toString('utf-8'))
-                  .catch(() => undefined as string | undefined);
+                  .then((buf: Buffer) => {
+                    const text = buf.toString('utf-8');
+                    const bodySize = Buffer.byteLength(text);
+                    const chainCandidates = extractChainCandidates(text);
+                    if (chainCandidates) {
+                      return {
+                        body: text.length > 4096 ? text.slice(0, 4096) : text,
+                        bodySize,
+                        chainCandidates,
+                      };
+                    }
+                    return {
+                      body: text,
+                      bodySize,
+                    };
+                  })
+                  .catch(() => undefined);
                 cdpRecorder.ingestWithPendingBody(entry, bodyPromise);
-              } catch (err) { this.log.debug({ err, url: response.url() }, 'Response capture failed during recording'); }
+              } catch (err) {
+                const responseUrl = typeof response?.url === 'function' ? response.url() : undefined;
+                this.log.debug({ err, url: responseUrl }, 'Response capture failed during recording');
+              }
             }
           }
         };
@@ -1492,21 +1628,17 @@ export class Engine {
 
     try {
       let harPath: string | undefined;
+      let directCaptureResult: DirectCaptureResult | undefined;
+      const wasCdpRecording = !browserManager.supportsHarRecording();
 
       if (this.cdpHarRecorder) {
-        // CDP recording path: flush pending body reads, then stop and write to temp file
-        const harLog = await this.cdpHarRecorder.stop();
+        directCaptureResult = await this.cdpHarRecorder.stopAsStructuredRecords();
         this.cdpHarRecorder = null;
+      }
 
-        const tmpDir = path.join(this.config.dataDir, 'tmp');
-        fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
-        harPath = path.join(tmpDir, `${siteId}-cdp-${Date.now()}.har`);
-        fs.writeFileSync(harPath, JSON.stringify({ log: harLog }), { mode: 0o600 });
-        this.log.info({ harPath, entries: harLog.entries.length }, 'CDP HAR written to disk');
-      } else {
-        // Playwright recording path: capture HAR path before closing context
+      if (!wasCdpRecording) {
         harPath = browserManager.getHarPath(siteId);
-        if (!harPath) {
+        if (!harPath && (!directCaptureResult || directCaptureResult.totalCount === 0)) {
           throw new Error('Missing HAR path during recording — invariant violation');
         }
 
@@ -1519,27 +1651,21 @@ export class Engine {
           }, STOP_LEASE_TIMEOUT_MS);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          this.log.warn({ siteId, err }, 'closeContext timed out during stopRecording — proceeding with HAR on disk');
+          this.log.warn(
+            { siteId, harPath, err },
+            'closeContext timed out during stopRecording — continuing with direct capture',
+          );
           // Force-discard the stuck context so it doesn't block future operations
           try { browserManager.discardContext(siteId); } catch { /* best-effort */ }
-          // If the HAR file was already partially flushed we can still try the pipeline
-          if (!fs.existsSync(harPath)) {
+          if ((!directCaptureResult || directCaptureResult.totalCount === 0) && (!harPath || !fs.existsSync(harPath))) {
             throw new Error(`stopRecording aborted: context close timed out (${msg}) and no HAR file found`);
           }
         }
       }
 
-      // 3. Run capture pipeline with explicit HAR path (CPU/IO only, no lease)
-      let pipelineError: Error | undefined;
-      try {
-        await this.runCapturePipeline(recording, harPath);
-      } catch (err) {
-        pipelineError = err instanceof Error ? err : new Error(String(err));
-      }
-
-      // 4. Re-open context so explore mode remains usable (browser-touching, use lease)
-      const REOPEN_LEASE_TIMEOUT_MS = 10_000;
-      if (!this.isClosing) {
+      // Re-open the Playwright context before returning so explore mode stays usable.
+      if (!wasCdpRecording && !this.isClosing) {
+        const REOPEN_LEASE_TIMEOUT_MS = 10_000;
         try {
           await browserManager.withLease(async () => {
             await browserManager.getOrCreateContext(siteId);
@@ -1548,13 +1674,16 @@ export class Engine {
         } catch (err) {
           this.log.warn({ siteId, err }, 'Failed to re-open browser context after recording');
         }
+      } else if (wasCdpRecording) {
+        this.log.info({ siteId }, 'CDP recording — skipping context re-open (externally managed)');
       }
 
-      if (pipelineError) {
-        throw new Error(`Recording stopped but capture pipeline failed: ${pipelineError.message}`);
-      }
-
-      return recording;
+      const pipelineJobId = this.enqueuePipelineJob(
+        recording,
+        directCaptureResult && directCaptureResult.totalCount > 0 ? directCaptureResult : undefined,
+        harPath,
+      );
+      return { ...recording, pipelineJobId };
     } finally {
       this.cdpHarRecorder = null;  // always clear, even on error
       // Always clear idle suppression, even if capture pipeline or re-open throws
@@ -1562,274 +1691,384 @@ export class Engine {
     }
   }
 
-  private async runCapturePipeline(recording: RecordingInfo, explicitHarPath?: string): Promise<void> {
-    try {
-      this.log.info({ recordingId: recording.id, siteId: recording.siteId }, 'Running capture pipeline');
+  private enqueuePipelineJob(
+    recording: RecordingInfo,
+    directCaptureResult?: DirectCaptureResult,
+    explicitHarPath?: string,
+  ): string {
+    const jobId = randomUUID();
+    this.pipelineJobs.set(jobId, {
+      jobId,
+      recordingId: recording.id,
+      siteId: recording.siteId,
+      status: 'pending',
+      startedAt: Date.now(),
+    });
 
-      // Use explicit harPath if provided, otherwise look up from session manager
-      const harPath = explicitHarPath ?? this.sessionManager.getHarPath(recording.siteId);
-      if (!harPath || !fs.existsSync(harPath)) {
-        this.log.warn({ recordingId: recording.id }, 'No HAR file available for capture pipeline');
-        return;
+    const pipelinePromise = (async () => {
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      const runningJob = this.pipelineJobs.get(jobId);
+      if (runningJob) {
+        this.pipelineJobs.set(jobId, { ...runningJob, status: 'running' });
       }
 
-      // Parse HAR and convert to structured records
-      const harData = parseHar(harPath);
-
-      // Filter noise (analytics, beacons, polling, static assets)
-      const { signal, noise } = filterRequests(harData.log.entries);
-
-      // C3: Persist noise filter audit trail
-      const db = getDatabase(this.config);
-      db.run(
-        `INSERT INTO action_frames (id, site_id, name, started_at, ended_at, request_count, signal_count, skill_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        recording.id, recording.siteId, recording.name, recording.startedAt, Date.now(),
-        harData.log.entries.length, signal.length, 0,
-      );
-      recordFilteredEntries(db, recording.id, harData.log.entries);
-
-      const signalRecords: StructuredRecord[] = signal.map(extractRequestResponse);
-
-      if (signalRecords.length === 0) {
-        this.log.warn({ recordingId: recording.id }, 'No signal requests after filtering');
-        return;
-      }
-
-      // C2: Canonicalize and deduplicate requests
-      const seen = new Set<string>();
-      const dedupedRecords = signalRecords.filter(r => {
-        const canonical = canonicalizeRequest(r.request);
-        const key = `${canonical.method}|${canonical.canonicalUrl}|${canonical.canonicalBody ?? ''}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-
-      // Split: REST vs GraphQL (prevents generic /graphql REST skill)
-      const restRecords = dedupedRecords.filter(r => !isGraphQL(r.request));
-      const gqlRecords = dedupedRecords.filter(r => isGraphQL(r.request));
-
-      // Detect auth patterns
-      const authRecipe = detectAuth(restRecords);
-
-      // Discover parameters (needs RequestSample[] with declaredInputs)
-      const paramSamples = restRecords.map(record => ({
-        record,
-        declaredInputs: recording.inputs,
-      }));
-      const paramEvidence = discoverParams(paramSamples);
-
-      // Detect request chains
-      const chains = detectChains(restRecords);
-
-      // Cluster endpoints and generate draft skills
-      const clusters = clusterEndpoints(restRecords, this.pathTrie);
-      // A1: Track pre-existing skill IDs for this site BEFORE generating new ones
-      const preExistingSkillIds = new Set(
-        this.skillRepo.getBySiteId(recording.siteId).map(s => s.id)
-      );
-
-      let generatedCount = 0;
-      for (const cluster of clusters) {
-        const chainForCluster = chains.find(c =>
-          c.steps.some(s => s.skillRef.includes(cluster.pathTemplate)),
-        );
-
-        const skill = generateSkill(
-          recording.siteId,
-          {
-            method: cluster.method,
-            pathTemplate: cluster.pathTemplate,
-            actionName: generateActionName(cluster.method, cluster.pathTemplate),
-            inputSchema: cluster.bodyShape ? { type: 'object', properties: cluster.bodyShape } : {},
-            requiredHeaders: cluster.commonHeaders,
-            sampleCount: cluster.requests.length,
-          },
-          authRecipe ?? undefined,
-          paramEvidence.length > 0 ? paramEvidence : undefined,
-          chainForCluster,
-        );
-
-        // Persist draft skill if it doesn't already exist
-        if (!this.skillRepo.getById(skill.id)) {
-          this.skillRepo.create(skill);
-          generatedCount++;
-        }
-      }
-
-      // A1: Increment sampleCount for pre-existing skills that matched clusters
-      for (const cluster of clusters) {
-        const expectedName = generateActionName(cluster.method, cluster.pathTemplate);
-        const siteSkills = this.skillRepo.getBySiteId(recording.siteId);
-        const candidates = siteSkills.filter(s =>
-          s.name === expectedName &&
-          s.method === cluster.method &&
-          preExistingSkillIds.has(s.id)
-        );
-        if (candidates.length > 0) {
-          const matched = candidates.reduce((best, s) => s.version > best.version ? s : best);
-          this.skillRepo.update(matched.id, { sampleCount: matched.sampleCount + cluster.requests.length });
-        }
-      }
-
-      // A1: Check promotion for all site skills
-      const allSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
-      for (const existing of allSiteSkills) {
-        const check = canPromote(existing, this.config);
-        if (check.eligible) {
-          const result = promoteSkill(existing, this.config);
-          this.skillRepo.update(result.skill.id, {
-            status: result.skill.status,
-            confidence: result.skill.confidence,
-            lastVerified: result.skill.lastVerified,
-          });
-          notify(createEvent('skill_promoted', existing.id, existing.siteId,
-            { previousStatus: existing.status }), this.config).catch(err => this.log.debug({ err }, 'Notification failed'));
-        }
-      }
-
-      // C1: GraphQL clustering — catalog entries (non-executable drafts)
-      for (const gqlCluster of clusterByOperation(gqlRecords, recording.siteId)) {
-        // Gate: skip cluster if ALL requests are unreplayable persisted queries
-        if (gqlCluster.hasPersistedQueries) {
-          const hasReplayable = gqlCluster.requests.some(r => {
-            const info = extractGraphQLInfo(r.request);
-            return canReplayPersistedQuery(info);
-          });
-          if (!hasReplayable) continue;
-        }
-
-        // Derive method/path from replayable requests only
-        const replayableRequests = gqlCluster.requests.filter(r => {
-          const info = extractGraphQLInfo(r.request);
-          return !info.isPersistedQuery || canReplayPersistedQuery(info);
-        });
-        const methodPathCounts = new Map<string, number>();
-        for (const r of replayableRequests) {
-          const key = `${r.request.method}|${new URL(r.request.url).pathname}`;
-          methodPathCounts.set(key, (methodPathCounts.get(key) ?? 0) + 1);
-        }
-        const [bestMethodPath] = [...methodPathCounts.entries()].sort((a, b) => b[1] - a[1])[0];
-        const [gqlMethod, gqlPath] = bestMethodPath.split('|');
-
-        const gqlSkill = generateSkill(recording.siteId, {
-          method: gqlMethod,
-          pathTemplate: gqlPath,
-          actionName: gqlCluster.operationName,
-          inputSchema: { type: 'object', properties: Object.fromEntries(
-            Object.entries(gqlCluster.variableShape).map(([k, v]) => [k, { type: v === 'mixed' ? 'string' : v }])
-          )},
-          requiredHeaders: {},
-          sampleCount: gqlCluster.requests.length,
-          isGraphQL: true,
-          graphqlOperationName: gqlCluster.operationName,
-        }, authRecipe ?? undefined);
-
-        if (!this.skillRepo.getById(gqlSkill.id)) {
-          this.skillRepo.create(gqlSkill);
-          generatedCount++;
-        }
-      }
-
-      // P2-6: Auto-activate read-only GET/HEAD skills from this recording session
-      // Gate: skip activation if security scanner flags the skill as unsafe
-      const newSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
-      for (const s of newSiteSkills) {
-        if (!preExistingSkillIds.has(s.id) && s.sideEffectClass === SideEffectClass.READ_ONLY && (s.method === 'GET' || s.method === 'HEAD')) {
-          const scanResult = scanSkill(s);
-          if (!scanResult.safe) {
-            this.skillRepo.update(s.id, { reviewRequired: true });
-            this.log.warn({ skillId: s.id, findings: scanResult.findings.length }, 'Security scanner blocked auto-activation');
-            continue;
-          }
-          this.skillRepo.update(s.id, { status: SkillStatus.ACTIVE, confidence: 0.5, lastVerified: Date.now() });
-          this.log.info({ skillId: s.id }, 'Auto-activated read-only skill from recording session');
-        }
-      }
-
-      // P2-7: Populate generated skills for richer stop response
-      if (this.currentRecording) {
-        const newSkills = this.skillRepo.getBySiteId(recording.siteId)
-          .filter(s => !preExistingSkillIds.has(s.id));
-        this.currentRecording.generatedSkills = newSkills.map(s => ({
-          id: s.id, method: s.method, pathTemplate: s.pathTemplate, status: s.status,
-        }));
-        this.currentRecording.dedupedRequests = signalRecords.length - dedupedRecords.length;
-      }
-
-      // C3: Update action_frame with final skill count
-      db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', generatedCount, recording.id);
-
-      // P1-3: Update recording with pipeline counts
-      recording.signalRequests = signalRecords.length;
-      recording.noiseRequests = noise.length;
-      recording.skillsGenerated = generatedCount;
-      recording.requestCount = harData.log.entries.length;
-
-      // Classify site traffic to set recommendedTier
-      const traffic: NetworkEntry[] = dedupedRecords.map(r => ({
-        url: r.request.url,
-        method: r.request.method,
-        status: r.response.status,
-        requestHeaders: r.request.headers ?? {},
-        responseHeaders: r.response.headers ?? {},
-        requestBody: r.request.body,
-        timing: { startTime: r.startedAt, endTime: r.startedAt + r.duration, duration: r.duration },
-      }));
-
-      if (traffic.length > 0) {
-        const classification = classifySite(recording.siteId, traffic);
-        const siteRepo = new SiteRepository(db);
-        siteRepo.update(recording.siteId, {
-          recommendedTier: classification.recommendedTier,
-        });
-        this.log.info(
-          { siteId: recording.siteId, recommendedTier: classification.recommendedTier, authRequired: classification.authRequired },
-          'Site classified after recording',
-        );
-      }
-
-      this.log.info(
-        {
-          recordingId: recording.id,
-          authDetected: authRecipe != null,
-          paramCount: paramEvidence.length,
-          chainCount: chains.length,
-          signalRequests: dedupedRecords.length,
-          clusters: clusters.length,
-          generatedSkills: generatedCount,
-        },
-        'Capture pipeline complete',
-      );
-
-      // Persist skill references and templates to disk (non-blocking)
       try {
-        const allSiteSkillsForDocs = this.skillRepo.getBySiteId(recording.siteId);
-        for (const skill of allSiteSkillsForDocs) {
-          const skillDir = path.join(getSkillsDir(this.config), recording.siteId, skill.id);
-
-          const refs = generateSkillReferences(skill);
-          const refsDir = path.join(skillDir, 'references');
-          fs.mkdirSync(refsDir, { recursive: true });
-          for (const [filename, content] of refs) {
-            fs.writeFileSync(path.join(refsDir, filename), content, 'utf-8');
-          }
-
-          const tmpls = generateSkillTemplates(skill);
-          const tmplsDir = path.join(skillDir, 'templates');
-          fs.mkdirSync(tmplsDir, { recursive: true });
-          for (const [filename, content] of tmpls) {
-            fs.writeFileSync(path.join(tmplsDir, filename), content, 'utf-8');
-          }
+        const result = await withTimeout(
+          this.runCapturePipeline(recording, directCaptureResult, explicitHarPath),
+          30_000,
+          'Capture pipeline',
+        );
+        const completedJob = this.pipelineJobs.get(jobId);
+        if (completedJob) {
+          this.pipelineJobs.set(jobId, {
+            ...completedJob,
+            status: 'completed',
+            completedAt: Date.now(),
+            result,
+          });
         }
-        this.log.debug({ siteId: recording.siteId, count: allSiteSkillsForDocs.length }, 'Skill docs persisted');
-      } catch (docsErr) {
-        this.log.warn({ err: docsErr }, 'Failed to persist skill docs (non-blocking)');
+      } catch (err) {
+        const failedJob = this.pipelineJobs.get(jobId);
+        if (failedJob) {
+          this.pipelineJobs.set(jobId, {
+            ...failedJob,
+            status: 'failed',
+            completedAt: Date.now(),
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        this.log.warn({ err, recordingId: recording.id, jobId }, 'Capture pipeline job failed');
       }
+    })();
+
+    this.trackBackgroundOp(pipelinePromise, 'pipeline');
+    return jobId;
+  }
+
+  private async runCapturePipeline(
+    recording: RecordingInfo,
+    directCaptureResult?: DirectCaptureResult,
+    explicitHarPath?: string,
+  ): Promise<NonNullable<PipelineJob['result']>> {
+    if (directCaptureResult && directCaptureResult.totalCount > 0) {
+      try {
+        return await this.runCapturePipelineDirect(recording, directCaptureResult);
+      } catch (err) {
+        if (explicitHarPath) {
+          this.log.warn({ err, recordingId: recording.id }, 'Direct capture pipeline failed — falling back to HAR pipeline');
+          return this.runCapturePipelineFromHar(recording, explicitHarPath);
+        }
+        throw err;
+      }
+    }
+    return this.runCapturePipelineFromHar(recording, explicitHarPath);
+  }
+
+  private async runCapturePipelineDirect(
+    recording: RecordingInfo,
+    directCaptureResult: DirectCaptureResult,
+  ): Promise<NonNullable<PipelineJob['result']>> {
+    const pipelineOutput = await this.runPipelineWorker({
+      records: directCaptureResult.records,
+      auditEntries: this.normalizeAuditEntries(directCaptureResult),
+      siteId: recording.siteId,
+      inputs: recording.inputs,
+    });
+    return this.runPipelineCore(recording, pipelineOutput);
+  }
+
+  private async runCapturePipelineFromHar(
+    recording: RecordingInfo,
+    explicitHarPath?: string,
+  ): Promise<NonNullable<PipelineJob['result']>> {
+    const harPath = explicitHarPath ?? this.sessionManager.getHarPath(recording.siteId);
+    if (!harPath || !fs.existsSync(harPath)) {
+      this.log.warn({ recordingId: recording.id }, 'No HAR file available for capture pipeline');
+      return {
+        skillsGenerated: 0,
+        signalCount: 0,
+        noiseCount: 0,
+        totalCount: 0,
+      };
+    }
+    const pipelineOutput = await this.runPipelineWorker({
+      harPath,
+      siteId: recording.siteId,
+      inputs: recording.inputs,
+    });
+    return this.runPipelineCore(recording, pipelineOutput);
+  }
+
+  private async runPipelineCore(
+    recording: RecordingInfo,
+    pipelineOutput: PipelineWorkerOutput,
+  ): Promise<NonNullable<PipelineJob['result']>> {
+    this.log.info({ recordingId: recording.id, siteId: recording.siteId }, 'Running capture pipeline');
+
+    const db = getDatabase(this.config);
+    const counts = pipelineOutput.auditData;
+    const dedupedRecords = pipelineOutput.signalRecords;
+    const auditEntries = pipelineOutput.auditEntries as unknown as Parameters<typeof recordFilteredEntries>[2];
+
+    db.run(
+      `INSERT INTO action_frames (id, site_id, name, started_at, ended_at, request_count, signal_count, skill_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      recording.id,
+      recording.siteId,
+      recording.name,
+      recording.startedAt,
+      Date.now(),
+      counts.totalCount,
+      counts.signalCount,
+      0,
+    );
+    recordFilteredEntries(db, recording.id, auditEntries);
+
+    if (dedupedRecords.length === 0) {
+      db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', 0, recording.id);
+      this.log.warn({ recordingId: recording.id }, 'No signal requests after filtering');
+      return {
+        skillsGenerated: 0,
+        signalCount: counts.signalCount,
+        noiseCount: counts.noiseCount,
+        totalCount: counts.totalCount,
+      };
+    }
+
+    const restRecords = pipelineOutput.restRecords;
+    const gqlRecords = pipelineOutput.gqlRecords;
+    const authRecipe = pipelineOutput.authRecipe;
+    const paramEvidence = pipelineOutput.paramEvidence;
+    const chains = pipelineOutput.chains;
+    const maxSkills = typeof (this.config as { maxSkillsPerRecording?: unknown }).maxSkillsPerRecording === 'number'
+      ? ((this.config as { maxSkillsPerRecording?: number }).maxSkillsPerRecording ?? 15)
+      : 15;
+    const clusters = scoreAndRankClusters(clusterEndpoints(restRecords, this.pathTrie), maxSkills);
+
+    this.log.info({
+      recordingId: recording.id,
+      clusterScores: clusters.slice(0, 5).map(cluster => ({
+        method: cluster.method,
+        pathTemplate: cluster.pathTemplate,
+        utilityScore: cluster.utilityScore,
+      })),
+    }, 'Ranked endpoint clusters');
+
+    const preExistingSkillIds = new Set(
+      this.skillRepo.getBySiteId(recording.siteId).map(s => s.id),
+    );
+
+    let generatedCount = 0;
+    for (const cluster of clusters) {
+      const chainForCluster = chains.find(c =>
+        c.steps.some(s => s.skillRef.includes(cluster.pathTemplate)),
+      );
+
+      const skill = generateSkill(
+        recording.siteId,
+        {
+          method: cluster.method,
+          pathTemplate: cluster.pathTemplate,
+          actionName: generateActionName(cluster.method, cluster.pathTemplate),
+          inputSchema: cluster.bodyShape ? { type: 'object', properties: cluster.bodyShape } : {},
+          requiredHeaders: cluster.commonHeaders,
+          sampleCount: cluster.requests.length,
+        },
+        authRecipe ?? undefined,
+        paramEvidence.length > 0 ? paramEvidence : undefined,
+        chainForCluster,
+      );
+
+      if (!this.skillRepo.getById(skill.id)) {
+        this.skillRepo.create(skill);
+        generatedCount++;
+      }
+    }
+
+    for (const cluster of clusters) {
+      const expectedName = generateActionName(cluster.method, cluster.pathTemplate);
+      const siteSkills = this.skillRepo.getBySiteId(recording.siteId);
+      const candidates = siteSkills.filter(s =>
+        s.name === expectedName &&
+        s.method === cluster.method &&
+        preExistingSkillIds.has(s.id),
+      );
+      if (candidates.length > 0) {
+        const matched = candidates.reduce((best, skill) => skill.version > best.version ? skill : best);
+        this.skillRepo.update(matched.id, { sampleCount: matched.sampleCount + cluster.requests.length });
+      }
+    }
+
+    const allSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
+    for (const existing of allSiteSkills) {
+      const check = canPromote(existing, this.config);
+      if (check.eligible) {
+        const result = promoteSkill(existing, this.config);
+        this.skillRepo.update(result.skill.id, {
+          status: result.skill.status,
+          confidence: result.skill.confidence,
+          lastVerified: result.skill.lastVerified,
+        });
+        notify(createEvent('skill_promoted', existing.id, existing.siteId,
+          { previousStatus: existing.status }), this.config).catch(err => this.log.debug({ err }, 'Notification failed'));
+      }
+    }
+
+    for (const gqlCluster of clusterByOperation(gqlRecords, recording.siteId)) {
+      if (gqlCluster.hasPersistedQueries) {
+        const hasReplayable = gqlCluster.requests.some(record => {
+          const info = extractGraphQLInfo(record.request);
+          return canReplayPersistedQuery(info);
+        });
+        if (!hasReplayable) continue;
+      }
+
+      const replayableRequests = gqlCluster.requests.filter(record => {
+        const info = extractGraphQLInfo(record.request);
+        return !info.isPersistedQuery || canReplayPersistedQuery(info);
+      });
+      const methodPathCounts = new Map<string, number>();
+      for (const record of replayableRequests) {
+        const key = `${record.request.method}|${new URL(record.request.url).pathname}`;
+        methodPathCounts.set(key, (methodPathCounts.get(key) ?? 0) + 1);
+      }
+      const [bestMethodPath] = [...methodPathCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+      const [gqlMethod, gqlPath] = bestMethodPath.split('|');
+
+      const gqlSkill = generateSkill(recording.siteId, {
+        method: gqlMethod,
+        pathTemplate: gqlPath,
+        actionName: gqlCluster.operationName,
+        inputSchema: {
+          type: 'object',
+          properties: Object.fromEntries(
+            Object.entries(gqlCluster.variableShape).map(([key, value]) => [key, { type: value === 'mixed' ? 'string' : value }]),
+          ),
+        },
+        requiredHeaders: {},
+        sampleCount: gqlCluster.requests.length,
+        isGraphQL: true,
+        graphqlOperationName: gqlCluster.operationName,
+      }, authRecipe ?? undefined);
+
+      if (!this.skillRepo.getById(gqlSkill.id)) {
+        this.skillRepo.create(gqlSkill);
+        generatedCount++;
+      }
+    }
+
+    const newSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
+    for (const skill of newSiteSkills) {
+      if (!preExistingSkillIds.has(skill.id) && skill.sideEffectClass === SideEffectClass.READ_ONLY && (skill.method === 'GET' || skill.method === 'HEAD')) {
+        const scanResult = scanSkill(skill);
+        if (!scanResult.safe) {
+          this.skillRepo.update(skill.id, { reviewRequired: true });
+          this.log.warn({ skillId: skill.id, findings: scanResult.findings.length }, 'Security scanner blocked auto-activation');
+          continue;
+        }
+        this.skillRepo.update(skill.id, { status: SkillStatus.ACTIVE, confidence: 0.5, lastVerified: Date.now() });
+        this.log.info({ skillId: skill.id }, 'Auto-activated read-only skill from recording session');
+      }
+    }
+
+    db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', generatedCount, recording.id);
+
+    recording.signalRequests = counts.signalCount;
+    recording.noiseRequests = counts.noiseCount;
+    recording.skillsGenerated = generatedCount;
+    recording.requestCount = counts.totalCount;
+    recording.dedupedRequests = Math.max(counts.signalCount - dedupedRecords.length, 0);
+
+    const traffic: NetworkEntry[] = dedupedRecords.map(record => ({
+      url: record.request.url,
+      method: record.request.method,
+      status: record.response.status,
+      requestHeaders: record.request.headers ?? {},
+      responseHeaders: record.response.headers ?? {},
+      requestBody: record.request.body,
+      timing: {
+        startTime: record.startedAt,
+        endTime: record.startedAt + record.duration,
+        duration: record.duration,
+      },
+    }));
+
+    if (traffic.length > 0) {
+      const classification = classifySite(recording.siteId, traffic);
+      const siteRepo = new SiteRepository(db);
+      siteRepo.update(recording.siteId, {
+        recommendedTier: classification.recommendedTier,
+      });
+      this.log.info(
+        { siteId: recording.siteId, recommendedTier: classification.recommendedTier, authRequired: classification.authRequired },
+        'Site classified after recording',
+      );
+    }
+
+    this.log.info(
+      {
+        recordingId: recording.id,
+        authDetected: authRecipe != null,
+        paramCount: paramEvidence.length,
+        chainCount: chains.length,
+        signalRequests: dedupedRecords.length,
+        rawSignalRequests: counts.signalCount,
+        clusters: clusters.length,
+        generatedSkills: generatedCount,
+      },
+      'Capture pipeline complete',
+    );
+
+    try {
+      const allSiteSkillsForDocs = this.skillRepo.getBySiteId(recording.siteId);
+      for (const skill of allSiteSkillsForDocs) {
+        const skillDir = path.join(getSkillsDir(this.config), recording.siteId, skill.id);
+
+        const refs = generateSkillReferences(skill);
+        const refsDir = path.join(skillDir, 'references');
+        fs.mkdirSync(refsDir, { recursive: true });
+        for (const [filename, content] of refs) {
+          fs.writeFileSync(path.join(refsDir, filename), content, 'utf-8');
+        }
+
+        const templates = generateSkillTemplates(skill);
+        const templatesDir = path.join(skillDir, 'templates');
+        fs.mkdirSync(templatesDir, { recursive: true });
+        for (const [filename, content] of templates) {
+          fs.writeFileSync(path.join(templatesDir, filename), content, 'utf-8');
+        }
+      }
+      this.log.debug({ siteId: recording.siteId, count: allSiteSkillsForDocs.length }, 'Skill docs persisted');
+    } catch (docsErr) {
+      this.log.warn({ err: docsErr }, 'Failed to persist skill docs (non-blocking)');
+    }
+
+    return {
+      skillsGenerated: generatedCount,
+      signalCount: counts.signalCount,
+      noiseCount: counts.noiseCount,
+      totalCount: counts.totalCount,
+    };
+  }
+
+  private normalizeAuditEntries(result: DirectCaptureResult): PipelineWorkerInput['auditEntries'] {
+    return result.auditEntries;
+  }
+
+  private async runPipelineWorker(
+    input: PipelineWorkerInput,
+  ): Promise<PipelineWorkerOutput> {
+    if (!this.pipelinePool) {
+      this.pipelinePool = new PipelinePool();
+    }
+
+    try {
+      return await this.pipelinePool.runPipeline(input);
     } catch (err) {
-      this.log.error({ recordingId: recording.id, err }, 'Capture pipeline failed');
-      throw err;
+      this.log.warn({ err }, 'Pipeline worker failed — falling back to inline pipeline execution');
+      const { runPipelineTask } = await import('../capture/pipeline-worker.js');
+      return runPipelineTask(input);
     }
   }
 
@@ -2589,13 +2828,7 @@ export class Engine {
       this.exploreAbortController.abort();
       this.exploreAbortController = null;
     }
-    if (this.pendingBackgroundOps.size > 0) {
-      await Promise.race([
-        Promise.allSettled([...this.pendingBackgroundOps]),
-        new Promise(resolve => setTimeout(resolve, 500)),
-      ]);
-      this.pendingBackgroundOps.clear();
-    }
+    await this.drainPendingBackgroundOps();
 
     this.isClosing = true;
     const CLOSE_TIMEOUT_MS = 8000;
@@ -2634,12 +2867,23 @@ export class Engine {
       if (timer !== undefined) clearTimeout(timer);
     }
 
+    await this.drainPendingBackgroundOps();
+
     if (this.pool) {
       try {
         await this.pool.shutdown();
       } catch (err) {
         this.log.warn({ err }, 'BrowserPool shutdown failed during engine close');
       }
+    }
+
+    if (this.pipelinePool) {
+      try {
+        await this.pipelinePool.destroy();
+      } catch (err) {
+        this.log.warn({ err }, 'PipelinePool shutdown failed during engine close');
+      }
+      this.pipelinePool = null;
     }
 
     // Shut down execution backends
@@ -2657,6 +2901,21 @@ export class Engine {
       catch (err) { this.log.warn({ err, name }, 'Shared backend shutdown failed'); }
     }
     this.sharedPlaywrightBackends.clear();
+
+    // Deregister the last-resort exit handler — clean shutdown handles everything above.
+    if (this.exitCleanupHandler) {
+      process.removeListener('exit', this.exitCleanupHandler);
+      this.exitCleanupHandler = null;
+    }
+
+    // Final sweep: terminate any managed Chrome processes that survived session close.
+    // This catches orphans from crashed sessions, timed-out close ops, or CDP sessions
+    // whose managed Chrome was never explicitly closed.
+    try {
+      await cleanupManagedChromeLaunches(this.config);
+    } catch (err) {
+      this.log.debug({ err }, 'Managed Chrome cleanup failed during engine close');
+    }
 
     this.mode = 'idle';
     this.providerCache = new WeakMap();

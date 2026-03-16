@@ -139,9 +139,13 @@ vi.mock('../../src/capture/auth-detector.js', () => ({
 vi.mock('../../src/native/param-discoverer.js', () => ({
   discoverParamsNative: vi.fn().mockReturnValue([]),
 }));
-vi.mock('../../src/capture/chain-detector.js', () => ({
-  detectChains: vi.fn().mockReturnValue([]),
-}));
+vi.mock('../../src/capture/chain-detector.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/capture/chain-detector.js')>('../../src/capture/chain-detector.js');
+  return {
+    ...actual,
+    detectChains: vi.fn().mockReturnValue([]),
+  };
+});
 vi.mock('../../src/capture/har-extractor.js', () => ({
   parseHar: vi.fn().mockReturnValue({ log: { entries: [] } }),
   extractRequestResponse: vi.fn().mockReturnValue({}),
@@ -151,6 +155,7 @@ vi.mock('../../src/native/noise-filter.js', () => ({
 }));
 vi.mock('../../src/capture/api-extractor.js', () => ({
   clusterEndpoints: vi.fn().mockReturnValue([]),
+  scoreAndRankClusters: vi.fn().mockImplementation((clusters: any[]) => clusters),
 }));
 vi.mock('../../src/skill/generator.js', () => ({
   generateSkill: vi.fn(),
@@ -257,10 +262,15 @@ vi.mock('../../src/capture/canonicalizer.js', () => ({
   })),
 }));
 
-// Mock noise-filter's recordFilteredEntries
-vi.mock('../../src/capture/noise-filter.js', () => ({
-  recordFilteredEntries: vi.fn(),
-}));
+// Mock noise-filter exports used by the async pipeline path
+vi.mock('../../src/capture/noise-filter.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/capture/noise-filter.js')>('../../src/capture/noise-filter.js');
+  return {
+    ...actual,
+    filterRequests: vi.fn().mockReturnValue({ signal: [], noise: [], ambiguous: [] }),
+    recordFilteredEntries: vi.fn(),
+  };
+});
 
 // Mock schema-inferrer
 vi.mock('../../src/capture/schema-inferrer.js', () => ({
@@ -291,7 +301,6 @@ vi.mock('node:fs', async () => {
 import { Engine } from '../../src/core/engine.js';
 import { existsSync } from 'node:fs';
 import { parseHar, extractRequestResponse } from '../../src/capture/har-extractor.js';
-import { filterRequestsNative } from '../../src/native/noise-filter.js';
 import { clusterEndpoints } from '../../src/capture/api-extractor.js';
 import { generateSkill } from '../../src/skill/generator.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
@@ -299,7 +308,7 @@ import { canonicalizeRequest } from '../../src/capture/canonicalizer.js';
 import { isGraphQL, clusterByOperation, extractGraphQLInfo, canReplayPersistedQuery } from '../../src/capture/graphql-extractor.js';
 import { canPromote, promoteSkill } from '../../src/core/promotion.js';
 import { notify, createEvent } from '../../src/healing/notification.js';
-import { recordFilteredEntries } from '../../src/capture/noise-filter.js';
+import { filterRequests, recordFilteredEntries } from '../../src/capture/noise-filter.js';
 import { discoverSite } from '../../src/discovery/cold-start.js';
 import { loadCachedTools } from '../../src/discovery/webmcp-scanner.js';
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -350,8 +359,8 @@ function configurePipelineMocks(overrides: {
     duration: 100,
   }));
 
-  // filterRequestsNative returns signal
-  (filterRequestsNative as ReturnType<typeof vi.fn>).mockReturnValue({
+  // Worker-side filterRequests returns signal
+  (filterRequests as ReturnType<typeof vi.fn>).mockReturnValue({
     signal: overrides.signalEntries ?? entries,
     noise: [],
     ambiguous: [],
@@ -396,6 +405,26 @@ function configurePipelineMocks(overrides: {
   return { repoInstance };
 }
 
+async function stopRecordingAndWaitForPipeline(engine: Engine) {
+  const stopped = await engine.stopRecording();
+  const pipelineJobId = stopped.pipelineJobId;
+  expect(pipelineJobId).toBeTruthy();
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const job = engine.getPipelineJob(pipelineJobId!);
+    if (job?.status === 'completed') {
+      return { stopped, job };
+    }
+    if (job?.status === 'failed') {
+      throw new Error(job.error ?? `Pipeline job ${pipelineJobId} failed`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`Pipeline job ${pipelineJobId} did not complete`);
+}
+
 // ─── Test Suite ───────────────────────────────────────────────────
 
 describe('Engine capture pipeline', () => {
@@ -417,10 +446,41 @@ describe('Engine capture pipeline', () => {
   // ─── Noise filter persistence ─────────────────────────────────
 
   describe('capture pipeline: noise filter persistence', () => {
+    it('falls back to HAR pipeline when the direct pipeline rejects asynchronously', async () => {
+      const directCaptureResult = { records: [], auditEntries: [], totalCount: 1 };
+      const recording = {
+        id: 'rec-1',
+        name: 'test-recording',
+        siteId: 'example.com',
+        startedAt: Date.now(),
+        requestCount: 1,
+      };
+      const directSpy = vi.spyOn(engine as any, 'runCapturePipelineDirect')
+        .mockRejectedValueOnce(new Error('direct failed'));
+      const harSpy = vi.spyOn(engine as any, 'runCapturePipelineFromHar')
+        .mockResolvedValueOnce({
+          skillsGenerated: 1,
+          signalCount: 1,
+          noiseCount: 0,
+          totalCount: 1,
+        });
+
+      const result = await (engine as any).runCapturePipeline(recording, directCaptureResult, '/tmp/test.har');
+
+      expect(directSpy).toHaveBeenCalledWith(recording, directCaptureResult);
+      expect(harSpy).toHaveBeenCalledWith(recording, '/tmp/test.har');
+      expect(result).toEqual({
+        skillsGenerated: 1,
+        signalCount: 1,
+        noiseCount: 0,
+        totalCount: 1,
+      });
+    });
+
     it('creates action_frames row with correct columns', async () => {
       configurePipelineMocks();
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(mockDb.run).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO action_frames'),
         expect.any(String),   // recording.id
@@ -437,7 +497,7 @@ describe('Engine capture pipeline', () => {
     it('calls recordFilteredEntries with db and recording id', async () => {
       configurePipelineMocks();
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(recordFilteredEntries).toHaveBeenCalledWith(
         expect.anything(),    // db
         expect.any(String),   // recording.id
@@ -460,7 +520,7 @@ describe('Engine capture pipeline', () => {
       repoInstance.getById.mockReturnValue(undefined);
 
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(mockDb.run).toHaveBeenCalledWith(
         'UPDATE action_frames SET skill_count = ? WHERE id = ?',
         expect.any(Number),   // generatedCount > 0
@@ -485,7 +545,7 @@ describe('Engine capture pipeline', () => {
       });
       configurePipelineMocks({ harEntries: entries, signalEntries: entries });
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       // clusterEndpoints should receive deduplicated records (1, not 2)
       expect((clusterEndpoints as ReturnType<typeof vi.fn>).mock.calls[0][0]).toHaveLength(1);
     });
@@ -501,7 +561,7 @@ describe('Engine capture pipeline', () => {
       );
       configurePipelineMocks({ harEntries: entries, signalEntries: entries });
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       // REST clusterEndpoints should only get REST records
       const restRecordsArg = (clusterEndpoints as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? [];
       // All records passed to clusterEndpoints should NOT have /graphql URL
@@ -541,7 +601,7 @@ describe('Engine capture pipeline', () => {
       // Skill already exists, so it won't be created
       repoInstance.getById.mockReturnValue(existingSkill);
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       // Should update sampleCount for the pre-existing skill
       expect(repoInstance.update).toHaveBeenCalledWith(
         existingSkill.id,
@@ -564,7 +624,7 @@ describe('Engine capture pipeline', () => {
       const repoInstance = getSkillRepoInstance();
       repoInstance.getById.mockReturnValue(undefined); // Skill doesn't exist, will be created
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       // Should NOT have been called with sampleCount update (only create, no update)
       const updateCalls = repoInstance.update.mock.calls;
       const sampleCountUpdates = updateCalls.filter((call: any[]) =>
@@ -593,7 +653,7 @@ describe('Engine capture pipeline', () => {
         skill: { ...existingSkill, status: 'active', confidence: 1.0, lastVerified: Date.now() },
       });
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(canPromote).toHaveBeenCalled();
       expect(promoteSkill).toHaveBeenCalled();
     });
@@ -613,7 +673,7 @@ describe('Engine capture pipeline', () => {
       });
       const repoInstance = getSkillRepoInstance();
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(repoInstance.update).toHaveBeenCalledWith(
         existingSkill.id,
         expect.objectContaining({ status: 'active', confidence: 1.0 }),
@@ -634,7 +694,7 @@ describe('Engine capture pipeline', () => {
         skill: { ...existingSkill, status: 'active', confidence: 1.0, lastVerified: Date.now() },
       });
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
       expect(createEvent).toHaveBeenCalledWith('skill_promoted', existingSkill.id, 'example.com',
         expect.objectContaining({ previousStatus: 'draft' }));
       expect(notify).toHaveBeenCalled();
@@ -680,7 +740,7 @@ describe('Engine capture pipeline', () => {
       repoInstance.getById.mockReturnValue(undefined); // Skills don't exist yet
 
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
 
       // generateSkill should have been called with GraphQL-specific args
       const gqlCalls = (generateSkill as ReturnType<typeof vi.fn>).mock.calls.filter(
@@ -718,7 +778,7 @@ describe('Engine capture pipeline', () => {
       });
 
       await setupRecordingState(engine);
-      await engine.stopRecording();
+      await stopRecordingAndWaitForPipeline(engine);
 
       // generateSkill should NOT have been called with isGraphQL
       const gqlCalls = (generateSkill as ReturnType<typeof vi.fn>).mock.calls.filter(

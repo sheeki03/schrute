@@ -300,3 +300,26 @@ export async function cleanupManagedChromeLaunches(config: SchruteConfig): Promi
     removeManagedChromeMetadata(profileDir);
   }
 }
+
+/**
+ * Synchronous best-effort cleanup — sends SIGTERM to all managed Chrome processes.
+ * Designed for `process.on('exit')` where only synchronous code can run.
+ * Does NOT wait for processes to die (can't await in exit handler).
+ */
+export function cleanupManagedChromeLaunchesSync(config: SchruteConfig): void {
+  for (const metadata of listManagedChromeMetadata(config)) {
+    const { profileDir, pid } = metadata;
+    if (!pid || !Number.isInteger(pid)) {
+      removeManagedChromeMetadata(profileDir);
+      continue;
+    }
+    if (!isProcessAlive(pid)) {
+      removeManagedChromeMetadata(profileDir);
+      continue;
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch { /* best-effort */ }
+    removeManagedChromeMetadata(profileDir);
+  }
+}

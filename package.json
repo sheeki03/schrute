@@ -34,7 +34,8 @@
     "rebuild:native": "bash scripts/rebuild-native.sh",
     "build:binary": "npm run build && pkg dist/index.js --config pkg.config.json",
     "build:binary:macos": "npm run build:binary -- --target node22-macos-arm64",
-    "build:binary:linux": "npm run build:binary -- --target node22-linux-x64"
+    "build:binary:linux": "npm run build:binary -- --target node22-linux-x64",
+    "postinstall": "npx --yes playwright install chromium 2>/dev/null || echo 'Playwright browser install skipped (run: npx playwright install chromium)'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
