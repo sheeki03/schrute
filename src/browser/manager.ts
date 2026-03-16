@@ -1119,6 +1119,24 @@ export class BrowserManager {
       this.contexts.set(newId, ctx);
       this.contexts.delete(oldId);
     }
+    if (this.lastCdpSiteId === oldId) {
+      this.lastCdpSiteId = newId;
+    }
+    // Re-key auth participant registration
+    if (this.authCoordinator) {
+      const oldParticipantId = `explore:${this.sessionName ?? 'default'}:${oldId}`;
+      const newParticipantId = `explore:${this.sessionName ?? 'default'}:${newId}`;
+      const oldParticipant = this.authCoordinator.getParticipant(oldParticipantId);
+      if (oldParticipant) {
+        this.authCoordinator.unregister(oldParticipantId);
+        this.authCoordinator.register({
+          id: newParticipantId,
+          siteId: newId,
+          lastSeenAuthVersion: oldParticipant.lastSeenAuthVersion,
+          onAuthChanged: oldParticipant.onAuthChanged,
+        });
+      }
+    }
     log.info({ oldId, newId }, 'Rebound CDP site ID');
   }
 
