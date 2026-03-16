@@ -9,6 +9,7 @@ export type {
   DryRunResponse,
   ValidateResponse,
   ExploreResponse,
+  RecoverExploreResponse,
   RecordResponse,
   StopResponse,
   HealthResponse,
@@ -25,6 +26,7 @@ import type {
   DryRunResponse,
   ValidateResponse,
   ExploreResponse,
+  RecoverExploreResponse,
   RecordResponse,
   StopResponse,
   HealthResponse,
@@ -135,6 +137,13 @@ export class SchruteClient {
 
   async explore(url: string): Promise<ExploreResponse> {
     return this.post<ExploreResponse>('/api/explore', { url });
+  }
+
+  async recoverExplore(resumeToken: string, waitMs?: number): Promise<RecoverExploreResponse> {
+    return this.post<RecoverExploreResponse>('/api/recover-explore', {
+      resumeToken,
+      ...(waitMs !== undefined ? { waitMs } : {}),
+    });
   }
 
   // ─── Record ─────────────────────────────────────────────────────

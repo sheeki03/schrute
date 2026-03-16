@@ -111,8 +111,19 @@ class SchruteClient:
     # ─── Explore ─────────────────────────────────────────────────
 
     def explore(self, url: str) -> Dict[str, Any]:
-        """Start a browser exploration session."""
+        """Start a browser exploration session.
+
+        Returns either a ready session payload or a browser handoff payload when
+        a Cloudflare challenge requires recovery in a real Chrome session.
+        """
         return self._post("/api/explore", {"url": url})
+
+    def recover_explore(self, resume_token: str, wait_ms: Optional[int] = None) -> Dict[str, Any]:
+        """Recover an explore session that requires real-Chrome handoff."""
+        body: Dict[str, Any] = {"resumeToken": resume_token}
+        if wait_ms is not None:
+            body["waitMs"] = wait_ms
+        return self._post("/api/recover-explore", body)
 
     # ─── Record ──────────────────────────────────────────────────
 

@@ -40,6 +40,13 @@ export class RemoteClient {
     return this.request('POST', '/explore', { url });
   }
 
+  async recoverExplore(resumeToken: string, waitMs?: number): Promise<unknown> {
+    return this.request('POST', '/recover-explore', {
+      resumeToken,
+      ...(waitMs !== undefined ? { waitMs } : {}),
+    });
+  }
+
   async listSites(): Promise<unknown> {
     return this.request('GET', '/sites');
   }

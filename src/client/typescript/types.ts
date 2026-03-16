@@ -69,21 +69,41 @@ export interface ValidateResponse {
   warnings?: string[];
 }
 
-export interface ExploreResponse {
+export interface ExploreReadyResponse {
+  status: 'ready';
+  sessionId: string;
   siteId: string;
-  sources: Array<{
-    type: string;
-    found: boolean;
-    endpointCount: number;
-    metadata?: Record<string, unknown>;
-  }>;
-  endpoints: Array<{
-    method: string;
-    path: string;
-    description?: string;
-    source: string;
-    trustLevel: number;
-  }>;
+  url: string;
+  reused?: boolean;
+  appliedOverrides?: {
+    proxy?: { server: string };
+    geo?: Record<string, unknown>;
+  };
+  hint: string;
+}
+
+export interface ExploreBrowserHandoffRequiredResponse {
+  status: 'browser_handoff_required';
+  reason: 'cloudflare_challenge';
+  recoveryMode: 'real_browser_cdp';
+  siteId: string;
+  url: string;
+  hint: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+}
+
+export type ExploreResponse =
+  | ExploreReadyResponse
+  | ExploreBrowserHandoffRequiredResponse;
+
+export interface RecoverExploreResponse {
+  status: 'ready' | 'awaiting_user' | 'expired' | 'failed';
+  siteId: string;
+  url: string;
+  session?: string;
+  managedBrowser?: boolean;
+  hint: string;
 }
 
 export interface RecordResponse {
