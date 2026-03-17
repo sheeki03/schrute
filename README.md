@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Schrute" width="200">
+  <img src="assets/logo.png" alt="Schrute" width="350">
 </p>
 
 <h1 align="center">Schrute</h1>
