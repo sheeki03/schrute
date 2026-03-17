@@ -19,12 +19,14 @@ import {
 } from './types.js';
 import { classifySideEffect } from './side-effects.js';
 import { scanSkill } from './security-scanner.js';
+import { getRootDomain } from '../capture/noise-filter.js';
 
 // ─── Types ──────────────────────────────────────────────────────
 
 export interface ClusterInfo {
   method: string;
   pathTemplate: string;
+  canonicalHost?: string;
   actionName: string;
   description?: string;
   inputSchema: Record<string, unknown>;
@@ -58,7 +60,9 @@ export function generateSkill(
   );
 
   const parameters = buildParameters(paramEvidence);
-  const allowedDomains = [siteId];
+  const allowedDomains = cluster.canonicalHost && cluster.canonicalHost !== siteId
+    ? [cluster.canonicalHost, siteId]
+    : [siteId];
   const requiredCapabilities = buildRequiredCapabilities(authRecipe);
 
   const now = Date.now();
@@ -317,7 +321,7 @@ export function generateOpenApiFragment(spec: SkillSpec): Record<string, unknown
 
 // ─── Action Name Generation ─────────────────────────────────────
 
-export function generateActionName(method: string, pathTemplate: string): string {
+export function generateActionName(method: string, pathTemplate: string, canonicalHost?: string, siteId?: string): string {
   // Strip /api/ and /v{N}/ prefixes
   let path = pathTemplate.replace(/^\/api\//, '/').replace(/^\/v\d+\//, '/');
 
@@ -343,7 +347,20 @@ export function generateActionName(method: string, pathTemplate: string): string
   };
 
   const prefix = verbMap[method.toUpperCase()] || method.toLowerCase();
-  return `${prefix}_${cleanName}`;
+  const baseName = `${prefix}_${cleanName}`;
+
+  // Disambiguate when canonical host differs from siteId
+  if (canonicalHost && siteId && canonicalHost !== siteId) {
+    const hostParts = canonicalHost.toLowerCase().split('.');
+    const rootDomain = getRootDomain(canonicalHost);
+    const rootParts = rootDomain.split('.');
+    const subdomainParts = hostParts.slice(0, hostParts.length - rootParts.length);
+    const hostPrefix = (subdomainParts.length > 0 ? subdomainParts : [hostParts[0]])
+      .join('_')
+      .replace(/[^a-zA-Z0-9_]/g, '');
+    return `${hostPrefix}_${baseName}`;
+  }
+  return baseName;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

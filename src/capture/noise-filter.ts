@@ -89,6 +89,7 @@ function detectPollingPatterns(entries: HarEntry[]): Set<string> {
 export function filterRequests(
   entries: HarEntry[],
   overrides: SiteOverride[] = [],
+  siteHost?: string,
 ): FilterResult {
   const signal: HarEntry[] = [];
   const noise: HarEntry[] = [];
@@ -103,7 +104,7 @@ export function filterRequests(
   const pollingUrls = detectPollingPatterns(entries);
 
   for (const entry of entries) {
-    const { classification } = classifyEntry(entry, overrideMap, pollingUrls);
+    const { classification } = classifyEntry(entry, overrideMap, pollingUrls, siteHost);
     const bucket = classification === 'noise' ? noise : classification === 'ambiguous' ? ambiguous : signal;
     bucket.push(entry);
   }
@@ -188,6 +189,7 @@ export function recordFilteredEntries(
   frameId: string,
   entries: HarEntry[],
   overrides: SiteOverride[] = [],
+  siteHost?: string,
 ): FilterResult {
   const overrideMap = new Map<string, RequestClassificationName>();
   for (const o of overrides) {
@@ -201,7 +203,7 @@ export function recordFilteredEntries(
   const ambiguous: HarEntry[] = [];
 
   for (const entry of entries) {
-    const { classification, reason } = classifyEntry(entry, overrideMap, pollingUrls);
+    const { classification, reason } = classifyEntry(entry, overrideMap, pollingUrls, siteHost);
 
     const requestHash = hashEntry(entry);
 
@@ -237,6 +239,7 @@ function classifyEntry(
   entry: HarEntry,
   overrideMap: Map<string, RequestClassificationName>,
   pollingUrls: Set<string>,
+  siteHost?: string,
 ): ClassificationResult {
   let hostname: string;
   try {
@@ -245,10 +248,16 @@ function classifyEntry(
     return { classification: 'ambiguous', reason: 'invalid_url' };
   }
 
-  // Check site-specific overrides first
+  // Check site-specific overrides first — overrides take priority over cross-origin gating
+  // so that operators can whitelist non-same-root hosts when needed
   const override = overrideMap.get(hostname);
   if (override) {
     return { classification: override, reason: 'site_override' };
+  }
+
+  // Cross-origin check for pipeline-time filtering (permissive same-root)
+  if (siteHost && hostname && !isLearnableHost(hostname, siteHost)) {
+    return { classification: 'noise', reason: 'cross_origin' };
   }
 
   // Analytics domains
@@ -376,7 +385,7 @@ function getUrlPath(url: string): string {
   }
 }
 
-function getRootDomain(hostname: string): string {
+export function getRootDomain(hostname: string): string {
   const normalized = hostname.replace(/^\[|\]$/g, '');
   const parts = normalized.split('.').filter(Boolean);
   if (parts.length <= 2) return normalized.toLowerCase();
@@ -388,7 +397,7 @@ function isStaticAsset(urlPath: string): boolean {
   return STATIC_ASSET_EXTENSIONS.some(ext => lowerPath.endsWith(ext));
 }
 
-function isCrossOriginNoise(hostname: string, siteHost: string): boolean {
+export function isCrossOriginNoise(hostname: string, siteHost: string): boolean {
   const normalizedHost = hostname.toLowerCase();
   const normalizedSiteHost = siteHost.toLowerCase();
 
@@ -412,6 +421,23 @@ function isCrossOriginNoise(hostname: string, siteHost: string): boolean {
   }
 
   return true;
+}
+
+/**
+ * Whether a host is "learnable" for a given siteId.
+ * More permissive than isCrossOriginNoise — allows any same-root subdomain
+ * (pro-api.coingecko.com, data.coingecko.com, etc.) but blocks
+ * entirely different domains (cloudflare.com, google-analytics.com).
+ *
+ * Note: getRootDomain() uses a simple "last two labels" split, which is not
+ * public-suffix-safe (e.g. example.co.uk → co.uk). Acceptable for now — same
+ * helper is already used by isCrossOriginNoise. A proper registrable-domain
+ * library (like `psl`) can be added later if needed.
+ */
+export function isLearnableHost(host: string, siteId: string): boolean {
+  const hostRoot = getRootDomain(host.toLowerCase());
+  const siteRoot = getRootDomain(siteId.toLowerCase());
+  return hostRoot === siteRoot;
 }
 
 function isBeacon(entry: HarEntry): boolean {

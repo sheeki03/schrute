@@ -10,6 +10,7 @@ const log = getLogger();
 export interface EndpointCluster {
   method: string;
   pathTemplate: string;
+  canonicalHost: string;
   requests: StructuredRecord[];
   commonHeaders: Record<string, string>;
   commonQueryParams: string[];
@@ -48,8 +49,11 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
 
   for (const rec of requests) {
     let urlPath: string;
+    let host: string;
     try {
-      urlPath = new URL(rec.request.url).pathname;
+      const parsed = new URL(rec.request.url);
+      urlPath = parsed.pathname;
+      host = parsed.hostname;
     } catch {
       continue;
     }
@@ -57,12 +61,11 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
     let template = parameterizePath(urlPath);
     if (trie) {
       try {
-        const host = new URL(rec.request.url).hostname;
         trie.insert(host, template);
         template = trie.parameterize(host, template);
-      } catch { /* URL parse failure — use un-trieified template */ }
+      } catch { /* trie failure — use un-trieified template */ }
     }
-    const key = `${rec.request.method.toUpperCase()}|${template}`;
+    const key = `${rec.request.method.toUpperCase()}|${host}|${template}`;
 
     let cluster = clusterMap.get(key);
     if (!cluster) {
@@ -75,7 +78,11 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
   const clusters: EndpointCluster[] = [];
 
   for (const [key, recs] of clusterMap) {
-    const [method, pathTemplate] = key.split('|', 2);
+    const pipeIdx = key.indexOf('|');
+    const pipeIdx2 = key.indexOf('|', pipeIdx + 1);
+    const method = key.slice(0, pipeIdx);
+    const canonicalHost = key.slice(pipeIdx + 1, pipeIdx2);
+    const pathTemplate = key.slice(pipeIdx2 + 1);
 
     const commonHeaders = extractCommonHeaders(recs.map(r => r.request));
     const commonQueryParams = extractCommonQueryParams(recs.map(r => r.request));
@@ -84,6 +91,7 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
     clusters.push({
       method,
       pathTemplate,
+      canonicalHost,
       requests: recs,
       commonHeaders,
       commonQueryParams,
