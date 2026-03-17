@@ -12,7 +12,7 @@ Thank you for your interest in contributing to Schrute!
 ### Setup
 
 ```bash
-git clone https://github.com/user/schrute.git
+git clone https://github.com/sheeki03/schrute.git
 cd schrute
 npm install
 npx playwright install chromium
@@ -80,4 +80,4 @@ If you discover a security vulnerability, please see [SECURITY.md](SECURITY.md) 
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the Apache License, Version 2.0.

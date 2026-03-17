@@ -8,12 +8,12 @@ version = "0.2.0"
 description = "Python client SDK for Schrute REST API"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 keywords = ["schrute", "browser-agent", "api-client", "sdk", "mcp"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
@@ -25,10 +25,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/user/schrute"
-Documentation = "https://github.com/user/schrute#python-sdk"
-Repository = "https://github.com/user/schrute"
-Issues = "https://github.com/user/schrute/issues"
+Homepage = "https://github.com/sheeki03/schrute"
+Documentation = "https://github.com/sheeki03/schrute#python-sdk"
+Repository = "https://github.com/sheeki03/schrute"
+Issues = "https://github.com/sheeki03/schrute/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

@@ -1,0 +1,14 @@
+Schrute
+Copyright 2025 Schrute Contributors
+
+This product includes software developed by the Schrute Contributors.
+
+Licensed under the Apache License, Version 2.0.
+
+---
+
+This product optionally depends on:
+
+- camoufox-js (MPL-2.0) — optional browser engine, not installed by default.
+  camoufox-js transitively depends on ua-parser-js (AGPL-3.0-or-later).
+  These are only loaded when the user explicitly selects the camoufox browser engine.

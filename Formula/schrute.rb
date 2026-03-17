@@ -1,9 +1,9 @@
 class Schrute < Formula
   desc "Self-learning browser agent — record once, replay 100x faster via MCP"
-  homepage "https://github.com/user/schrute"
+  homepage "https://github.com/sheeki03/schrute"
   url "https://registry.npmjs.org/schrute/-/schrute-0.1.0.tgz"
   sha256 "" # Fill after npm publish: shasum -a 256 schrute-0.1.0.tgz
-  license "MIT"
+  license "Apache-2.0"
 
   depends_on "node@22"
 

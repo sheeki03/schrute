@@ -71,11 +71,16 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/schrute"
+    "url": "https://github.com/sheeki03/schrute"
   },
+  "homepage": "https://github.com/sheeki03/schrute#readme",
+  "bugs": {
+    "url": "https://github.com/sheeki03/schrute/issues"
+  },
+  "author": "Schrute Contributors",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -96,6 +101,7 @@
     ".mcp.json",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CLAUDE.md",
