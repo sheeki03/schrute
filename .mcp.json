@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "schrute": {
-      "command": "/Users/home/.nvm/versions/node/v22.22.0/bin/node",
-      "args": ["/Users/home/browser agent/oneagent/dist/index.js", "serve", "--no-daemon"]
+      "command": "node",
+      "args": ["dist/index.js", "serve", "--no-daemon"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }
 }

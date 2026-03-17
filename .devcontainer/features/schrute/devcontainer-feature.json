@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "name": "Schrute Browser Agent",
   "description": "Self-learning browser agent — record browser actions, learn API patterns, replay as optimized MCP tools",
-  "documentationURL": "https://github.com/user/schrute",
+  "documentationURL": "https://github.com/sheeki03/schrute",
   "options": {
     "version": {
       "type": "string",

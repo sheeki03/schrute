@@ -6,7 +6,7 @@ If you discover a security vulnerability in Schrute, please report it responsibl
 
 ### How to Report
 
-1. **GitHub Security Advisories** (preferred): Use [GitHub Security Advisories](https://github.com/user/schrute/security/advisories/new) to privately report the vulnerability.
+1. **GitHub Security Advisories** (preferred): Use [GitHub Security Advisories](https://github.com/sheeki03/schrute/security/advisories/new) to privately report the vulnerability.
 
 2. **Email**: Send details to the repository maintainers via the email listed in the GitHub profile.
 
