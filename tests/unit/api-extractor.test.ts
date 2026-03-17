@@ -5,6 +5,7 @@ import {
   scoreAndRankClusters,
   type EndpointCluster,
 } from '../../src/capture/api-extractor.js';
+import { generateActionName } from '../../src/skill/generator.js';
 import type { StructuredRecord } from '../../src/capture/har-extractor.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -175,6 +176,70 @@ describe('api-extractor', () => {
       expect(clusters).toHaveLength(1);
       expect(clusters[0].requests).toHaveLength(1);
     });
+
+    it('separates same path template on different hosts into distinct clusters', () => {
+      const records = [
+        makeRecord('GET', 'https://api.coingecko.com/api/v3/coins/bitcoin'),
+        makeRecord('GET', 'https://www.coingecko.com/api/v3/coins/ethereum'),
+      ];
+
+      const clusters = clusterEndpoints(records);
+      expect(clusters).toHaveLength(2);
+      const hosts = clusters.map(c => c.canonicalHost).sort();
+      expect(hosts).toEqual(['api.coingecko.com', 'www.coingecko.com']);
+    });
+
+    it('clusters include canonicalHost field matching the request hostname', () => {
+      const records = [
+        makeRecord('GET', 'https://api.example.com/users/1'),
+        makeRecord('GET', 'https://api.example.com/users/2'),
+      ];
+
+      const clusters = clusterEndpoints(records);
+      expect(clusters).toHaveLength(1);
+      expect(clusters[0].canonicalHost).toBe('api.example.com');
+    });
+
+    it('produces distinct clusters for api.eu and api.us subdomains', () => {
+      const records = [
+        makeRecord('GET', 'https://api.eu.example.com/data/123'),
+        makeRecord('GET', 'https://api.us.example.com/data/456'),
+      ];
+
+      const clusters = clusterEndpoints(records);
+      expect(clusters).toHaveLength(2);
+      const hosts = clusters.map(c => c.canonicalHost).sort();
+      expect(hosts).toEqual(['api.eu.example.com', 'api.us.example.com']);
+    });
+  });
+
+  describe('generateActionName host disambiguation', () => {
+    it('returns base name when canonicalHost matches siteId', () => {
+      expect(generateActionName('GET', '/coins/{id}', 'www.coingecko.com', 'www.coingecko.com'))
+        .toBe('get_coins');
+    });
+
+    it('prefixes with subdomain when canonicalHost differs from siteId', () => {
+      expect(generateActionName('GET', '/coins/{id}', 'api.coingecko.com', 'www.coingecko.com'))
+        .toBe('api_get_coins');
+    });
+
+    it('handles multi-level subdomain disambiguation', () => {
+      expect(generateActionName('GET', '/data', 'api.eu.example.com', 'www.example.com'))
+        .toBe('api_eu_get_data');
+      expect(generateActionName('GET', '/data', 'api.us.example.com', 'www.example.com'))
+        .toBe('api_us_get_data');
+    });
+
+    it('produces distinct names for api.eu vs api.us', () => {
+      const euName = generateActionName('GET', '/data', 'api.eu.example.com', 'www.example.com');
+      const usName = generateActionName('GET', '/data', 'api.us.example.com', 'www.example.com');
+      expect(euName).not.toBe(usName);
+    });
+
+    it('returns base name when no canonicalHost provided', () => {
+      expect(generateActionName('GET', '/users/{id}')).toBe('get_users');
+    });
   });
 
   describe('scoreAndRankClusters', () => {
@@ -183,6 +248,7 @@ describe('api-extractor', () => {
         {
           method: 'GET',
           pathTemplate: '/coins/bitcoin',
+          canonicalHost: 'api.example.com',
           requests: [
             makeRecord('GET', 'https://api.example.com/coins/bitcoin', { authorization: 'Bearer token' }),
           ],
@@ -192,6 +258,7 @@ describe('api-extractor', () => {
         {
           method: 'POST',
           pathTemplate: '/user/preferences',
+          canonicalHost: 'api.example.com',
           requests: [
             makeRecord('POST', 'https://api.example.com/user/preferences', {}, {}, JSON.stringify({ theme: 'dark', locale: 'en' })),
             makeRecord('POST', 'https://api.example.com/user/preferences', {}, {}, JSON.stringify({ theme: 'light', locale: 'fr' })),
@@ -203,6 +270,7 @@ describe('api-extractor', () => {
         {
           method: 'HEAD',
           pathTemplate: '/health',
+          canonicalHost: 'api.example.com',
           requests: [
             makeRecord('HEAD', 'https://api.example.com/health'),
           ],
@@ -225,6 +293,7 @@ describe('api-extractor', () => {
       const useful: EndpointCluster = {
         method: 'GET',
         pathTemplate: '/coins/markets',
+        canonicalHost: 'api.example.com',
         requests: [makeRecord('GET', 'https://api.example.com/coins/markets')],
         commonHeaders: {},
         commonQueryParams: [],
@@ -232,6 +301,7 @@ describe('api-extractor', () => {
       const garbage: EndpointCluster = {
         method: 'GET',
         pathTemplate: '/get_b3djqiyguqx6fumTOKENVALUE',
+        canonicalHost: 'api.example.com',
         requests: [makeRecord('GET', 'https://api.example.com/get_b3djqiyguqx6fumTOKENVALUE')],
         commonHeaders: {},
         commonQueryParams: [],
@@ -249,6 +319,7 @@ describe('api-extractor', () => {
         {
           method: 'GET',
           pathTemplate: '/zeta',
+          canonicalHost: 'api.example.com',
           requests: [makeRecord('GET', 'https://api.example.com/zeta')],
           commonHeaders: {},
           commonQueryParams: [],
@@ -256,6 +327,7 @@ describe('api-extractor', () => {
         {
           method: 'GET',
           pathTemplate: '/alpha',
+          canonicalHost: 'api.example.com',
           requests: [makeRecord('GET', 'https://api.example.com/alpha')],
           commonHeaders: {},
           commonQueryParams: [],
@@ -265,6 +337,32 @@ describe('api-extractor', () => {
       const ranked = scoreAndRankClusters(clusters, 2);
 
       expect(ranked.map(cluster => cluster.pathTemplate)).toEqual(['/alpha', '/zeta']);
+    });
+
+    it('preserves canonicalHost through scoring', () => {
+      const clusters: EndpointCluster[] = [
+        {
+          method: 'GET',
+          pathTemplate: '/coins/{id}',
+          canonicalHost: 'api.coingecko.com',
+          requests: [makeRecord('GET', 'https://api.coingecko.com/coins/bitcoin')],
+          commonHeaders: {},
+          commonQueryParams: [],
+        },
+        {
+          method: 'GET',
+          pathTemplate: '/coins/{id}',
+          canonicalHost: 'pro-api.coingecko.com',
+          requests: [makeRecord('GET', 'https://pro-api.coingecko.com/coins/bitcoin', { authorization: 'Bearer token' })],
+          commonHeaders: { authorization: 'Bearer token' },
+          commonQueryParams: [],
+        },
+      ];
+
+      const ranked = scoreAndRankClusters(clusters, 2);
+      expect(ranked).toHaveLength(2);
+      const hosts = ranked.map(c => c.canonicalHost).sort();
+      expect(hosts).toEqual(['api.coingecko.com', 'pro-api.coingecko.com']);
     });
   });
 });

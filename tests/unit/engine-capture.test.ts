@@ -212,6 +212,7 @@ vi.mock('../../src/core/policy.js', () => ({
     capabilities: [],
   }),
   setSitePolicy: vi.fn(),
+  mergeSitePolicy: vi.fn().mockReturnValue({ merged: {}, prior: {}, persisted: false }),
 }));
 
 // Mock promotion module
@@ -302,15 +303,16 @@ import { Engine } from '../../src/core/engine.js';
 import { existsSync } from 'node:fs';
 import { parseHar, extractRequestResponse } from '../../src/capture/har-extractor.js';
 import { clusterEndpoints } from '../../src/capture/api-extractor.js';
-import { generateSkill } from '../../src/skill/generator.js';
+import { generateSkill, generateActionName } from '../../src/skill/generator.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
 import { canonicalizeRequest } from '../../src/capture/canonicalizer.js';
 import { isGraphQL, clusterByOperation, extractGraphQLInfo, canReplayPersistedQuery } from '../../src/capture/graphql-extractor.js';
 import { canPromote, promoteSkill } from '../../src/core/promotion.js';
 import { notify, createEvent } from '../../src/healing/notification.js';
-import { filterRequests, recordFilteredEntries } from '../../src/capture/noise-filter.js';
+import { filterRequests, recordFilteredEntries, isLearnableHost } from '../../src/capture/noise-filter.js';
 import { discoverSite } from '../../src/discovery/cold-start.js';
 import { loadCachedTools } from '../../src/discovery/webmcp-scanner.js';
+import { getSitePolicy, mergeSitePolicy } from '../../src/core/policy.js';
 // ─── Helpers ──────────────────────────────────────────────────────
 // makeConfig is imported from tests/helpers/engine-mocks.ts
 
@@ -502,6 +504,8 @@ describe('Engine capture pipeline', () => {
         expect.anything(),    // db
         expect.any(String),   // recording.id
         expect.any(Array),    // entries
+        [],                   // overrides
+        'example.com',        // siteHost
       );
     });
 
@@ -581,6 +585,7 @@ describe('Engine capture pipeline', () => {
         name: 'get_users',
         method: 'GET',
         pathTemplate: '/api/users',
+        allowedDomains: ['example.com'],
         version: 1,
         sampleCount: 5,
         status: 'draft',
@@ -591,6 +596,7 @@ describe('Engine capture pipeline', () => {
         clusters: [{
           method: 'GET',
           pathTemplate: '/api/users',
+          canonicalHost: 'example.com',
           requests: [{ request: { method: 'GET', url: 'https://example.com/api/users' } }],
           commonHeaders: {},
           commonQueryParams: [],
@@ -808,6 +814,408 @@ describe('Engine capture pipeline', () => {
       await engine.explore('https://example.com');
       await new Promise(r => setTimeout(r, 20));
       expect(loadCachedTools).toHaveBeenCalledWith('example.com', expect.anything());
+    });
+  });
+
+  // ─── Scheme guard ────────────────────────────────────────────────
+
+  describe('capture pipeline: scheme guard', () => {
+    it('skips clusters with scheme-like pathTemplate', async () => {
+      configurePipelineMocks({
+        clusters: [
+          {
+            method: 'GET',
+            pathTemplate: 'https:/challenges.cloudflare.com/{uuid}',
+            requests: [{ request: { method: 'GET', url: 'https://challenges.cloudflare.com/abc' } }],
+            commonHeaders: {},
+            commonQueryParams: [],
+          },
+          {
+            method: 'GET',
+            pathTemplate: '/api/v3/coins/{id}',
+            requests: [{ request: { method: 'GET', url: 'https://api.coingecko.com/api/v3/coins/bitcoin' } }],
+            commonHeaders: {},
+            commonQueryParams: [],
+          },
+        ],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // generateSkill should only be called for the valid pathTemplate
+      const genCalls = (generateSkill as ReturnType<typeof vi.fn>).mock.calls;
+      const pathTemplates = genCalls.map((call: any[]) => call[1]?.pathTemplate);
+      expect(pathTemplates).not.toContain('https:/challenges.cloudflare.com/{uuid}');
+      expect(pathTemplates).toContain('/api/v3/coins/{id}');
+    });
+  });
+
+  // ─── Host filtering ─────────────────────────────────────────────
+
+  describe('capture pipeline: host filtering', () => {
+    it('filters cross-origin REST records before clustering', async () => {
+      // The pipeline worker returns records with mixed hosts
+      // But engine.ts filters them via isLearnableHost before clustering
+      const entries = [
+        { request: { method: 'GET', url: 'https://api.coingecko.com/api/v3/coins' }, response: { status: 200 } },
+        { request: { method: 'GET', url: 'https://challenges.cloudflare.com/turnstile' }, response: { status: 200 } },
+      ];
+
+      configurePipelineMocks({
+        harEntries: entries,
+        signalEntries: entries,
+      });
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // clusterEndpoints receives only the learnable records
+      const clusterArgs = (clusterEndpoints as ReturnType<typeof vi.fn>).mock.calls;
+      if (clusterArgs.length > 0) {
+        const records = clusterArgs[0][0];
+        for (const rec of records) {
+          const host = new URL(rec.request.url).hostname;
+          // All records passed to clustering should be same-root as the siteId
+          expect(host).not.toContain('cloudflare');
+        }
+      }
+    });
+  });
+
+  // ─── Challenge-dominated warning ────────────────────────────────
+
+  describe('capture pipeline: challenge-dominated warning', () => {
+    it('sets warning when all signal is third-party', async () => {
+      // Pipeline returns records but all are cross-origin
+      const thirdPartyEntries = [
+        { request: { method: 'GET', url: 'https://challenges.cloudflare.com/check' }, response: { status: 200 } },
+      ];
+
+      configurePipelineMocks({
+        harEntries: thirdPartyEntries,
+        signalEntries: thirdPartyEntries,
+      });
+
+      await setupRecordingState(engine);
+      const { job } = await stopRecordingAndWaitForPipeline(engine);
+
+      expect(job.result?.warning).toContain('third-party infrastructure');
+    });
+
+    it('sets warning on early-return path when all requests become noise', async () => {
+      // Simulate the real scenario: worker classifies everything as noise,
+      // so signalRecords is empty and runPipelineCore takes the early return
+      const thirdPartyEntries = [
+        { request: { method: 'GET', url: 'https://challenges.cloudflare.com/check' }, response: { status: 200 } },
+      ];
+
+      configurePipelineMocks({
+        harEntries: thirdPartyEntries,
+        signalEntries: [], // empty — worker classified all as noise
+      });
+
+      // Override filterRequests mock to return all noise (matching real behavior)
+      (filterRequests as ReturnType<typeof vi.fn>).mockReturnValue({
+        signal: [],
+        noise: thirdPartyEntries,
+        ambiguous: [],
+      });
+
+      await setupRecordingState(engine);
+      const { job } = await stopRecordingAndWaitForPipeline(engine);
+
+      expect(job.result?.warning).toContain('third-party infrastructure');
+    });
+
+    it('does not set warning when learnable requests exist', async () => {
+      const entries = [
+        { request: { method: 'GET', url: 'https://example.com/api/data' }, response: { status: 200 } },
+      ];
+
+      configurePipelineMocks({
+        harEntries: entries,
+        signalEntries: entries,
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/api/data',
+          requests: [{ request: { method: 'GET', url: 'https://example.com/api/data' } }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      await setupRecordingState(engine);
+      const { job } = await stopRecordingAndWaitForPipeline(engine);
+
+      expect(job.result?.warning).toBeUndefined();
+    });
+  });
+
+  // ─── GQL empty-cluster guard ────────────────────────────────────
+
+  describe('capture pipeline: GQL empty-cluster guard', () => {
+    it('does not crash on GraphQL cluster with zero replayable requests', async () => {
+      (isGraphQL as ReturnType<typeof vi.fn>).mockImplementation((req: any) =>
+        req.url?.includes('/graphql') ?? false
+      );
+      (extractGraphQLInfo as ReturnType<typeof vi.fn>).mockReturnValue({
+        operationName: 'GetData', operationType: 'query', variables: null,
+        query: null, isPersistedQuery: true, persistedQueryHash: 'abc',
+      });
+      (canReplayPersistedQuery as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      (clusterByOperation as ReturnType<typeof vi.fn>).mockReturnValue([{
+        operationName: 'GetData', operationType: 'query', skillName: 'GetData',
+        requests: [{
+          request: { method: 'POST', url: 'https://example.com/graphql', headers: {}, queryParams: {} },
+          response: { status: 200, statusText: 'OK', headers: {}, body: '{}' },
+          startedAt: Date.now(), duration: 50,
+        }],
+        variableShape: {},
+        hasPersistedQueries: true,
+      }]);
+
+      const gqlEntry = { request: { method: 'POST', url: 'https://example.com/graphql' }, response: { status: 200 } };
+      configurePipelineMocks({
+        harEntries: [gqlEntry],
+        signalEntries: [gqlEntry],
+      });
+
+      await setupRecordingState(engine);
+      // Should not throw — the empty-cluster guard prevents the crash
+      await expect(stopRecordingAndWaitForPipeline(engine)).resolves.toBeDefined();
+    });
+  });
+
+  // ─── canonicalHost pass-through ──────────────────────────────────
+
+  describe('capture pipeline: canonicalHost pass-through', () => {
+    it('passes canonicalHost from cluster to generateActionName', async () => {
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/api/v3/coins/{id}',
+          canonicalHost: 'api.coingecko.com',
+          requests: [{ request: { method: 'GET', url: 'https://api.coingecko.com/api/v3/coins/bitcoin' } }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // generateActionName should have been called with canonicalHost and siteId
+      expect(generateActionName).toHaveBeenCalledWith(
+        'GET',
+        '/api/v3/coins/{id}',
+        'api.coingecko.com',
+        'example.com',
+      );
+    });
+
+    it('passes canonicalHost through to generateSkill cluster info', async () => {
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/api/data',
+          canonicalHost: 'api.example.com',
+          requests: [{ request: { method: 'GET', url: 'https://api.example.com/api/data' } }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // generateSkill should receive canonicalHost in the cluster info
+      const genCalls = (generateSkill as ReturnType<typeof vi.fn>).mock.calls;
+      expect(genCalls.length).toBeGreaterThan(0);
+      expect(genCalls[0][0]).toBe('example.com');
+      expect(genCalls[0][1]).toEqual(expect.objectContaining({ canonicalHost: 'api.example.com' }));
+    });
+  });
+
+  // ─── sampleParams extraction ─────────────────────────────────────
+
+  describe('capture pipeline: sampleParams extraction', () => {
+    it('extracts sampleParams from path template with params', async () => {
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/coins/{id}',
+          canonicalHost: 'example.com',
+          requests: [{
+            request: { method: 'GET', url: 'https://example.com/coins/bitcoin' },
+            response: { status: 200 },
+          }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      // Make generateSkill return a mutable skill object
+      (generateSkill as ReturnType<typeof vi.fn>).mockImplementation((siteId: string, opts: any) => ({
+        id: `${siteId}.${opts.actionName ?? 'test_skill'}.v1`,
+        siteId,
+        name: opts.actionName ?? 'test_skill',
+        method: opts.method ?? 'GET',
+        pathTemplate: opts.pathTemplate ?? '/coins/{id}',
+        sideEffectClass: 'read-only',
+        status: 'draft',
+        version: 1,
+        sampleCount: opts.sampleCount ?? 1,
+        consecutiveValidations: 0,
+        confidence: 0.5,
+        allowedDomains: [siteId],
+        currentTier: 'tier_1',
+        tierLock: null,
+      }));
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // The skill created via repo should have sampleParams set
+      const createCalls = repoInstance.create.mock.calls;
+      const skillWithSample = createCalls.find((call: any[]) =>
+        call[0]?.pathTemplate === '/coins/{id}' && call[0]?.sampleParams,
+      );
+      expect(skillWithSample).toBeDefined();
+      expect(skillWithSample![0].sampleParams).toEqual({ id: 'bitcoin' });
+    });
+
+    it('does not set sampleParams when path has no template params', async () => {
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/coins/markets',
+          canonicalHost: 'example.com',
+          requests: [{
+            request: { method: 'GET', url: 'https://example.com/coins/markets' },
+            response: { status: 200 },
+          }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      (generateSkill as ReturnType<typeof vi.fn>).mockImplementation((siteId: string, opts: any) => ({
+        id: `${siteId}.${opts.actionName ?? 'test_skill'}.v1`,
+        siteId,
+        name: opts.actionName ?? 'test_skill',
+        method: opts.method ?? 'GET',
+        pathTemplate: opts.pathTemplate ?? '/coins/markets',
+        sideEffectClass: 'read-only',
+        status: 'draft',
+        version: 1,
+        sampleCount: opts.sampleCount ?? 1,
+        consecutiveValidations: 0,
+        confidence: 0.5,
+        allowedDomains: [siteId],
+        currentTier: 'tier_1',
+        tierLock: null,
+      }));
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // The created skill should NOT have sampleParams
+      const createCalls = repoInstance.create.mock.calls;
+      const skillCreated = createCalls.find((call: any[]) =>
+        call[0]?.pathTemplate === '/coins/markets',
+      );
+      if (skillCreated) {
+        expect(skillCreated[0].sampleParams).toBeUndefined();
+      }
+    });
+  });
+
+  // ─── Domain allowlist auto-population ────────────────────────────
+
+  describe('capture pipeline: domain allowlist auto-population', () => {
+    it('calls mergeSitePolicy with collected domains after skill generation', async () => {
+      // Configure getSitePolicy to return only localhost entries (triggers auto-population)
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValue({
+        domainAllowlist: ['127.0.0.1', 'localhost', '[::1]'],
+        capabilities: [],
+      });
+
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/api/data',
+          canonicalHost: 'api.example.com',
+          requests: [{ request: { method: 'GET', url: 'https://api.example.com/api/data' } }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      // After generation, getBySiteId is called again to collect domains
+      repoInstance.getBySiteId.mockReturnValue([{
+        id: 'example.com.get_data.v1',
+        siteId: 'example.com',
+        allowedDomains: ['api.example.com', 'example.com'],
+      }]);
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // mergeSitePolicy should have been called with the collected domains
+      expect(mergeSitePolicy).toHaveBeenCalledWith(
+        'example.com',
+        expect.objectContaining({
+          domainAllowlist: expect.arrayContaining(['example.com', 'api.example.com']),
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('does not auto-populate when real domains already exist in policy', async () => {
+      // getSitePolicy returns a real domain (not just localhost)
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValue({
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+      });
+
+      configurePipelineMocks({
+        clusters: [{
+          method: 'GET',
+          pathTemplate: '/api/data',
+          canonicalHost: 'example.com',
+          requests: [{ request: { method: 'GET', url: 'https://example.com/api/data' } }],
+          commonHeaders: {},
+          commonQueryParams: [],
+        }],
+      });
+      const repoInstance = getSkillRepoInstance();
+      repoInstance.getById.mockReturnValue(undefined);
+
+      await setupRecordingState(engine);
+      await stopRecordingAndWaitForPipeline(engine);
+
+      // mergeSitePolicy should NOT be called for domain auto-population
+      // (it may be called for other reasons like recovery, so check the specific call)
+      const mergeCallsWithDomainAllowlist = (mergeSitePolicy as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call: any[]) => call[0] === 'example.com' && call[1]?.domainAllowlist,
+      );
+      expect(mergeCallsWithDomainAllowlist).toHaveLength(0);
     });
   });
 });
