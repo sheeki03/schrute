@@ -23,7 +23,7 @@ import { AuditLog } from '../replay/audit-log.js';
 import { ToolBudgetTracker } from '../replay/tool-budget.js';
 import { ExemplarRepository } from '../storage/exemplar-repository.js';
 import { RateLimiter } from '../automation/rate-limiter.js';
-import { validateParams } from '../replay/param-validator.js';
+import { validateParams, buildExecutionSchema } from '../replay/param-validator.js';
 import { refreshCookies } from '../automation/cookie-refresh.js';
 import { SideEffectClass, FailureCause, INFRA_FAILURE_CAUSES, TierState } from '../skill/types.js';
 import type { BrowserProvider } from '../skill/types.js';
@@ -74,13 +74,14 @@ import { notify, createEvent } from '../healing/notification.js';
 import { clusterByOperation, canReplayPersistedQuery, extractGraphQLInfo } from '../capture/graphql-extractor.js';
 import {
   isObviousNoise,
+  isLearnableHost,
   recordFilteredEntries,
   shouldCaptureResponseBody,
 } from '../capture/noise-filter.js';
 import { extractChainCandidates } from '../capture/chain-detector.js';
 import { inferSchema, mergeSchemas } from '../capture/schema-inferrer.js';
 import { PipelinePool } from '../capture/pipeline-pool.js';
-import type { PipelineWorkerInput, PipelineWorkerOutput } from '../capture/pipeline-worker.js';
+import { runPipelineTask, type PipelineWorkerInput, type PipelineWorkerOutput } from '../capture/pipeline-worker.js';
 import { loadCachedTools } from '../discovery/webmcp-scanner.js';
 import { SkillStatus } from '../skill/types.js';
 import type { GeoEmulationConfig, PermanentTierLock, ExecutionTierName } from '../skill/types.js';
@@ -99,6 +100,17 @@ export interface EngineStatus {
   uptime: number;
   warnings?: string[];
   skillSummary?: { total: number; executable: number; blocked: number };
+  autoValidation?: {
+    enabled: boolean;
+    lastRunAt: number;
+    validated: number;
+    succeeded: number;
+    failed: number;
+    promoted: number;
+    skippedNoParams: number;
+    skippedRateLimited: number;
+    lastCycleProcessed: number;
+  };
 }
 
 interface RecordingInfo {
@@ -129,6 +141,7 @@ export interface PipelineJob {
     signalCount: number;
     noiseCount: number;
     totalCount: number;
+    warning?: string;
   };
 }
 
@@ -205,6 +218,26 @@ export interface SkillExecutionResult {
 
 function formatExecutionError(cause: string, detail: string): string {
   return `Failure: ${cause} — ${detail.replace(/\.+$/, '')}. Use schrute_dry_run to preview.`;
+}
+
+function extractPathParamSample(
+  template: string,
+  request: StructuredRecord,
+): Record<string, string> | undefined {
+  try {
+    const actualPath = new URL(request.request.url).pathname;
+    const templateSegs = template.split('/');
+    const actualSegs = actualPath.split('/');
+    const params: Record<string, string> = {};
+
+    for (let i = 0; i < templateSegs.length && i < actualSegs.length; i++) {
+      const t = templateSegs[i];
+      if (t.startsWith('{') && t.endsWith('}') && actualSegs[i]) {
+        params[t.slice(1, -1)] = decodeURIComponent(actualSegs[i]);
+      }
+    }
+    return Object.keys(params).length > 0 ? params : undefined;
+  } catch { return undefined; }
 }
 
 /**
@@ -296,6 +329,18 @@ export class Engine {
   private sweepInterval: ReturnType<typeof setInterval> | null = null;
   private amendmentEngine: AmendmentEngine | null = null;
   private amendmentRepo: AmendmentRepository | null = null;
+  private autoValidationTimer: ReturnType<typeof setInterval> | null = null;
+  private autoValidationRunning = false;
+  private autoValidationStats = {
+    lastRunAt: 0,
+    validated: 0,
+    succeeded: 0,
+    failed: 0,
+    promoted: 0,
+    skippedNoParams: 0,
+    skippedRateLimited: 0,
+    lastCycleProcessed: 0,
+  };
   private authStore: BrowserAuthStore;
   private authCoordinator: AuthCoordinator;
   private agentBrowserBackend: AgentBrowserBackend;
@@ -441,6 +486,15 @@ export class Engine {
       }
     }, 6 * 60 * 60 * 1000);
     this.sweepInterval.unref();
+
+    // Auto-validation: periodic cycle to validate and promote tier_3 GET/HEAD skills
+    if ((this.config.autoValidation?.enabled ?? true) !== false) {
+      const ms = this.config.autoValidation?.intervalMs ?? 600_000;
+      this.autoValidationTimer = setInterval(() => {
+        this.runAutoValidationCycle().catch(() => {});
+      }, ms);
+      this.autoValidationTimer.unref();
+    }
   }
 
   getSessionManager(): SessionManager {
@@ -1678,10 +1732,14 @@ export class Engine {
         this.log.info({ siteId }, 'CDP recording — skipping context re-open (externally managed)');
       }
 
+      // For CDP recordings with direct capture data, don't pass harPath as fallback.
+      // The HAR file may be large (Playwright's recordHar captures everything) and
+      // falling back to it would OOM the worker thread — the direct records are canonical.
+      const useHarFallback = !directCaptureResult || directCaptureResult.totalCount === 0;
       const pipelineJobId = this.enqueuePipelineJob(
         recording,
         directCaptureResult && directCaptureResult.totalCount > 0 ? directCaptureResult : undefined,
-        harPath,
+        useHarFallback ? harPath : undefined,
       );
       return { ...recording, pipelineJobId };
     } finally {
@@ -1727,6 +1785,14 @@ export class Engine {
             completedAt: Date.now(),
             result,
           });
+        }
+
+        // Trigger site-scoped auto-validation after pipeline completes
+        if ((this.config.autoValidation?.enabled ?? true) !== false) {
+          const delay = this.config.autoValidation?.delayAfterPipelineMs ?? 30_000;
+          setTimeout(() => {
+            this.runAutoValidationCycle(recording.siteId).catch(() => {});
+          }, delay).unref();
         }
       } catch (err) {
         const failedJob = this.pipelineJobs.get(jobId);
@@ -1823,21 +1889,38 @@ export class Engine {
       counts.signalCount,
       0,
     );
-    recordFilteredEntries(db, recording.id, auditEntries);
+    recordFilteredEntries(db, recording.id, auditEntries, [], recording.siteId);
 
     if (dedupedRecords.length === 0) {
       db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', 0, recording.id);
       this.log.warn({ recordingId: recording.id }, 'No signal requests after filtering');
+      // Determine if the recording had pre-filter signal that was all third-party
+      const earlyWarning = counts.totalCount > 0 && counts.noiseCount >= counts.totalCount
+        ? 'All signal requests were third-party infrastructure. Use schrute_recover_explore or schrute_connect_cdp to bypass challenges.'
+        : undefined;
       return {
         skillsGenerated: 0,
         signalCount: counts.signalCount,
         noiseCount: counts.noiseCount,
         totalCount: counts.totalCount,
+        warning: earlyWarning,
       };
     }
 
-    const restRecords = pipelineOutput.restRecords;
-    const gqlRecords = pipelineOutput.gqlRecords;
+    const rawRestRecords = pipelineOutput.restRecords;
+    const restRecords = rawRestRecords.filter(rec => {
+      try {
+        const host = new URL(rec.request.url).hostname;
+        return isLearnableHost(host, recording.siteId);
+      } catch { return false; }
+    });
+    const rawGqlRecords = pipelineOutput.gqlRecords;
+    const gqlRecords = rawGqlRecords.filter(rec => {
+      try {
+        const host = new URL(rec.request.url).hostname;
+        return isLearnableHost(host, recording.siteId);
+      } catch { return false; }
+    });
     const authRecipe = pipelineOutput.authRecipe;
     const paramEvidence = pipelineOutput.paramEvidence;
     const chains = pipelineOutput.chains;
@@ -1861,6 +1944,12 @@ export class Engine {
 
     let generatedCount = 0;
     for (const cluster of clusters) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(cluster.pathTemplate)) {
+        this.log.warn({ pathTemplate: cluster.pathTemplate },
+          'Skipping capture-generated cluster with scheme-like pathTemplate');
+        continue;
+      }
+
       const chainForCluster = chains.find(c =>
         c.steps.some(s => s.skillRef.includes(cluster.pathTemplate)),
       );
@@ -1870,7 +1959,8 @@ export class Engine {
         {
           method: cluster.method,
           pathTemplate: cluster.pathTemplate,
-          actionName: generateActionName(cluster.method, cluster.pathTemplate),
+          canonicalHost: cluster.canonicalHost,
+          actionName: generateActionName(cluster.method, cluster.pathTemplate, cluster.canonicalHost, recording.siteId),
           inputSchema: cluster.bodyShape ? { type: 'object', properties: cluster.bodyShape } : {},
           requiredHeaders: cluster.commonHeaders,
           sampleCount: cluster.requests.length,
@@ -1880,6 +1970,14 @@ export class Engine {
         chainForCluster,
       );
 
+      // Persist path-param sample for auto-validation (path values only, no query/body)
+      if (cluster.pathTemplate.includes('{') && cluster.requests.length > 0) {
+        const sampleParams = extractPathParamSample(cluster.pathTemplate, cluster.requests[0]);
+        if (sampleParams && Object.keys(sampleParams).length > 0) {
+          skill.sampleParams = sampleParams;
+        }
+      }
+
       if (!this.skillRepo.getById(skill.id)) {
         this.skillRepo.create(skill);
         generatedCount++;
@@ -1887,11 +1985,13 @@ export class Engine {
     }
 
     for (const cluster of clusters) {
-      const expectedName = generateActionName(cluster.method, cluster.pathTemplate);
+      const expectedName = generateActionName(cluster.method, cluster.pathTemplate, cluster.canonicalHost, recording.siteId);
       const siteSkills = this.skillRepo.getBySiteId(recording.siteId);
+      const expectedHost = cluster.canonicalHost ?? recording.siteId;
       const candidates = siteSkills.filter(s =>
         s.name === expectedName &&
         s.method === cluster.method &&
+        s.allowedDomains[0] === expectedHost &&
         preExistingSkillIds.has(s.id),
       );
       if (candidates.length > 0) {
@@ -1928,6 +2028,7 @@ export class Engine {
         const info = extractGraphQLInfo(record.request);
         return !info.isPersistedQuery || canReplayPersistedQuery(info);
       });
+      if (replayableRequests.length === 0) continue;
       const methodPathCounts = new Map<string, number>();
       for (const record of replayableRequests) {
         const key = `${record.request.method}|${new URL(record.request.url).pathname}`;
@@ -1958,6 +2059,15 @@ export class Engine {
       }
     }
 
+    const hadLearnableCandidates = restRecords.length > 0 || gqlRecords.length > 0;
+    const hadPreFilterSignal = rawRestRecords.length > 0 || rawGqlRecords.length > 0;
+
+    const warning = (!hadLearnableCandidates && hadPreFilterSignal)
+      ? 'All signal requests were third-party infrastructure. Use schrute_recover_explore or schrute_connect_cdp to bypass challenges.'
+      : (!generatedCount && hadLearnableCandidates)
+      ? 'Learnable requests found but no new skills generated (may be deduplicated against existing skills).'
+      : undefined;
+
     const newSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
     for (const skill of newSiteSkills) {
       if (!preExistingSkillIds.has(skill.id) && skill.sideEffectClass === SideEffectClass.READ_ONLY && (skill.method === 'GET' || skill.method === 'HEAD')) {
@@ -1970,6 +2080,26 @@ export class Engine {
         this.skillRepo.update(skill.id, { status: SkillStatus.ACTIVE, confidence: 0.5, lastVerified: Date.now() });
         this.log.info({ skillId: skill.id }, 'Auto-activated read-only skill from recording session');
       }
+    }
+
+    // Auto-populate domain allowlist when only localhost entries exist
+    const existingPolicy = getSitePolicy(recording.siteId, this.config);
+    const hasRealDomains = existingPolicy.domainAllowlist.some(
+      d => d !== '127.0.0.1' && d !== 'localhost' && d !== '[::1]',
+    );
+    if (!hasRealDomains && generatedCount > 0) {
+      const domains = new Set<string>();
+      domains.add(recording.siteId);
+      for (const rec of dedupedRecords) {
+        try { domains.add(new URL(rec.request.url).hostname); } catch {}
+      }
+      const newSkills = this.skillRepo.getBySiteId(recording.siteId);
+      for (const s of newSkills) {
+        for (const d of s.allowedDomains) domains.add(d);
+      }
+      mergeSitePolicy(recording.siteId, {
+        domainAllowlist: [...domains].filter(Boolean),
+      }, this.config);
     }
 
     db.run('UPDATE action_frames SET skill_count = ? WHERE id = ?', generatedCount, recording.id);
@@ -2049,6 +2179,7 @@ export class Engine {
       signalCount: counts.signalCount,
       noiseCount: counts.noiseCount,
       totalCount: counts.totalCount,
+      warning,
     };
   }
 
@@ -2066,17 +2197,42 @@ export class Engine {
     try {
       return await this.pipelinePool.runPipeline(input);
     } catch (err) {
+      if (!this.shouldInlinePipelineFallback(input)) {
+        this.log.warn({ err }, 'Pipeline worker failed — skipping inline fallback for large pipeline input');
+        throw err;
+      }
       this.log.warn({ err }, 'Pipeline worker failed — falling back to inline pipeline execution');
-      const { runPipelineTask } = await import('../capture/pipeline-worker.js');
       return runPipelineTask(input);
     }
+  }
+
+  private shouldInlinePipelineFallback(input: PipelineWorkerInput): boolean {
+    if (input.harPath) {
+      return false;
+    }
+
+    const records = input.records ?? [];
+    if (records.length > 48) {
+      return false;
+    }
+
+    let bodyBytes = 0;
+    for (const record of records) {
+      bodyBytes += record.request.body?.length ?? 0;
+      bodyBytes += record.response.body?.length ?? 0;
+      if (bodyBytes > 512 * 1024) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   async executeSkill(
     skillId: string,
     params: Record<string, unknown>,
     callerId?: string,
-    options?: { skipMetrics?: boolean },
+    options?: { skipMetrics?: boolean; forceDirectTier?: boolean },
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
@@ -2140,7 +2296,7 @@ export class Engine {
     params: Record<string, unknown>,
     startTime: number,
     callerId?: string,
-    options?: { skipMetrics?: boolean },
+    options?: { skipMetrics?: boolean; forceDirectTier?: boolean },
   ): Promise<SkillExecutionResult> {
     const skillId = skill.id;
 
@@ -2285,7 +2441,10 @@ export class Engine {
       // 5. Execute — canary probe + tier escalation
       const retryOpts: RetryOptions = { ...executorOptions, siteRecommendedTier: site?.recommendedTier };
 
-      if (skill.directCanaryEligible && !skill.tierLock
+      // Auto-validation forces direct tier to test without browser
+      if (options?.forceDirectTier) {
+        retryOpts.forceStartTier = ExecutionTier.DIRECT;
+      } else if (skill.directCanaryEligible && !skill.tierLock
           && (skill.directCanaryAttempts ?? 0) < MAX_CANARY_ATTEMPTS
           && !isDirectRecommended) {
         retryOpts.forceStartTier = ExecutionTier.DIRECT;
@@ -2699,6 +2858,10 @@ export class Engine {
       uptime: Date.now() - this.startedAt,
       ...(warnings.length > 0 ? { warnings } : {}),
       skillSummary: { total: allSkills.length, executable, blocked },
+      autoValidation: {
+        enabled: (this.config.autoValidation?.enabled ?? true) !== false,
+        ...this.autoValidationStats,
+      },
     };
   }
 
@@ -2803,6 +2966,89 @@ export class Engine {
     }
   }
 
+  private async runAutoValidationCycle(siteId?: string): Promise<void> {
+    if (this.mode !== 'idle' || this.autoValidationRunning || this.isClosing) return;
+    this.autoValidationRunning = true;
+
+    const maxPerCycle = this.config.autoValidation?.maxSkillsPerCycle ?? 5;
+
+    try {
+      let candidates = this.skillRepo.getByStatus(SkillStatus.ACTIVE).filter(s =>
+        s.currentTier === TierState.TIER_3_DEFAULT
+        && s.tierLock?.type !== 'permanent'
+        && s.sideEffectClass === SideEffectClass.READ_ONLY
+        && (s.method === 'GET' || s.method === 'HEAD')
+      );
+
+      const byLastVerified = (a: SkillSpec, b: SkillSpec) =>
+        (a.lastVerified ?? 0) - (b.lastVerified ?? 0);
+      if (siteId) {
+        const siteSkills = candidates.filter(s => s.siteId === siteId).sort(byLastVerified);
+        const otherSkills = candidates.filter(s => s.siteId !== siteId).sort(byLastVerified);
+        candidates = [...siteSkills, ...otherSkills];
+      } else {
+        candidates.sort(byLastVerified);
+      }
+
+      const batch = candidates.slice(0, maxPerCycle);
+      if (batch.length === 0) {
+        this.autoValidationStats.lastRunAt = Date.now();
+        return;
+      }
+
+      let cycleProcessed = 0;
+
+      for (const skill of batch) {
+        if (this.isClosing || this.mode !== 'idle') break;
+
+        const execSchema = buildExecutionSchema(skill);
+        const samples = skill.sampleParams ?? {};
+        const uncovered = execSchema.required.filter(r => !(r in samples));
+        if (uncovered.length > 0) {
+          this.autoValidationStats.skippedNoParams++;
+          continue;
+        }
+
+        const rateCheck = this.rateLimiter.checkRate(skill.siteId, '__auto_validation__');
+        if (!rateCheck.allowed) {
+          this.autoValidationStats.skippedRateLimited++;
+          continue;
+        }
+
+        const result = await this.executeSkill(skill.id, samples, '__auto_validation__', { forceDirectTier: true });
+
+        this.autoValidationStats.validated++;
+        cycleProcessed++;
+
+        if (result.success) {
+          this.autoValidationStats.succeeded++;
+          const fresh = this.skillRepo.getById(skill.id);
+          if (fresh && fresh.currentTier === TierState.TIER_1_PROMOTED) {
+            this.autoValidationStats.promoted++;
+            this.log.info({ skillId: skill.id }, 'Auto-validation promoted to tier_1');
+          }
+        } else {
+          this.autoValidationStats.failed++;
+          this.log.debug({ skillId: skill.id, error: result.error }, 'Auto-validation failed');
+        }
+
+        if (!this.isClosing) await new Promise<void>(r => setTimeout(r, 2000));
+      }
+
+      this.autoValidationStats.lastRunAt = Date.now();
+      this.autoValidationStats.lastCycleProcessed = cycleProcessed;
+
+      if (cycleProcessed > 0) {
+        this.log.info({ processed: cycleProcessed, promoted: this.autoValidationStats.promoted },
+          'Auto-validation cycle complete');
+      }
+    } catch (err) {
+      this.log.debug({ err }, 'Auto-validation cycle failed');
+    } finally {
+      this.autoValidationRunning = false;
+    }
+  }
+
   async close(): Promise<void> {
     // Clear session sweep interval
     if (this.sessionSweepInterval) {
@@ -2821,6 +3067,11 @@ export class Engine {
     if (this.sweepInterval) {
       clearInterval(this.sweepInterval);
       this.sweepInterval = null;
+    }
+
+    if (this.autoValidationTimer) {
+      clearInterval(this.autoValidationTimer);
+      this.autoValidationTimer = null;
     }
 
     // Abort background explore ops before closing
