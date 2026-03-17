@@ -151,6 +151,7 @@ interface SkillRow {
   validations_since_last_canary: number;
   last_canary_error_type: string | null;
   review_required: number;
+  sample_params: string | null;
 }
 
 const log = getLogger();
@@ -217,6 +218,7 @@ function rowToSkill(row: SkillRow): SkillSpec {
     directCanaryAttempts: row.direct_canary_attempts ?? 0,
     validationsSinceLastCanary: row.validations_since_last_canary ?? 0,
     lastCanaryErrorType: row.last_canary_error_type ?? undefined,
+    sampleParams: row.sample_params ? parseJson<Record<string, string>>(row.sample_params, {}) : undefined,
     reviewRequired: row.review_required === 1,
   };
 }
@@ -236,8 +238,8 @@ export class SkillRepository {
         allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy,
         avg_latency_ms, last_successful_tier,
         direct_canary_eligible, direct_canary_attempts, validations_since_last_canary, last_canary_error_type,
-        review_required
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        review_required, sample_params
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       skill.id,
       skill.siteId,
       skill.name,
@@ -280,6 +282,7 @@ export class SkillRepository {
       skill.validationsSinceLastCanary ?? 0,
       skill.lastCanaryErrorType ?? null,
       skill.reviewRequired ? 1 : 0,
+      skill.sampleParams ? JSON.stringify(skill.sampleParams) : null,
     );
   }
 
@@ -348,6 +351,7 @@ export class SkillRepository {
       ['chainSpec', 'chain_spec'], ['parameterEvidence', 'parameter_evidence'],
       ['allowedDomains', 'allowed_domains'], ['requiredCapabilities', 'required_capabilities'],
       ['parameters', 'parameters'], ['validation', 'validation'], ['redaction', 'redaction'],
+      ['sampleParams', 'sample_params'],
     ];
 
     for (const [prop, col] of directColumns) {

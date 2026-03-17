@@ -118,6 +118,9 @@ const NUMERIC_CONFIG_KEYS = new Set([
   'browser.geo.geolocation.longitude',
   'browser.geo.geolocation.accuracy',
   'browser.features.screenshotQuality',
+  'autoValidation.intervalMs',
+  'autoValidation.maxSkillsPerCycle',
+  'autoValidation.delayAfterPipelineMs',
 ]);
 
 // ─── Environment Variable Overrides ─────────────────────────────────
@@ -516,7 +519,7 @@ const VALID_TOP_LEVEL_KEYS = new Set([
   'audit', 'storage', 'server', 'daemon', 'browser', 'tempTtlMs', 'gcIntervalMs',
   'confirmationTimeoutMs', 'confirmationExpiryMs', 'promotionConsecutivePasses',
   'promotionVolatilityThreshold', 'maxToolsPerSite', 'toolShortlistK',
-  'browserPool', 'managedCrawl', 'slimMode',
+  'browserPool', 'managedCrawl', 'slimMode', 'maxSkillsPerRecording', 'autoValidation',
 ]);
 
 /**

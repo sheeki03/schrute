@@ -295,6 +295,12 @@ ALTER TABLE sites ADD COLUMN lighthouse_score REAL;
 ALTER TABLE sites ADD COLUMN lighthouse_accessibility REAL;
 `,
   },
+  {
+    filename: '012_sample_params.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN sample_params TEXT;
+`,
+  },
 ];
 
 export class AgentDatabase {

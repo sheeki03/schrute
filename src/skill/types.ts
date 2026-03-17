@@ -425,6 +425,8 @@ export interface SkillSpec {
   validationsSinceLastCanary?: number;
   lastCanaryErrorType?: string;
 
+  sampleParams?: Record<string, string>;  // path-param sample for auto-validation
+
   reviewRequired?: boolean;
 
   createdAt: number;
@@ -662,6 +664,12 @@ export interface SchruteConfig {
   maxSkillsPerRecording: number; // default: 15
   toolShortlistK: number;        // default: 10
   slimMode?: boolean;
+  autoValidation?: {
+    enabled?: boolean;            // default: true
+    intervalMs?: number;          // default: 600_000 (10 min)
+    maxSkillsPerCycle?: number;   // default: 5
+    delayAfterPipelineMs?: number; // default: 30_000
+  };
 }
 
 // ─── Redaction Modes ───────────────────────────────────────────────
