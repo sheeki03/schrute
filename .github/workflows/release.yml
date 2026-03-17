@@ -98,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: user/homebrew-tap
+          repository: sheeki03/homebrew-tap
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
 
       - name: Update formula
