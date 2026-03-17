@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm ci
+      - run: npm install
       - run: npm run build
       - run: npm publish
         env:
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm ci
+      - run: npm install
       - run: npm run build
 
       - uses: docker/setup-buildx-action@v3
@@ -79,7 +79,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm ci
+      - run: npm install
       - run: npm run build
       - name: Build standalone binary
         env:
