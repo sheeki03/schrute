@@ -296,12 +296,13 @@ skillsCmd
   .command('search [query]')
   .description('Search skills by query')
   .option('--limit <n>', 'Max results', '20')
-  .action(async (query?: string, options?: { limit?: string }) => {
+  .option('--site <siteId>', 'Filter to a specific site')
+  .action(async (query?: string, options?: { limit?: string; site?: string }) => {
     const remote = getRemoteClient();
     if (remote) {
       try {
         const limit = options?.limit ? parseInt(options.limit, 10) : undefined;
-        const result = await remote.searchSkills(query, limit);
+        const result = await remote.searchSkills(query, limit, options?.site);
         outputResult(result);
       } catch (err) {
         console.error('Error:', err instanceof Error ? err.message : String(err));
@@ -325,16 +326,23 @@ skillsCmd
     // Use FTS when a query is provided for better relevance ranking
     let results: SkillSpec[];
     if (query) {
-      const { skills: ftsResults } = skillRepo.searchFts(query, { limit });
+      const { skills: ftsResults } = skillRepo.searchFts(query, { siteId: options?.site, limit });
       results = ftsResults.length > 0
         ? ftsResults.filter(s => s.status === SkillStatus.ACTIVE).slice(0, limit)
-        : rankToolsByIntent(skillRepo.getByStatus(SkillStatus.ACTIVE), query, limit);
+        : rankToolsByIntent(
+            options?.site
+              ? skillRepo.getByStatusAndSiteId(SkillStatus.ACTIVE, options.site)
+              : skillRepo.getByStatus(SkillStatus.ACTIVE),
+            query, limit);
     } else {
-      results = skillRepo.getByStatus(SkillStatus.ACTIVE).slice(0, limit);
+      results = (options?.site
+        ? skillRepo.getByStatusAndSiteId(SkillStatus.ACTIVE, options.site)
+        : skillRepo.getByStatus(SkillStatus.ACTIVE)
+      ).slice(0, limit);
     }
 
     // P2-3: Surface inactive matches
-    const inactiveMatches = findInactiveMatches(skillRepo, query, limit);
+    const inactiveMatches = findInactiveMatches(skillRepo, query, limit, options?.site);
 
     if (program.opts().json) {
       outputResult({ results: results.map(s => ({ id: s.id, name: s.name, method: s.method, pathTemplate: s.pathTemplate, successRate: s.successRate })), inactiveMatches });
