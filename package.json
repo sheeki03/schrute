@@ -1,6 +1,6 @@
 {
   "name": "schrute",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Universal Self-Learning Browser Agent — UI automation for the first run, API-level replay for the 100th run",
   "type": "module",
   "main": "dist/lib.js",
