@@ -388,6 +388,138 @@ api_stripe_com_get_charges_v1({ limit: 10 })
 | `explore-site` | Guided website exploration (args: `url`) |
 | `record-action` | Guided action recording (args: `url`, `action_name`) |
 
+## REST API
+
+Start Schrute with HTTP transport for programmatic access:
+
+```bash
+schrute config set server.authToken my-secret
+schrute serve --http --port 3000
+```
+
+This gives you a full REST API alongside the MCP server:
+
+```
+REST API:     http://127.0.0.1:3000/api
+MCP HTTP:     http://127.0.0.1:3001/mcp
+OpenAPI Spec: http://127.0.0.1:3000/api/openapi.json
+```
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/health` | Health check (public, no auth) |
+| `GET` | `/api/sites` | List all known sites |
+| `GET` | `/api/sites/:id` | Get site manifest |
+| `GET` | `/api/sites/:id/skills` | List skills for a site |
+| `GET` | `/api/sites/:id/skills/:name` | Execute a GET skill via query params |
+| `POST` | `/api/sites/:id/skills/:name` | Execute a skill with body params |
+| `POST` | `/api/sites/:id/skills/:name/dry-run` | Preview without executing |
+| `POST` | `/api/sites/:id/skills/:name/validate` | Validate a skill |
+| `GET` | `/api/skills` | List all skills across sites |
+| `POST` | `/api/v1/skills/search` | Search skills by query |
+| `POST` | `/api/explore` | Start browser session (admin) |
+| `POST` | `/api/record` | Start recording (admin) |
+| `POST` | `/api/stop` | Stop recording (admin) |
+| `GET` | `/api/pipeline/:jobId` | Check pipeline job status |
+| `POST` | `/api/confirm` | Approve/deny skill confirmation |
+| `GET` | `/api/sessions` | List browser sessions (admin) |
+| `POST` | `/api/cdp/connect` | Connect to Chrome via CDP (admin) |
+| `POST` | `/api/import-cookies` | Import cookies (admin) |
+| `GET` | `/api/openapi.json` | OpenAPI 3.1 spec |
+
+All endpoints except `/api/health` require `Authorization: Bearer <token>` when running in network mode.
+
+### Example: Execute a skill via curl
+
+```bash
+# Execute a learned skill
+curl -X POST http://127.0.0.1:3000/api/sites/www.coingecko.com/skills/get_24_hours_json \
+  -H "Authorization: Bearer my-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"params": {"vs_currency": "usd"}}'
+
+# GET skills can be called directly with query params
+curl "http://127.0.0.1:3000/api/sites/www.coingecko.com/skills/get_24_hours_json?vs_currency=usd" \
+  -H "Authorization: Bearer my-secret"
+
+# Search for skills
+curl -X POST http://127.0.0.1:3000/api/v1/skills/search \
+  -H "Authorization: Bearer my-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "bitcoin price", "limit": 5}'
+```
+
+## Client SDKs
+
+### Python
+
+Zero-dependency client using only `urllib` — works with Python 3.9+:
+
+```python
+from schrute_client import SchruteClient
+
+client = SchruteClient("http://127.0.0.1:3000", api_key="my-secret")
+
+# List sites and skills
+sites = client.list_sites()
+skills = client.list_skills(site_id="www.coingecko.com")
+
+# Execute a skill
+result = client.execute_skill(
+    site_id="www.coingecko.com",
+    name="get_24_hours_json",
+    params={"vs_currency": "usd"}
+)
+
+# Preview without executing
+preview = client.dry_run(
+    site_id="www.coingecko.com",
+    name="get_24_hours_json",
+    params={"vs_currency": "usd"}
+)
+
+# Search skills
+matches = client.search_skills(query="bitcoin", limit=5)
+
+# Record a new skill
+client.explore("https://example.com")
+client.record("search_users", inputs={"query": "admin"})
+result = client.stop()
+status = client.get_pipeline_status(result["jobId"])
+```
+
+Install: `pip install schrute-client` or copy `src/client/python/schrute_client.py` directly.
+
+### TypeScript / Node.js
+
+```typescript
+import { SchruteClient } from '@schrute/client';
+
+const client = new SchruteClient('http://127.0.0.1:3000', 'my-secret');
+
+const sites = await client.listSites();
+const skills = await client.listSkills('www.coingecko.com');
+const result = await client.executeSkill('www.coingecko.com', 'get_24_hours_json', {
+  vs_currency: 'usd'
+});
+```
+
+Install: `npm install @schrute/client`
+
+## Daemon
+
+Schrute runs a background daemon for CLI-to-server communication:
+
+```bash
+schrute daemon              # Start daemon (Unix socket or TCP)
+schrute daemon stop          # Stop daemon
+schrute status               # Check daemon + engine status
+```
+
+The daemon enables the CLI to control a running Schrute server — start/stop recordings, execute skills, manage sessions — without requiring the full MCP protocol. It starts automatically with `schrute serve` unless `--no-daemon` is passed.
+
 ## CLI Reference
 
 ```bash
@@ -484,11 +616,14 @@ When installed as a Claude Code plugin, additional features are available:
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        MCP Client                            │
-│            (Claude, Cursor, Windsurf, Cline, ...)            │
-└─────────────────────────┬────────────────────────────────────┘
-                          │ MCP (stdio or HTTP)
+┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐
+│  MCP Client  │  │  REST Client │  │         CLI              │
+│ (Claude,     │  │ (Python, TS, │  │  schrute explore/record  │
+│  Cursor ...) │  │  curl, any)  │  │  /execute/skills/...     │
+└──────┬───────┘  └──────┬───────┘  └────────────┬─────────────┘
+       │                 │                        │
+       │ MCP stdio/HTTP  │ REST API :3000         │ Daemon socket
+       │                 │                        │
 ┌─────────────────────────▼────────────────────────────────────┐
 │                     Schrute MCP Server                       │
 │  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
