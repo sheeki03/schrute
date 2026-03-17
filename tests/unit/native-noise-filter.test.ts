@@ -76,6 +76,17 @@ describe('native noise filter (TS fallback)', () => {
     expect(result.noise.length).toBe(1);
   });
 
+  it('filters cross-origin requests when siteHost is provided', () => {
+    const entries = [
+      makeEntry('https://api.example.com/data'),
+      makeEntry('https://challenges.cloudflare.com/turnstile/v0/api.js'),
+    ];
+
+    const result = filterRequestsNative(entries, [], 'www.example.com');
+    expect(result.signal.length).toBe(1);
+    expect(result.noise.length).toBe(1);
+  });
+
   it('returns empty arrays for empty input', () => {
     const result = filterRequestsNative([]);
     expect(result.signal).toHaveLength(0);

@@ -20,8 +20,11 @@ let _nativeFailureLogged = false;
 export function filterRequestsNative(
   entries: HarEntry[],
   overrides: SiteOverride[] = [],
+  siteHost?: string,
 ): FilterResult {
-  const native = getNativeModule();
+  // When siteHost is provided, skip native module (not yet supported)
+  // and fall through to TS implementation which supports site-aware filtering
+  const native = siteHost ? null : getNativeModule();
 
   if (native?.filterRequests) {
     try {
@@ -47,5 +50,5 @@ export function filterRequestsNative(
     }
   }
 
-  return tsFilterRequests(entries, overrides);
+  return tsFilterRequests(entries, overrides, siteHost);
 }

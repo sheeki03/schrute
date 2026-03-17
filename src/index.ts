@@ -619,6 +619,124 @@ skillsCmd
     }
   });
 
+skillsCmd
+  .command('prune-infra')
+  .description('Remove captured third-party infrastructure skills (e.g. Cloudflare challenges)')
+  .requiredOption('--site <siteId>', 'Site ID to prune infrastructure skills for')
+  .option('--dry-run', 'List matches without deleting')
+  .option('--yes', 'Skip confirmation and delete immediately')
+  .action(async (options: { site: string; dryRun?: boolean; yes?: boolean }) => {
+    const { isLearnableHost } = await import('./capture/noise-filter.js');
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const siteId = options.site;
+    const isJson = program.opts().json;
+
+    const skills = skillRepo.getBySiteId(siteId);
+    const schemeRegex = /^[a-z][a-z0-9+.-]*:/i;
+
+    interface MatchedSkill {
+      id: string;
+      host: string | null;
+      pathTemplate: string;
+      reason: 'non_learnable_host' | 'malformed_url';
+    }
+
+    const matched: MatchedSkill[] = [];
+    for (const skill of skills) {
+      if (!schemeRegex.test(skill.pathTemplate)) continue;
+
+      let host: string | null = null;
+      let reason: MatchedSkill['reason'] = 'malformed_url';
+      try {
+        host = new URL(skill.pathTemplate).hostname;
+        if (isLearnableHost(host, siteId)) continue; // same-root — keep
+        reason = 'non_learnable_host';
+      } catch {
+        reason = 'malformed_url';
+      }
+
+      matched.push({ id: skill.id, host, pathTemplate: skill.pathTemplate, reason });
+    }
+
+    if (matched.length === 0) {
+      if (isJson) {
+        console.log(JSON.stringify({ siteId, dryRun: !!options.dryRun, matched: 0, deleted: 0, skipped: 0, errors: [] }));
+      } else {
+        console.log(`No infrastructure skills found for site "${siteId}".`);
+      }
+      closeDatabase();
+      return;
+    }
+
+    if (options.dryRun) {
+      if (isJson) {
+        console.log(JSON.stringify({ siteId, dryRun: true, matched: matched.length, deleted: 0, skipped: matched.length, errors: [], skills: matched }));
+      } else {
+        console.log(`Dry run: ${matched.length} infrastructure skill(s) would be deleted:\n`);
+        for (const m of matched) {
+          console.log(`  ${m.id} — host: ${m.host ?? 'malformed'} — ${m.pathTemplate} (${m.reason})`);
+        }
+      }
+      closeDatabase();
+      return;
+    }
+
+    // Interactive confirmation unless --yes
+    if (!options.yes) {
+      if (!process.stdin.isTTY) {
+        console.error('Non-interactive terminal: use --yes or --dry-run');
+        closeDatabase();
+        process.exit(1);
+      }
+      console.log(`About to delete ${matched.length} infrastructure skill(s):\n`);
+      for (const m of matched) {
+        console.log(`  ${m.id} — host: ${m.host ?? 'malformed'} — ${m.pathTemplate} (${m.reason})`);
+      }
+      const readline = await import('node:readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>(resolve => rl.question('\nDelete these skills? [y/N] ', resolve));
+      rl.close();
+      if (answer.toLowerCase() !== 'y') {
+        if (isJson) {
+          console.log(JSON.stringify({ siteId, dryRun: false, matched: matched.length, deleted: 0, skipped: matched.length, errors: [] }));
+        } else {
+          console.log('Aborted.');
+        }
+        closeDatabase();
+        process.exit(1);
+      }
+    }
+
+    let deleted = 0;
+    const errors: Array<{ id: string; error: string }> = [];
+    for (const m of matched) {
+      try {
+        skillRepo.delete(m.id);
+        deleted++;
+      } catch (err) {
+        errors.push({ id: m.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    if (isJson) {
+      console.log(JSON.stringify({ siteId, dryRun: false, matched: matched.length, deleted, skipped: matched.length - deleted, errors }));
+    } else {
+      console.log(`Deleted ${deleted} of ${matched.length} infrastructure skill(s).`);
+      if (errors.length > 0) {
+        for (const e of errors) {
+          console.error(`  Error deleting ${e.id}: ${e.error}`);
+        }
+      }
+    }
+
+    closeDatabase();
+  });
+
 // ─── execute ────────────────────────────────────────────────────
 
 program
@@ -1108,12 +1226,13 @@ program
     }
 
     // Shared graceful shutdown for both HTTP and stdio modes
-    {
-      const shutdown = async () => {
-        console.log('\nShutting down...');
-        if (daemon) {
-          await daemon.gracefulShutdown();
-        } else {
+	    {
+	      const shutdown = async () => {
+	        // In stdio mode, stdout is reserved for MCP JSON-RPC frames.
+	        (options.http || config.server.network ? console.log : console.error)('\nShutting down...');
+	        if (daemon) {
+	          await daemon.gracefulShutdown();
+	        } else {
           // No daemon — close MCP handles directly
           for (const handle of closeHandles.mcpCloseHandles ?? []) {
             try { await handle.close(); } catch (err) { console.warn('MCP close error:', err); }

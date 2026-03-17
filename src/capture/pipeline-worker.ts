@@ -58,7 +58,7 @@ export async function runPipelineTask(
   input: PipelineWorkerInput,
 ): Promise<PipelineWorkerOutput> {
   const { records, auditEntries } = loadPipelineInput(input);
-  const filtered = filterEntriesWithRecords(auditEntries, records);
+  const filtered = filterEntriesWithRecords(auditEntries, records, input.siteId);
   const dedupedSignalRecords = deduplicateRecords(filtered.signalRecords);
   const restRecords = dedupedSignalRecords.filter(record => !isGraphQL(record.request));
   const gqlRecords = dedupedSignalRecords.filter(record => isGraphQL(record.request));
@@ -69,11 +69,14 @@ export async function runPipelineTask(
     declaredInputs: input.inputs,
   })));
   const chains = detectChains(restRecords);
+  const transportSignalRecords = dedupedSignalRecords.map(stripResponseBodiesForTransfer);
+  const transportRestRecords = transportSignalRecords.filter(record => !isGraphQL(record.request));
+  const transportGqlRecords = transportSignalRecords.filter(record => isGraphQL(record.request));
 
   return {
-    signalRecords: dedupedSignalRecords,
-    restRecords,
-    gqlRecords,
+    signalRecords: transportSignalRecords,
+    restRecords: transportRestRecords,
+    gqlRecords: transportGqlRecords,
     authRecipe,
     paramEvidence,
     chains,
@@ -116,12 +119,13 @@ function loadPipelineInput(input: PipelineWorkerInput): {
 function filterEntriesWithRecords(
   auditEntries: PipelineAuditEntry[],
   records: StructuredRecord[],
+  siteId?: string,
 ): {
   signalRecords: StructuredRecord[];
   signalCount: number;
   noiseCount: number;
 } {
-  const { signal, noise } = filterRequests(auditEntries as unknown as HarEntry[]);
+  const { signal, noise } = filterRequests(auditEntries as unknown as HarEntry[], [], siteId);
   const signalSet = new Set(signal);
   const signalRecords: StructuredRecord[] = [];
 
@@ -149,6 +153,20 @@ function deduplicateRecords(records: StructuredRecord[]): StructuredRecord[] {
     seen.add(key);
     return true;
   });
+}
+
+function stripResponseBodiesForTransfer(record: StructuredRecord): StructuredRecord {
+  if (record.response.body === undefined) {
+    return record;
+  }
+
+  return {
+    ...record,
+    response: {
+      ...record.response,
+      body: undefined,
+    },
+  };
 }
 
 function serializeError(err: unknown): string {

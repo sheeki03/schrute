@@ -3,6 +3,7 @@ import {
   filterRequests,
   isObviousNoise,
   shouldCaptureResponseBody,
+  isLearnableHost,
 } from '../../src/capture/noise-filter.js';
 import type { HarEntry } from '../../src/capture/har-extractor.js';
 
@@ -266,6 +267,83 @@ describe('noise-filter', () => {
       })]);
       expect(result.ambiguous).toHaveLength(1);
       expect(result.signal).toHaveLength(0);
+      expect(result.noise).toHaveLength(0);
+    });
+  });
+
+  describe('isLearnableHost', () => {
+    it('allows same-root subdomain (pro-api.coingecko.com)', () => {
+      expect(isLearnableHost('pro-api.coingecko.com', 'www.coingecko.com')).toBe(true);
+    });
+
+    it('blocks entirely different domain (challenges.cloudflare.com)', () => {
+      expect(isLearnableHost('challenges.cloudflare.com', 'www.coingecko.com')).toBe(false);
+    });
+
+    it('allows api subdomain', () => {
+      expect(isLearnableHost('api.coingecko.com', 'www.coingecko.com')).toBe(true);
+    });
+
+    it('allows data subdomain', () => {
+      expect(isLearnableHost('data.coingecko.com', 'www.coingecko.com')).toBe(true);
+    });
+
+    it('allows exact match', () => {
+      expect(isLearnableHost('www.coingecko.com', 'www.coingecko.com')).toBe(true);
+    });
+
+    it('blocks google-analytics.com', () => {
+      expect(isLearnableHost('google-analytics.com', 'www.coingecko.com')).toBe(false);
+    });
+  });
+
+  describe('site-aware filterRequests', () => {
+    it('classifies cross-origin cloudflare request as noise when siteHost provided', () => {
+      const result = filterRequests(
+        [makeEntry({ url: 'https://challenges.cloudflare.com/turnstile/v0/api.js' })],
+        [],
+        'www.coingecko.com',
+      );
+      expect(result.noise).toHaveLength(1);
+      expect(result.signal).toHaveLength(0);
+    });
+
+    it('keeps same-site API request as signal when siteHost provided', () => {
+      const result = filterRequests(
+        [makeEntry({ url: 'https://www.coingecko.com/api/v3/coins' })],
+        [],
+        'www.coingecko.com',
+      );
+      expect(result.signal).toHaveLength(1);
+      expect(result.noise).toHaveLength(0);
+    });
+
+    it('keeps same-root api subdomain as signal when siteHost provided', () => {
+      const result = filterRequests(
+        [makeEntry({ url: 'https://api.coingecko.com/api/v3/coins' })],
+        [],
+        'www.coingecko.com',
+      );
+      expect(result.signal).toHaveLength(1);
+      expect(result.noise).toHaveLength(0);
+    });
+
+    it('does not filter cross-origin when siteHost is not provided', () => {
+      const result = filterRequests(
+        [makeEntry({ url: 'https://challenges.cloudflare.com/turnstile/v0/api.js' })],
+      );
+      // Without siteHost, Cloudflare is caught by CDN_INFRA domain list, not cross-origin
+      expect(result.noise).toHaveLength(1);
+    });
+
+    it('site override takes priority over cross-origin gating', () => {
+      const result = filterRequests(
+        [makeEntry({ url: 'https://external-api.otherdomain.com/data' })],
+        [{ domain: 'external-api.otherdomain.com', classification: 'signal' }],
+        'www.coingecko.com',
+      );
+      // Override whitelists the non-same-root host — should NOT be classified as noise
+      expect(result.signal).toHaveLength(1);
       expect(result.noise).toHaveLength(0);
     });
   });

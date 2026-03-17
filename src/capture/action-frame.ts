@@ -82,6 +82,8 @@ export function stopFrame(
     db,
     frameId,
     frame.entries,
+    [],
+    frame.siteId,
   );
 
   const requestCount = frame.entries.length;
@@ -142,7 +144,7 @@ export function getMainRequests(
   }
 
   // Frame still live — use in-memory entries
-  const { signal } = filterRequests(frame.entries);
+  const { signal } = filterRequests(frame.entries, [], frame.siteId);
   return signal.map(e => ({
     method: e.request.method,
     url: e.request.url,

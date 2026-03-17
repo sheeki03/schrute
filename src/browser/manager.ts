@@ -613,7 +613,7 @@ export class BrowserManager {
     }
 
     const ctxOpts: Record<string, unknown> = {
-      recordHar: { path: harPath, mode: 'minimal' },
+      recordHar: { path: harPath, mode: 'minimal', content: 'omit' },
       storageState,
     };
 

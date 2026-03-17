@@ -249,6 +249,65 @@ describe('Rust Parity — noise-filter', () => {
     expect(Array.isArray(result.signal)).toBe(true);
     expect(Array.isArray(result.noise)).toBe(true);
   });
+
+  it('filterRequestsNative supports siteHost parameter', async () => {
+    const { filterRequestsNative } = await import('../../src/native/noise-filter.js');
+
+    const entries = [
+      {
+        request: {
+          method: 'GET',
+          url: 'https://api.example.com/data',
+          httpVersion: 'HTTP/1.1',
+          headers: [{ name: 'Content-Type', value: 'application/json' }],
+          queryString: [],
+          headersSize: -1,
+          bodySize: 0,
+        },
+        response: {
+          status: 200,
+          statusText: 'OK',
+          httpVersion: 'HTTP/1.1',
+          headers: [{ name: 'Content-Type', value: 'application/json' }],
+          content: { size: 0, mimeType: 'application/json' },
+          redirectURL: '',
+          headersSize: -1,
+          bodySize: 0,
+        },
+        startedDateTime: '2024-01-01T00:00:00Z',
+        time: 50,
+        timings: { send: 0, wait: 50, receive: 0 },
+      },
+      {
+        request: {
+          method: 'GET',
+          url: 'https://challenges.cloudflare.com/turnstile/v0/check',
+          httpVersion: 'HTTP/1.1',
+          headers: [],
+          queryString: [],
+          headersSize: -1,
+          bodySize: 0,
+        },
+        response: {
+          status: 200,
+          statusText: 'OK',
+          httpVersion: 'HTTP/1.1',
+          headers: [],
+          content: { size: 0, mimeType: 'application/json' },
+          redirectURL: '',
+          headersSize: -1,
+          bodySize: 0,
+        },
+        startedDateTime: '2024-01-01T00:00:01Z',
+        time: 50,
+        timings: { send: 0, wait: 50, receive: 0 },
+      },
+    ] as any[];
+
+    const result = filterRequestsNative(entries, [], 'www.example.com');
+    expect(result.signal).toHaveLength(1);
+    expect(result.noise).toHaveLength(1);
+  });
 });
 
 // ─── 6. param-discoverer ──────────────────────────────────────────

@@ -72,6 +72,7 @@ export interface PipelineJobResult {
   signalCount: number;
   noiseCount: number;
   totalCount: number;
+  warning?: string;
 }
 
 export interface PipelineJobInfo {

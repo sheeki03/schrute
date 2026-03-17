@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { getLogger } from '../core/logger.js';
@@ -9,6 +10,8 @@ import {
 } from './pipeline-worker.js';
 
 const log = getLogger();
+const modulePath = fileURLToPath(import.meta.url);
+const runningFromDist = modulePath.includes(`${sep}dist${sep}`);
 
 interface PendingTask {
   resolve: (value: PipelineWorkerOutput) => void;
@@ -29,7 +32,7 @@ export class PipelinePool {
   private queue = Promise.resolve();
   private shuttingDown = false;
   private readonly workerUrl = new URL('./pipeline-worker.js', import.meta.url);
-  private readonly workerAvailable = existsSync(fileURLToPath(this.workerUrl));
+  private readonly workerAvailable = runningFromDist && existsSync(fileURLToPath(this.workerUrl));
 
   async runPipeline(input: PipelineWorkerInput): Promise<PipelineWorkerOutput> {
     const runTask = async (): Promise<PipelineWorkerOutput> => {
@@ -82,7 +85,11 @@ export class PipelinePool {
       return this.worker;
     }
 
-    const worker = new Worker(this.workerUrl);
+    const worker = new Worker(this.workerUrl, {
+      // Strip inherited execArgv (--input-type, --inspect, etc.) that break ESM workers
+      execArgv: [],
+      resourceLimits: { maxOldGenerationSizeMb: 512 },
+    });
 
     worker.on('message', (message: WorkerResponse) => {
       const pending = this.pending.get(message.id);

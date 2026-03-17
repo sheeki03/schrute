@@ -272,6 +272,8 @@ export class CdpHarRecorder {
       queryParams[query.name] = query.value;
     }
 
+    const chainCandidates = (entry.response as { chainCandidates?: Record<string, string> }).chainCandidates;
+
     return {
       request: {
         method: entry.request.method,
@@ -285,9 +287,9 @@ export class CdpHarRecorder {
         status: entry.response.status,
         statusText: entry.response.statusText,
         headers: responseHeaders,
-        body: entry.response.content.text,
+        body: chainCandidates ? undefined : entry.response.content.text,
         contentType: entry.response.content.mimeType,
-        chainCandidates: (entry.response as { chainCandidates?: Record<string, string> }).chainCandidates,
+        chainCandidates,
       },
       startedAt: new Date(entry.startedDateTime).getTime(),
       duration: entry.time,
