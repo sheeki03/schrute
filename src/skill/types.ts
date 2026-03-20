@@ -38,6 +38,7 @@ export const FailureCause = {
   SCHEMA_DRIFT: 'schema_drift',
   AUTH_EXPIRED: 'auth_expired',
   COOKIE_REFRESH: 'cookie_refresh',
+  CLOUDFLARE_CHALLENGE: 'cloudflare_challenge',
   FETCH_ERROR: 'fetch_error',
   UNKNOWN: 'unknown',
 } as const;
@@ -55,6 +56,7 @@ const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
   FailureCause.SCHEMA_DRIFT,
   FailureCause.AUTH_EXPIRED,
   FailureCause.COOKIE_REFRESH,
+  FailureCause.CLOUDFLARE_CHALLENGE,
   FailureCause.FETCH_ERROR,
   FailureCause.UNKNOWN,
 ];
@@ -63,6 +65,7 @@ export const INFRA_FAILURE_CAUSES = new Set<FailureCauseName>([
   FailureCause.POLICY_DENIED,
   FailureCause.RATE_LIMITED,
   FailureCause.BUDGET_DENIED,
+  FailureCause.CLOUDFLARE_CHALLENGE,
   FailureCause.FETCH_ERROR,
 ]);
 
@@ -649,6 +652,7 @@ export interface SchruteConfig {
     network: boolean;            // default: false (v0.2+)
     authToken?: string;          // Required when network=true
     httpPort?: number;           // REST server port (default 3000, MCP HTTP = httpPort + 1)
+    mcpHttpAdmin?: boolean;      // default: false — grant admin to authenticated MCP HTTP clients
   };
   daemon: {
     port: number;

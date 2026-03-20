@@ -17,6 +17,11 @@ export const PROBE_PATHS = [
   '/v3/api-docs',
   '/.well-known/openapi.json',
   '/api/openapi.json',
+  '/spec.json',
+  '/docs/openapi.json',
+  '/swagger/v1/swagger.json',
+  '/api/v1/openapi.json',
+  '/api/swagger.json',
 ];
 
 // ─── Public API ──────────────────────────────────────────────────────

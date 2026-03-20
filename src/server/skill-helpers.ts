@@ -145,7 +145,7 @@ export function searchAndProjectSkills(
     }
   }
 
-  const ranked = rankToolsByIntent(skills, query, limit);
+  const ranked = rankToolsByIntent(skills, query, limit, { preFiltered: !!matchType });
   const results: SkillSearchResult[] = ranked.map(s => {
     const toolDef = skillToToolDefinition(s);
     const execInfo = getSkillExecutability(s, browserManager);

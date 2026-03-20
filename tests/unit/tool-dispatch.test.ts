@@ -1283,4 +1283,48 @@ describe('tool-dispatch', () => {
       expect(typeof data[0].snapshotFields).toBe('object');
     });
   });
+
+  // ─── Batch Execute Rate Limit Retry ──────────────────────────
+  describe('schrute_batch_execute rate limit retry', () => {
+    it('retries rate-limited actions after waiting', async () => {
+      const skill = makeSkill();
+      const mockExecuteSkill = vi.fn()
+        .mockResolvedValueOnce({ success: false, failureCause: 'rate_limited', failureDetail: 'Retry after 100ms', data: null, error: 'rate limited' })
+        .mockResolvedValueOnce({ success: true, data: { result: 'ok' } });
+
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle', activeSession: null }),
+          getMode: vi.fn().mockReturnValue('idle'),
+          getExploreSessionName: vi.fn().mockReturnValue('default'),
+          getRecordingSessionName: vi.fn().mockReturnValue(null),
+          executeSkill: mockExecuteSkill,
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({
+              hasContext: vi.fn().mockReturnValue(false),
+            }),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+          getMetricsRepo: vi.fn().mockReturnValue({ getRecentBySkillId: vi.fn().mockReturnValue([]) }),
+        } as any,
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_batch_execute', {
+        actions: [{ skillId: skill.id, params: {} }],
+      }, deps);
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.batch).toBe(true);
+      expect(data.results[0].success).toBe(true);
+      expect(mockExecuteSkill).toHaveBeenCalledTimes(2);
+    });
+  });
 });

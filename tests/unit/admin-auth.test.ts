@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { isAdminCaller } from '../../src/shared/admin-auth.js';
 import type { SchruteConfig } from '../../src/skill/types.js';
 
-function makeConfig(network: boolean): SchruteConfig {
+function makeConfig(network: boolean, mcpHttpAdmin = false): SchruteConfig {
   return {
     dataDir: '/tmp/schrute-admin-auth-test',
     logLevel: 'silent',
@@ -22,7 +22,7 @@ function makeConfig(network: boolean): SchruteConfig {
     },
     audit: { strictMode: true, rootHashExport: true },
     storage: { maxPerSiteMb: 500, maxGlobalMb: 5000, retentionDays: 90 },
-    server: { network },
+    server: { network, mcpHttpAdmin },
     daemon: { port: 19420, autoStart: false },
     tempTtlMs: 3600000,
     gcIntervalMs: 900000,
@@ -63,8 +63,41 @@ describe('isAdminCaller', () => {
     });
 
     it('returns false for MCP HTTP sessions', () => {
-      expect(isAdminCaller('mcp-http-session-123', config)).toBe(false);
-      expect(isAdminCaller('mcp-http-abc', config)).toBe(false);
+      expect(isAdminCaller('mcp-http:session-123', config)).toBe(false);
+      expect(isAdminCaller('mcp-http:abc', config)).toBe(false);
+    });
+
+    it('returns false for unknown callerIds', () => {
+      expect(isAdminCaller('rest-api', config)).toBe(false);
+      expect(isAdminCaller('random', config)).toBe(false);
+    });
+  });
+
+  describe('network=true with mcpHttpAdmin=true', () => {
+    const config = makeConfig(true, true);
+
+    it('returns true for mcp-http: prefixed callerIds', () => {
+      expect(isAdminCaller('mcp-http:session-123', config)).toBe(true);
+      expect(isAdminCaller('mcp-http:unknown', config)).toBe(true);
+    });
+
+    it('still returns true for stdio and daemon', () => {
+      expect(isAdminCaller('stdio', config)).toBe(true);
+      expect(isAdminCaller('daemon', config)).toBe(true);
+    });
+
+    it('still returns false for non-mcp-http callerIds', () => {
+      expect(isAdminCaller('rest-api', config)).toBe(false);
+      expect(isAdminCaller('random', config)).toBe(false);
+    });
+  });
+
+  describe('network=true with mcpHttpAdmin=false (default)', () => {
+    const config = makeConfig(true, false);
+
+    it('returns false for mcp-http: prefixed callerIds', () => {
+      expect(isAdminCaller('mcp-http:session-123', config)).toBe(false);
+      expect(isAdminCaller('mcp-http:unknown', config)).toBe(false);
     });
   });
 });

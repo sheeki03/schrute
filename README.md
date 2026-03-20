@@ -8,11 +8,12 @@
 Teach your AI a website once. After that, it replays the same backend requests directly — no browser needed.
 </p>
 
-Schrute watches real browser traffic, turns repeatable actions into MCP tools, and reuses browser auth when needed. No hand-written API integration, and often no API keys, because Schrute learns from the requests your browser already knows how to make.
+Schrute watches real browser traffic, learns the underlying API patterns, and turns them into replayable skills you can call via **MCP**, **REST API**, or **CLI**. No hand-written API integration, and often no API keys, because Schrute learns from the requests your browser already knows how to make.
 
-- Faster repeated tasks
+- Faster repeated tasks — browser once, direct HTTP after
 - Less brittle than selector-only browser automation
-- No hand-written API integration for every site
+- Works through Cloudflare-protected sites via real-Chrome fallback
+- **MCP** · **REST API** · **CLI** — use from AI agents, any language, or your terminal
 
 Measured on repeated runs of tested workflows:
 
@@ -44,7 +45,9 @@ npm install -g schrute
 schrute setup
 ```
 
-Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline, or any MCP client):
+### MCP (AI agents)
+
+Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline):
 
 ```json
 {
@@ -57,7 +60,23 @@ Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline, or any MCP 
 }
 ```
 
-Your AI agent now has `schrute_explore`, `schrute_record`, and 40+ other tools.
+> **Note:** MCP HTTP requires `Accept: application/json, text/event-stream` header.
+
+### CLI
+
+```bash
+schrute explore https://example.com    # Open browser, record traffic
+schrute record --name my-action        # Mark an action
+schrute stop                           # Generate skills
+schrute execute my_skill.v1            # Replay the learned API call
+```
+
+### REST API
+
+```bash
+schrute serve --http --port 3000       # Start HTTP server
+curl http://127.0.0.1:3000/api/sites   # Use from any language
+```
 
 ## See it work in 60 seconds
 
@@ -121,7 +140,7 @@ Every example below was recorded on 2026-03-17, on macOS (Apple Silicon), over W
 
 **Returned:** `{"origin": "49.43.xxx.x"}`
 
-**What changed after learning:** Four browser navigations became four replayable MCP tools. Each call returns JSON directly — no page load, no DOM parsing, no selectors.
+**What changed after learning:** Four browser navigations became four replayable skills — callable via MCP tools, REST API, or CLI. Each call returns JSON directly — no page load, no DOM parsing, no selectors.
 
 ---
 
@@ -150,7 +169,7 @@ Every example below was recorded on 2026-03-17, on macOS (Apple Silicon), over W
 - Time: **1,033ms**
 - Returned: Full Wikipedia search results (10 articles with titles, snippets, page IDs)
 
-**What changed after learning:** A single MCP tool that takes a search query and returns structured Wikipedia results. The agent calls `schrute_execute({ skillId: "en_wikipedia_org.get_api_php.v1", params: { "query.srsearch": "quantum computing" } })` instead of navigating Wikipedia's UI.
+**What changed after learning:** A single skill that takes a search query and returns structured Wikipedia results. Call it via MCP (`schrute_execute`), REST API (`POST /api/sites/en.wikipedia.org/skills/get_api_php`), or CLI (`schrute execute en_wikipedia_org.get_api_php.v1 "query.srsearch=quantum computing"`) — instead of navigating Wikipedia's UI.
 
 ---
 
@@ -190,25 +209,39 @@ Every example below was recorded on 2026-03-17, on macOS (Apple Silicon), over W
 
 **Site:** www.coingecko.com (finance/crypto)
 
-**Why this workflow matters:** Shows how Schrute handles sites behind Cloudflare. Direct HTTP fails — the skill stays at Tier 3 (browser-proxied) and uses the browser's Cloudflare clearance cookies.
+**Why this workflow matters:** CoinGecko is protected by Cloudflare Turnstile, which blocks headless browsers. When Schrute detects a Cloudflare challenge, it launches a real Chrome browser to attempt clearance, then retries the API call. If the challenge auto-clears (common for Turnstile), execution succeeds automatically. If manual intervention is needed, Schrute returns a 202 with a hint to solve the challenge in the opened browser.
 
 **First run:**
 - Path: `schrute explore` → agent navigates CoinGecko, clicks on Bitcoin, views price charts → `schrute stop`
-- Pipeline result: **5 skills generated** from the captured API calls
+- Pipeline result: **5+ skills generated** from captured API traffic (exact count depends on page traffic)
 
 **Learned skills:**
 - `www_coingecko_com.get_24_hours_json.v1` — `GET /price_charts/bitcoin/usd/24_hours.json`
-- `www_coingecko_com.get_max_longer_cache_json.v1` — `GET /price_charts/bitcoin/usd/max_longer_cache.json`
-- `www_coingecko_com.get_insight_annotations.v1` — `GET /price_charts/bitcoin/insight_annotations`
-- Plus 2 more (user info, OTP center)
+- `www_coingecko_com.get_coins.v1` — `GET /price_charts/.../coins`
+- `www_coingecko_com.get_csrf_meta_json.v1` — `GET /accounts/csrf_meta.json`
+- Plus user info, OTP center, assets endpoints
 - Auth used: Cloudflare cookies (browser session)
 - Safety class: read-only
 
-**Direct HTTP attempt:** Failed after 9,129ms — Cloudflare returns a challenge page, not JSON.
+**Execution with live-Chrome recovery:**
 
-**Why it still works:** At Tier 3, Schrute executes the `fetch()` inside the browser context, which already has Cloudflare clearance cookies. The request succeeds where direct HTTP cannot. This skill will not promote to Tier 1 because the endpoint requires Cloudflare cookies — Schrute detects this and keeps it at the browser-proxied tier.
+```
+schrute execute www_coingecko_com.get_24_hours_json.v1 --yes
+```
 
-**What this shows:** Not every skill promotes to direct HTTP. Schrute adapts to the site's security model instead of breaking against it.
+| Step | What happens | Time |
+|------|-------------|------|
+| 1 | Browser-proxied fetch (Playwright) | Blocked by Cloudflare |
+| 2 | Full-browser fetch (Playwright) | Blocked by Cloudflare |
+| 3 | Schrute detects Cloudflare challenge page | ~0ms |
+| 4 | Launches real Chrome, navigates to CoinGecko | Challenge clears (in tested run) |
+| 5 | Retries API call through live Chrome session | **Success** |
+
+- Total latency: **~7,400ms** (includes Chrome launch + challenge clearance)
+- Returned: 288 BTC/USD price data points (24h) with timestamps and volumes
+- Recovery status: `live_chrome_opened`
+
+**What this shows:** Schrute handles Cloudflare-protected sites by escalating to real Chrome when headless Playwright is blocked. In the tested run, Turnstile auto-cleared and execution succeeded on the first call. Sites with interactive CAPTCHAs may require manual clearance in the opened browser window.
 
 ---
 
@@ -235,17 +268,9 @@ Every example below was recorded on 2026-03-17, on macOS (Apple Silicon), over W
 | dog.ceo | `get_all` | 551ms | — | — | None | 3/6 |
 | dog.ceo | `get_random` | 558ms | 472ms | — | None | 3/6 |
 | en.wikipedia.org | `get_api_php` | 1,033ms | — | — | None | 0/4 |
-| www.coingecko.com | `get_24_hours_json` | 9,129ms (fail) | — | — | Cloudflare cookies | — |
+| www.coingecko.com | `get_24_hours_json` | ~7,400ms | — | — | CF cookies | — |
 
-All runs at Tier 3 (browser-proxied). Skills promote to Tier 1 (direct HTTP, ~5-50ms) after 5+ consecutive successful validations. Cloudflare-protected skills remain at Tier 3.
-
-**Methodology:**
-- Machine: MacBook (Apple Silicon)
-- Network: WiFi, India
-- Browser engine: Playwright Chromium
-- Cache state: warm (browser session open)
-- Timing: `latencyMs` field from Schrute execution result
-- Date tested: 2026-03-17
+All runs at Tier 3 (browser-proxied) except CoinGecko which uses live-Chrome recovery. Skills promote to Tier 1 (direct HTTP, ~5-50ms) after 5+ consecutive successful validations. Cloudflare-protected skills remain at Tier 3 with real-Chrome fallback.
 
 ## Where Schrute works best
 
@@ -287,7 +312,7 @@ Before a learned skill executes, Schrute enforces:
 
 Dangerous browser tools (`browser_evaluate`, `browser_run_code`) are blocked entirely.
 
-For the full 9-gate security model, see [SECURITY.md](SECURITY.md).
+For the full security model, see [SECURITY.md](SECURITY.md).
 
 ## Auth, cookies, and storage
 

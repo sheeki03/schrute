@@ -159,7 +159,8 @@ describe('v0.2 MCP HTTP — Skill Tool Conversion', () => {
     ] as any[];
 
     const result = rankToolsByIntent(skills, 'login', 2);
-    expect(result.length).toBe(2);
+    // Only the 'login' skill lexically matches the query
+    expect(result.length).toBe(1);
     expect(result[0].name).toBe('login');
   });
 });

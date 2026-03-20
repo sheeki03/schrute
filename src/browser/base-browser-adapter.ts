@@ -924,7 +924,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       case 'browser_fill_form': {
         const values = args.values;
         if (typeof values !== 'object' || values === null || Array.isArray(values)) {
-          throw new Error('Expected values to be a Record<string, string>');
+          throw new Error(
+            'browser_fill_form expects { values: { "<label|name|@ref>": "value", ... } }. ' +
+            'Keys can be field labels, input name attributes, or @e refs from browser_snapshot. ' +
+            'For single-field input, use browser_type instead.'
+          );
         }
         await this.fillForm(values as Record<string, string>);
         return { success: true };

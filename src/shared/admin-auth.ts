@@ -14,5 +14,7 @@ import type { SchruteConfig } from '../skill/types.js';
 export function isAdminCaller(callerId: string | undefined, config: SchruteConfig): boolean {
   if (!config.server.network) return true;  // localhost-only: everyone is admin
   if (!callerId) return true;               // no callerId = legacy/CLI = trusted
-  return callerId === 'stdio' || callerId === 'daemon';
+  if (callerId === 'stdio' || callerId === 'daemon') return true;
+  if (config.server.mcpHttpAdmin && callerId.startsWith('mcp-http:')) return true;
+  return false;
 }

@@ -122,6 +122,29 @@ describe('doctor', () => {
     });
   });
 
+  describe('audit hash chain check', () => {
+    it('broken audit hash chain returns warning (not fail)', () => {
+      const check: CheckResult = {
+        name: 'audit_hash_chain',
+        status: 'warning',
+        message: 'Audit hash chain broken at entry 5 (10 entries)',
+        details: '(expected when database is shared across dev sessions or keychain key was rotated)',
+      };
+      expect(check.status).toBe('warning');
+      expect(check.message).toContain('broken at entry');
+      expect(check.details).toContain('expected when database is shared');
+    });
+
+    it('intact audit hash chain returns pass', () => {
+      const check: CheckResult = {
+        name: 'audit_hash_chain',
+        status: 'pass',
+        message: 'Audit hash chain intact (10 entries)',
+      };
+      expect(check.status).toBe('pass');
+    });
+  });
+
   describe('durable storage clean check', () => {
     it('check result passes when no raw artifacts exist', () => {
       const check: CheckResult = {

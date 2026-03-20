@@ -1073,6 +1073,14 @@ export async function dispatchToolCall(
           }
           try {
             const r = await engine.executeSkill(skill.id, action.params ?? {}, callerId);
+            if (!r.success && r.failureCause === 'rate_limited') {
+              const parsed = parseInt(r.failureDetail?.match(/(\d+)ms/)?.[1] ?? '1000');
+              const waitMs = Math.min(Math.max(parsed, 100), 30_000);
+              await new Promise(resolve => setTimeout(resolve, waitMs + 50));
+              const retry = await engine.executeSkill(skill.id, action.params ?? {}, callerId);
+              results.push({ skillId: action.skillId, success: retry.success, data: retry.data, error: retry.error });
+              continue;
+            }
             results.push({ skillId: action.skillId, success: r.success, data: r.data, error: r.error });
           } catch (err) {
             results.push({ skillId: action.skillId, success: false, error: err instanceof Error ? err.message : String(err) });

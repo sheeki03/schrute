@@ -15,10 +15,10 @@
     }
   },
   "bin": {
-    "schrute": "dist/index.js"
+    "schrute": "bin/schrute.cjs"
   },
   "scripts": {
-    "prebuild": "node scripts/sync-version.js",
+    "prebuild": "node -e \"if(parseInt(process.version.slice(1))<22){console.error('Node>=22 required');process.exit(1)}\" && node scripts/sync-version.js",
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "node scripts/sync-version.js && npm run build",
     "build:native": "cd native && cargo build --release && cp target/release/libschrute_native.dylib index.node 2>/dev/null; cp target/release/schrute_native.dll index.node 2>/dev/null; cp target/release/libschrute_native.so index.node 2>/dev/null; echo 'Native build complete'",
@@ -27,10 +27,10 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit",
-    "start": "node dist/index.js",
-    "serve": "node dist/index.js serve",
-    "setup": "node dist/index.js setup",
-    "doctor": "node dist/index.js doctor",
+    "start": "node bin/schrute.cjs",
+    "serve": "node bin/schrute.cjs serve",
+    "setup": "node bin/schrute.cjs setup",
+    "doctor": "node bin/schrute.cjs doctor",
     "rebuild:native": "bash scripts/rebuild-native.sh",
     "build:binary": "npm run build && pkg dist/index.js --config pkg.config.json",
     "build:binary:macos": "npm run build:binary -- --target node22-macos-arm64",
@@ -91,6 +91,7 @@
     "schrute"
   ],
   "files": [
+    "bin/",
     "dist/",
     ".claude-plugin/",
     "commands/",

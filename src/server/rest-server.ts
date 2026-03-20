@@ -174,6 +174,28 @@ export async function createRestServer(options?: {
     logger: false,
   });
 
+  // ─── Empty Body Parser ──────────────────────────────────
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    if (!body || (typeof body === 'string' && body.trim() === '')) {
+      done(null, {});
+    } else {
+      try { done(null, JSON.parse(body as string)); }
+      catch (e) { done(e as Error, undefined); }
+    }
+  });
+
+  // ─── v0 Deprecation Header ─────────────────────────────
+  const DEPRECATION_EXEMPT = new Set(['/api/health', '/api/docs', '/api/openapi.json']);
+
+  app.addHook('onSend', async (request, reply) => {
+    const url = request.url.split('?')[0];
+    if (url.startsWith('/api/') && !url.startsWith('/api/v1/') && !DEPRECATION_EXEMPT.has(url)) {
+      reply.header('Deprecation', 'true');
+      reply.header('Link', '</api/v1/>; rel="successor-version"');
+    }
+  });
+
   // ─── Bearer Token Auth ────────────────────────────────────
   if (config.server.network && config.server.authToken) {
     app.addHook('onRequest', async (request, reply) => {
