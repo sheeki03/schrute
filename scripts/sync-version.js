@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Syncs version from package.json → src/version.ts + .claude-plugin/plugin.json
+// Syncs version from package.json → src/version.ts + release-adjacent metadata
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -15,7 +15,14 @@ if (existsSync(pluginPath)) {
   const plugin = JSON.parse(readFileSync(pluginPath, 'utf8'));
   plugin.version = version;
   writeFileSync(pluginPath, JSON.stringify(plugin, null, 2) + '\n');
-  console.error(`Synced version ${version} to src/version.ts + plugin.json`);
-} else {
-  console.error(`Synced version ${version} to src/version.ts (plugin.json not found — skipping)`);
 }
+
+// 3. Update the local devcontainer feature metadata when present.
+const devcontainerFeaturePath = '.devcontainer/features/cli/devcontainer-feature.json';
+if (existsSync(devcontainerFeaturePath)) {
+  const feature = JSON.parse(readFileSync(devcontainerFeaturePath, 'utf8'));
+  feature.version = version;
+  writeFileSync(devcontainerFeaturePath, JSON.stringify(feature, null, 2) + '\n');
+}
+
+console.error(`Synced version ${version} to src/version.ts and optional release metadata`);

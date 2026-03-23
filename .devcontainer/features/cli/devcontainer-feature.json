@@ -1,7 +1,7 @@
 {
-  "id": "schrute",
-  "version": "0.1.0",
-  "name": "Schrute Browser Agent",
+  "id": "cli",
+  "version": "0.1.1",
+  "name": "Schrute CLI",
   "description": "Self-learning browser agent — record browser actions, learn API patterns, replay as optimized MCP tools",
   "documentationURL": "https://github.com/sheeki03/schrute",
   "options": {
@@ -17,7 +17,11 @@
     },
     "browserEngine": {
       "type": "string",
-      "enum": ["playwright", "patchright", "camoufox"],
+      "enum": [
+        "playwright",
+        "patchright",
+        "camoufox"
+      ],
       "default": "playwright",
       "description": "Browser engine to install"
     }
@@ -25,5 +29,7 @@
   "containerEnv": {
     "SCHRUTE_DATA_DIR": "/home/vscode/.schrute"
   },
-  "installsAfter": ["ghcr.io/devcontainers/features/node:1"]
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/node:1"
+  ]
 }

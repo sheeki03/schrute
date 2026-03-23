@@ -49,6 +49,49 @@ npm install -g schrute
 schrute setup
 ```
 
+## Install
+
+Choose the install path that fits your environment:
+
+- **npm CLI** (recommended)
+
+  ```bash
+  npm install -g schrute
+  schrute setup
+  ```
+
+- **Homebrew**
+
+  ```bash
+  brew install sheeki03/tap/schrute
+  schrute setup
+  ```
+
+- **Docker**
+
+  Pull the image:
+
+  ```bash
+  docker pull ghcr.io/sheeki03/schrute:latest
+  ```
+
+  Then run Schrute with persistent data and an auth token:
+
+  ```bash
+  docker run --rm \
+    -p 3000:3000 \
+    -p 3001:3001 \
+    -e SCHRUTE_AUTH_TOKEN=my-secret \
+    -v schrute-data:/data \
+    ghcr.io/sheeki03/schrute:latest
+  ```
+
+  A Docker Hub mirror can also be published when enabled for the repository.
+
+- **Standalone binaries**
+
+  Download the latest archive for Linux, macOS, or Windows from GitHub Releases, unpack it, and run `schrute`.
+
 If you want to use Schrute from an AI client over MCP:
 
 ```json
@@ -348,6 +391,17 @@ npm run build
 npm test
 npm run dev
 ```
+
+## Release Channels
+
+The primary release surfaces are:
+
+- npm CLI: `schrute`
+- Docker image: GHCR, with an optional Docker Hub mirror
+- GitHub Releases: Linux, macOS, and Windows standalone binaries
+- Homebrew: `sheeki03/tap/schrute`
+
+The devcontainer feature remains in this repository for local development, but it is not published from this repository. That keeps GitHub Packages focused on the main runtime image instead of showing a second package entry for the feature.
 
 ## More
 

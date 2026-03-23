@@ -44,7 +44,7 @@ pkg.version = '${NEW_VERSION}';
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 
-# Sync version to src/version.ts and plugin.json
+# Sync version to src/version.ts and release metadata
 node scripts/sync-version.js
 
 # Build to verify
@@ -54,7 +54,7 @@ npm run build
 npx tsc --noEmit
 
 # Commit, tag, push
-git add package.json src/version.ts .claude-plugin/plugin.json
+git add package.json src/version.ts .claude-plugin/plugin.json .devcontainer/features/cli/devcontainer-feature.json
 git commit -m "release: v${NEW_VERSION}"
 git tag "v${NEW_VERSION}"
 git push origin main "v${NEW_VERSION}"
@@ -63,9 +63,10 @@ echo ""
 echo "Released v${NEW_VERSION}"
 echo "GitHub Actions will now:"
 echo "  1. Publish to npm"
-echo "  2. Build standalone binaries (Linux + macOS)"
-echo "  3. Create GitHub Release with binaries"
-echo "  4. Publish Python SDK to PyPI"
-echo "  5. Update Homebrew formula"
+echo "  2. Publish Docker image to GHCR"
+echo "  3. Mirror Docker image to Docker Hub (if configured)"
+echo "  4. Build standalone binaries (Linux + macOS + Windows)"
+echo "  5. Create GitHub Release with binaries"
+echo "  6. Update Homebrew formula"
 echo ""
 echo "Track progress: https://github.com/sheeki03/schrute/actions"

@@ -5,7 +5,7 @@ VERSION="${VERSION:-latest}"
 INSTALLBROWSER="${INSTALLBROWSER:-true}"
 BROWSERENGINE="${BROWSERENGINE:-playwright}"
 
-echo "Installing Schrute ${VERSION}..."
+echo "Installing Schrute CLI ${VERSION}..."
 
 # Ensure Node.js >= 22 is available
 if ! command -v node &>/dev/null; then
