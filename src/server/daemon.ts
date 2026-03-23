@@ -307,7 +307,7 @@ async function handleRequest(
     if (method === 'GET' && url === '/ctl/sessions') {
       const msm = engine.getMultiSessionManager();
       const activeName = msm.getActive();
-      const sessions = msm.list().map(s => ({
+      const sessions = msm.list(undefined, config, { includeInternal: false }).map(s => ({
         name: s.name,
         siteId: s.siteId,
         isCdp: s.isCdp,

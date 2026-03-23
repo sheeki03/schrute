@@ -156,6 +156,14 @@ export function createRouter(deps: RouterDeps) {
       }
 
       const result = await engine.executeSkill(skill.id, params, callerId);
+      if (result.status === 'browser_handoff_required') {
+        return {
+          success: false,
+          error: result.hint ?? 'Browser handoff required',
+          statusCode: 202,
+          data: result,
+        };
+      }
       if (result.success) {
         return { success: true, data: result };
       }

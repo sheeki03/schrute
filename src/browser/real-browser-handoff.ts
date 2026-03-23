@@ -6,6 +6,15 @@ import type { SchruteConfig } from '../skill/types.js';
 
 const CHROME_PID_FILE = 'chrome.pid';
 const CHROME_META_FILE = 'chrome.meta.json';
+const OWNED_LAUNCH_DIR = 'owned-launches';
+
+export interface OwnedBrowserLaunchMetadata {
+  pid: number;
+  createdAt: number;
+  engine?: string;
+  sessionName?: string;
+  commandHint?: string;
+}
 
 export interface ManagedChromeMetadata {
   pid?: number;
@@ -141,6 +150,55 @@ export function removeManagedChromeMetadata(profileDir: string): void {
   }
 }
 
+export function getOwnedBrowserLaunchRoot(config: SchruteConfig): string {
+  return path.join(getBrowserDataDir(config), OWNED_LAUNCH_DIR);
+}
+
+function getOwnedBrowserLaunchPath(config: SchruteConfig, pid: number): string {
+  return path.join(getOwnedBrowserLaunchRoot(config), `${pid}.json`);
+}
+
+export function writeOwnedBrowserLaunchMetadata(
+  config: SchruteConfig,
+  metadata: OwnedBrowserLaunchMetadata,
+): void {
+  const root = getOwnedBrowserLaunchRoot(config);
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(getOwnedBrowserLaunchPath(config, metadata.pid), JSON.stringify(metadata), { mode: 0o600 });
+}
+
+export function removeOwnedBrowserLaunchMetadata(config: SchruteConfig, pid: number): void {
+  try {
+    fs.rmSync(getOwnedBrowserLaunchPath(config, pid), { force: true });
+  } catch {
+    // Best effort.
+  }
+}
+
+export function listOwnedBrowserLaunchMetadata(config: SchruteConfig): OwnedBrowserLaunchMetadata[] {
+  const root = getOwnedBrowserLaunchRoot(config);
+  if (!fs.existsSync(root)) return [];
+
+  const entries: OwnedBrowserLaunchMetadata[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(root, entry.name), 'utf-8')) as Partial<OwnedBrowserLaunchMetadata>;
+      if (typeof raw.pid !== 'number' || !Number.isInteger(raw.pid)) continue;
+      entries.push({
+        pid: raw.pid,
+        createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+        ...(typeof raw.engine === 'string' ? { engine: raw.engine } : {}),
+        ...(typeof raw.sessionName === 'string' ? { sessionName: raw.sessionName } : {}),
+        ...(typeof raw.commandHint === 'string' ? { commandHint: raw.commandHint } : {}),
+      });
+    } catch {
+      // Skip malformed metadata.
+    }
+  }
+  return entries;
+}
+
 export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -165,26 +223,148 @@ function readProcessCommandLine(pid: number): string | null {
   }
 }
 
-export async function terminateManagedChrome(pid: number): Promise<void> {
-  if (!isProcessAlive(pid)) return;
+function readProcessStartTimeMs(pid: number): number | null {
   try {
-    process.kill(pid, 'SIGTERM');
+    if (process.platform === 'win32') {
+      const isoTimestamp = execFileSync('powershell', [
+        '-NoProfile',
+        '-Command',
+        `$p = Get-Process -Id ${pid} -ErrorAction Stop; $p.StartTime.ToUniversalTime().ToString('o')`,
+      ], { encoding: 'utf-8' }).trim();
+      const parsed = Date.parse(isoTimestamp);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    const raw = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf-8' })
+      .trim()
+      .replace(/\s+/g, ' ');
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
   } catch {
+    return null;
+  }
+}
+
+const OWNED_LAUNCH_START_TIME_TOLERANCE_MS = 120_000;
+
+function canRevalidateOwnedBrowserLaunch(metadata: OwnedBrowserLaunchMetadata): boolean {
+  const startTimeMs = readProcessStartTimeMs(metadata.pid);
+  if (startTimeMs == null) {
+    return false;
+  }
+
+  if (Math.abs(startTimeMs - metadata.createdAt) > OWNED_LAUNCH_START_TIME_TOLERANCE_MS) {
+    return false;
+  }
+
+  const commandLine = readProcessCommandLine(metadata.pid);
+  if (metadata.commandHint && commandLine && !commandLine.includes(metadata.commandHint)) {
+    return false;
+  }
+
+  return true;
+}
+
+function listUnixDescendantPids(pid: number): number[] {
+  try {
+    const rows = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf-8' })
+      .trim()
+      .split(/\r?\n/)
+      .map(line => line.trim().split(/\s+/, 2).map(Number))
+      .filter(parts => parts.length === 2 && Number.isInteger(parts[0]) && Number.isInteger(parts[1]))
+      .map(([childPid, parentPid]) => ({ childPid, parentPid }));
+
+    const byParent = new Map<number, number[]>();
+    for (const row of rows) {
+      const children = byParent.get(row.parentPid) ?? [];
+      children.push(row.childPid);
+      byParent.set(row.parentPid, children);
+    }
+
+    const descendants: number[] = [];
+    const stack = [...(byParent.get(pid) ?? [])];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      descendants.push(current);
+      const children = byParent.get(current);
+      if (children) stack.push(...children);
+    }
+    return descendants;
+  } catch {
+    return [];
+  }
+}
+
+function signalUnixTree(pid: number, signal: NodeJS.Signals, detachedProcessGroup: boolean): void {
+  if (detachedProcessGroup) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall back to explicit child traversal.
+    }
+  }
+
+  const descendants = listUnixDescendantPids(pid);
+  for (const childPid of descendants.reverse()) {
+    try { process.kill(childPid, signal); } catch { /* best effort */ }
+  }
+  try { process.kill(pid, signal); } catch { /* best effort */ }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return !isProcessAlive(pid);
+}
+
+export async function terminateProcessTree(
+  pid: number,
+  options?: { detachedProcessGroup?: boolean },
+): Promise<void> {
+  if (!isProcessAlive(pid)) return;
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
+    } catch {
+      // Best effort.
+    }
     return;
   }
 
-  const deadline = Date.now() + 1000;
-  while (Date.now() < deadline) {
-    if (!isProcessAlive(pid)) return;
-    await new Promise(resolve => setTimeout(resolve, 50));
+  signalUnixTree(pid, 'SIGTERM', options?.detachedProcessGroup === true);
+  if (await waitForProcessExit(pid, 1000)) return;
+  signalUnixTree(pid, 'SIGKILL', options?.detachedProcessGroup === true);
+}
+
+export function terminateProcessTreeSync(
+  pid: number,
+  options?: { detachedProcessGroup?: boolean },
+): void {
+  if (!isProcessAlive(pid)) return;
+
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
+    } catch {
+      // Best effort.
+    }
+    return;
   }
 
-  if (!isProcessAlive(pid)) return;
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch {
-    // Best effort.
-  }
+  signalUnixTree(pid, 'SIGTERM', options?.detachedProcessGroup === true);
+  signalUnixTree(pid, 'SIGKILL', options?.detachedProcessGroup === true);
+}
+
+export async function terminateManagedChrome(pid: number): Promise<void> {
+  await terminateProcessTree(pid, { detachedProcessGroup: process.platform !== 'win32' });
+}
+
+export function terminateManagedChromeSync(pid: number): void {
+  terminateProcessTreeSync(pid, { detachedProcessGroup: process.platform !== 'win32' });
 }
 
 export async function waitForDevToolsActivePort(
@@ -317,9 +497,43 @@ export function cleanupManagedChromeLaunchesSync(config: SchruteConfig): void {
       removeManagedChromeMetadata(profileDir);
       continue;
     }
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch { /* best-effort */ }
+    terminateManagedChromeSync(pid);
     removeManagedChromeMetadata(profileDir);
+  }
+}
+
+export async function cleanupOwnedBrowserLaunches(config: SchruteConfig): Promise<void> {
+  for (const metadata of listOwnedBrowserLaunchMetadata(config)) {
+    if (!isProcessAlive(metadata.pid)) {
+      removeOwnedBrowserLaunchMetadata(config, metadata.pid);
+      continue;
+    }
+
+    // Never kill a reused PID unless we can positively re-establish ownership.
+    if (!canRevalidateOwnedBrowserLaunch(metadata)) {
+      removeOwnedBrowserLaunchMetadata(config, metadata.pid);
+      continue;
+    }
+
+    await terminateProcessTree(metadata.pid);
+    removeOwnedBrowserLaunchMetadata(config, metadata.pid);
+  }
+}
+
+export function cleanupOwnedBrowserLaunchesSync(config: SchruteConfig): void {
+  for (const metadata of listOwnedBrowserLaunchMetadata(config)) {
+    if (!isProcessAlive(metadata.pid)) {
+      removeOwnedBrowserLaunchMetadata(config, metadata.pid);
+      continue;
+    }
+
+    // Exit-handler cleanup stays best-effort, but it still must prove ownership.
+    if (!canRevalidateOwnedBrowserLaunch(metadata)) {
+      removeOwnedBrowserLaunchMetadata(config, metadata.pid);
+      continue;
+    }
+
+    terminateProcessTreeSync(metadata.pid);
+    removeOwnedBrowserLaunchMetadata(config, metadata.pid);
   }
 }
