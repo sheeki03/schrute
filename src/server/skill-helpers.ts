@@ -1,7 +1,7 @@
 import type { SkillSpec } from '../skill/types.js';
 import type { BrowserManager } from '../browser/manager.js';
 import type { SkillRepository } from '../storage/skill-repository.js';
-import { getEffectiveTier } from '../core/tiering.js';
+import { getEffectiveTier, formatPermanentTierLockReason } from '../core/tiering.js';
 import { TierState, SkillStatus } from '../skill/types.js';
 import { rankToolsByIntent, skillToToolDefinition } from './tool-registry.js';
 
@@ -51,7 +51,7 @@ export function getSkillExecutability(
 
 function buildPromotionProgress(skill: SkillSpec): string | undefined {
   if (skill.currentTier === 'tier_1') return 'Promoted to direct';
-  if (skill.tierLock?.type === 'permanent') return `Locked: ${skill.tierLock.reason}`;
+  if (skill.tierLock?.type === 'permanent') return `Locked: ${formatPermanentTierLockReason(skill.tierLock.reason)}`;
   if (skill.directCanaryEligible) return 'Ready for direct canary on next execution';
   if ((skill.directCanaryAttempts ?? 0) > 0 && !skill.directCanaryEligible) {
     return `Canary failed (${skill.lastCanaryErrorType ?? 'unknown'}), ${skill.directCanaryAttempts} attempts`;

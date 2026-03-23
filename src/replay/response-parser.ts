@@ -26,14 +26,30 @@ export function parseResponse(
   skill: SkillSpec,
 ): ParsedResponse {
   const errors: ResponseError[] = [];
+  const contentType = (response.headers['content-type'] ?? skill.responseContentType ?? '').toLowerCase();
+  const isHtmlResponse = contentType.includes('text/html') || contentType.includes('application/xhtml+xml');
 
   // Try parsing the body
   let data: unknown;
-  try {
-    data = JSON.parse(response.body);
-  } catch {
+  if (isHtmlResponse) {
     data = response.body;
-    if (skill.outputSchema && Object.keys(skill.outputSchema).length > 0) {
+  } else {
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      data = response.body;
+      if (skill.outputSchema && Object.keys(skill.outputSchema).length > 0) {
+        errors.push({
+          type: 'parse_error',
+          message: 'Response body is not valid JSON',
+        });
+      }
+    }
+  }
+
+  if (!isHtmlResponse && typeof data === 'string' && skill.outputSchema && Object.keys(skill.outputSchema).length > 0) {
+    const hasParseError = errors.some(error => error.type === 'parse_error');
+    if (!hasParseError) {
       errors.push({
         type: 'parse_error',
         message: 'Response body is not valid JSON',
@@ -76,4 +92,3 @@ export function parseResponse(
 
   return { data, schemaMatch, errors };
 }
-
