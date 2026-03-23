@@ -1,7 +1,11 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { SkillSpec, SiteManifest, SitePolicy } from '../skill/types.js';
-import { validateImportableSkill, validateImportableSite } from '../storage/import-validator.js';
+import {
+  validateImportableSkill,
+  validateImportableSite,
+  validateAndNormalizeImportablePolicy,
+} from '../storage/import-validator.js';
 import { getSitePolicy, setSitePolicy } from '../core/policy.js';
 import type { SkillRepository } from '../storage/skill-repository.js';
 import type { SiteRepository } from '../storage/site-repository.js';
@@ -235,11 +239,11 @@ export async function performImport(
 
   // Phase 2: Policy (separate write — setSitePolicy does its own DB call)
   if (bundle.policy) {
-    const p = bundle.policy;
-    if (p.siteId && p.siteId !== bundle.site.id) {
-      console.error(`Warning: policy siteId '${p.siteId}' does not match site '${bundle.site.id}'. Skipping policy.`);
+    const policyResult = validateAndNormalizeImportablePolicy(bundle.policy, bundle.site.id);
+    if (!policyResult.valid || !policyResult.value) {
+      console.error(`Warning: policy import failed validation: ${policyResult.errors.join('; ')}`);
     } else {
-      p.siteId = bundle.site.id;
+      const p = policyResult.value;
       try {
         const result = setSitePolicy(p, deps.config);
         if (!result.persisted) {

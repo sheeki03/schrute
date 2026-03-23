@@ -310,6 +310,74 @@ export const META_TOOLS = [
     },
   },
   {
+    name: 'schrute_set_transform',
+    description: 'Set or clear an output transform for a skill',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to update' },
+        transform: {
+          type: 'object',
+          description: 'Output transform definition',
+          additionalProperties: true,
+        },
+        responseContentType: {
+          type: 'string',
+          description: 'Optional response content type override, e.g. text/html',
+        },
+        clear: {
+          type: 'boolean',
+          description: 'Clear the current transform',
+        },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_export_skill',
+    description: 'Export a skill as standalone curl, fetch, Python, or Playwright code',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to export' },
+        format: {
+          type: 'string',
+          enum: ['curl', 'fetch.ts', 'requests.py', 'playwright.ts'],
+          description: 'Output format',
+        },
+        params: {
+          type: 'object',
+          description: 'Optional params used to resolve the request URL, headers, and body',
+          additionalProperties: true,
+        },
+      },
+      required: ['skillId', 'format'],
+    },
+  },
+  {
+    name: 'schrute_create_workflow',
+    description: 'Create a read-only linear workflow skill from existing active GET/HEAD skills',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        siteId: { type: 'string', description: 'Site ID that owns the workflow' },
+        name: { type: 'string', description: 'Workflow name' },
+        description: { type: 'string', description: 'Optional workflow description' },
+        workflowSpec: {
+          type: 'object',
+          description: 'Workflow specification with ordered steps',
+          additionalProperties: true,
+        },
+        outputTransform: {
+          type: 'object',
+          description: 'Optional transform applied to the final workflow output',
+          additionalProperties: true,
+        },
+      },
+      required: ['siteId', 'name', 'workflowSpec'],
+    },
+  },
+  {
     name: 'schrute_confirm',
     description: 'Confirm or deny first-run of a newly-active skill',
     inputSchema: {

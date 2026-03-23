@@ -37,11 +37,36 @@ export interface SkillSummary {
   currentTier: TierState;
 }
 
-export interface ExecuteSkillResponse {
+export interface ExecuteSkillCompletedResponse {
   success: boolean;
   data?: unknown;
   error?: string;
+  failureCause?: string;
+  failureDetail?: string;
+  latencyMs?: number;
 }
+
+export interface ExecuteBrowserHandoffRequiredResponse {
+  status: 'browser_handoff_required';
+  success: false;
+  reason: 'cloudflare_challenge';
+  recoveryMode: 'real_browser_cdp';
+  siteId: string;
+  url: string;
+  hint: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+  session?: string;
+  managedBrowser?: boolean;
+  failureCause?: string;
+  failureDetail?: string;
+  latencyMs: number;
+}
+
+export type ExecuteSkillResponse =
+  | ExecuteSkillCompletedResponse
+  | ConfirmationRequired
+  | ExecuteBrowserHandoffRequiredResponse;
 
 export interface ConfirmationRequired {
   status: 'confirmation_required';
@@ -138,6 +163,8 @@ export interface StopResponse {
 export interface PipelineJobResult {
   skillsGenerated: number;
   signalCount: number;
+  htmlDocumentCount?: number;
+  ambiguousCount?: number;
   noiseCount: number;
   totalCount: number;
   warning?: string;

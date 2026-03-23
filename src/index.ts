@@ -19,6 +19,7 @@ import { validateSkill } from './skill/validator.js';
 import { validateImportableSkill, validateImportableSite } from './storage/import-validator.js';
 import type { SkillSpec, SiteManifest, SitePolicy } from './skill/types.js';
 import { getSitePolicy } from './core/policy.js';
+import { formatPermanentTierLockReason } from './core/tiering.js';
 import { VERSION } from './version.js';
 import { ConfigError } from './core/config.js';
 
@@ -50,6 +51,14 @@ function outputResult(data: unknown): void {
   } else {
     // Pretty-printed for human consumption
     console.log(JSON.stringify(data, null, 2));
+  }
+}
+
+function parseJsonInput<T>(label: string, value: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch (err) {
+    throw new Error(`Invalid ${label} JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -306,6 +315,40 @@ program
     }
   });
 
+// ─── pipeline ───────────────────────────────────────────────────
+
+program
+  .command('pipeline <jobId>')
+  .description('Show background pipeline job status')
+  .addHelpText('after', '\n(requires local daemon or --url)')
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (jobId: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
+    if (remote) {
+      try {
+        const result = await remote.getPipelineStatus(jobId);
+        outputResult(result);
+      } catch (err) {
+        console.error('Error:', err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+
+    const client = createDaemonClient(config);
+    try {
+      const result = await client.request('GET', `/ctl/pipeline/${encodeURIComponent(jobId)}`);
+      outputResult(result);
+    } catch (err) {
+      console.error('Error:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
 // ─── skills ─────────────────────────────────────────────────────
 
 const skillsCmd = program
@@ -503,7 +546,7 @@ skillsCmd
     if (skill.currentTier === 'tier_1') {
       // skip — already direct
     } else if (skill.tierLock?.type === 'permanent') {
-      whyNotDirect = `Permanently locked: ${skill.tierLock.reason}`;
+      whyNotDirect = `Permanently locked: ${formatPermanentTierLockReason(skill.tierLock.reason)}`;
     } else if ((skill.directCanaryAttempts ?? 0) > 0 && !skill.directCanaryEligible) {
       whyNotDirect = `Direct canary failed (${skill.lastCanaryErrorType ?? 'unknown'}). ${skill.directCanaryAttempts} attempts.`;
     } else if (skill.directCanaryEligible) {
@@ -520,6 +563,121 @@ skillsCmd
     }
 
     console.log(JSON.stringify(output, null, 2));
+    closeDatabase();
+  });
+
+skillsCmd
+  .command('set-transform <skill_id>')
+  .description('Set or clear a skill output transform')
+  .option('--transform <json>', 'Transform JSON definition')
+  .option('--response-content-type <type>', 'Override response content type, e.g. text/html')
+  .option('--clear', 'Clear the current transform')
+  .action((skillId: string, options: { transform?: string; responseContentType?: string; clear?: boolean }) => {
+    if (options.clear && options.transform) {
+      console.error('Error: --clear cannot be combined with --transform.');
+      process.exit(1);
+    }
+    if (!options.clear && !options.transform && !options.responseContentType) {
+      console.error('Error: provide --transform, --response-content-type, or --clear.');
+      process.exit(1);
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    let transform = undefined;
+    if (options.transform) {
+      try {
+        transform = parseJsonInput<SkillSpec['outputTransform']>('transform', options.transform);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        closeDatabase();
+        process.exit(1);
+      }
+    }
+
+    const nextSkill: SkillSpec = {
+      ...skill,
+      ...(options.clear ? { outputTransform: undefined } : {}),
+      ...(transform !== undefined ? { outputTransform: transform } : {}),
+      ...(options.responseContentType !== undefined ? { responseContentType: options.responseContentType } : {}),
+    };
+    const validation = validateImportableSkill(nextSkill);
+    if (!validation.valid) {
+      console.error(`Error: ${validation.errors.join('; ')}`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    skillRepo.update(skill.id, {
+      ...(options.clear ? { outputTransform: null as unknown as SkillSpec['outputTransform'] } : {}),
+      ...(transform !== undefined ? { outputTransform: transform } : {}),
+      ...(options.responseContentType !== undefined ? { responseContentType: options.responseContentType } : {}),
+    });
+
+    const updated = skillRepo.getById(skill.id);
+    console.log(JSON.stringify({
+      updated: true,
+      skillId: skill.id,
+      outputTransform: updated?.outputTransform,
+      responseContentType: updated?.responseContentType,
+    }, null, 2));
+    closeDatabase();
+  });
+
+skillsCmd
+  .command('export <skill_id>')
+  .description('Export a skill as standalone code')
+  .requiredOption('--format <format>', 'Export format: curl, fetch.ts, requests.py, playwright.ts')
+  .option('--params <json>', 'Parameter JSON used to resolve the request')
+  .action(async (skillId: string, options: { format: string; params?: string }) => {
+    const format = options.format as 'curl' | 'fetch.ts' | 'requests.py' | 'playwright.ts';
+    if (!['curl', 'fetch.ts', 'requests.py', 'playwright.ts'].includes(format)) {
+      console.error(`Invalid format '${options.format}'. Valid: curl, fetch.ts, requests.py, playwright.ts`);
+      process.exit(1);
+    }
+
+    let params: Record<string, unknown> | undefined;
+    if (options.params) {
+      try {
+        params = parseJsonInput<Record<string, unknown>>('params', options.params);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const { generateExport } = await import('./skill/generator.js');
+    const code = generateExport(skill, format, params);
+
+    if (program.opts<{ json?: boolean }>().json) {
+      outputResult({ skillId, format, code });
+    } else {
+      console.log(code);
+    }
     closeDatabase();
   });
 
@@ -864,6 +1022,116 @@ skillsCmd
     }
 
     closeDatabase();
+  });
+
+const workflowCmd = program
+  .command('workflow')
+  .description('Manage linear workflow skills');
+
+workflowCmd
+  .command('create')
+  .description('Create a workflow skill from existing active read-only skills')
+  .requiredOption('--site <siteId>', 'Site ID that owns the workflow')
+  .requiredOption('--name <name>', 'Workflow name')
+  .requiredOption('--spec <json>', 'WorkflowSpec JSON')
+  .option('--description <text>', 'Workflow description')
+  .option('--output-transform <json>', 'Optional final output transform JSON')
+  .action(async (options: { site: string; name: string; spec: string; description?: string; outputTransform?: string }) => {
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const siteRepo = new SiteRepository(db);
+    if (!siteRepo.getById(options.site)) {
+      console.error(`Site '${options.site}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    let workflowSpec: SkillSpec['workflowSpec'];
+    let outputTransform: SkillSpec['outputTransform'];
+    try {
+      workflowSpec = parseJsonInput<SkillSpec['workflowSpec']>('workflow spec', options.spec);
+      outputTransform = options.outputTransform
+        ? parseJsonInput<SkillSpec['outputTransform']>('output transform', options.outputTransform)
+        : undefined;
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const { generateWorkflowSkill } = await import('./skill/generator.js');
+    const workflowSkill = generateWorkflowSkill(options.site, options.name, workflowSpec!, {
+      description: options.description,
+      outputTransform,
+    });
+
+    const skillRepo = new SkillRepository(db);
+    if (skillRepo.getById(workflowSkill.id)) {
+      console.error(`Skill '${workflowSkill.id}' already exists.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const validation = validateImportableSkill(workflowSkill);
+    if (!validation.valid) {
+      console.error(`Error: ${validation.errors.join('; ')}`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    skillRepo.create(workflowSkill);
+    outputResult({
+      created: true,
+      skillId: workflowSkill.id,
+      workflowSpec: workflowSkill.workflowSpec,
+    });
+    closeDatabase();
+  });
+
+workflowCmd
+  .command('run <skill_id>')
+  .description('Run a workflow skill locally')
+  .option('--params <json>', 'Initial params as JSON')
+  .action(async (skillId: string, options: { params?: string }) => {
+    let params: Record<string, unknown> = {};
+    if (options.params) {
+      try {
+        params = parseJsonInput<Record<string, unknown>>('params', options.params);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+    if (!skill.workflowSpec) {
+      console.error(`Skill '${skillId}' is not a workflow.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const engine = new Engine(config);
+    try {
+      const result = await engine.executeSkill(skill.id, params);
+      outputResult(result);
+    } finally {
+      await engine.close();
+      closeDatabase();
+    }
   });
 
 // ─── execute ────────────────────────────────────────────────────

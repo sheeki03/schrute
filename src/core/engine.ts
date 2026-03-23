@@ -33,17 +33,25 @@ import { getFlags } from '../browser/feature-flags.js';
 import { BrowserManager, ContextOverrideMismatchError, stableStringify } from '../browser/manager.js';
 import type { ContextOverrides } from '../browser/manager.js';
 import { BrowserPool } from '../browser/pool.js';
-import { MultiSessionManager, DEFAULT_SESSION_NAME } from '../browser/multi-session.js';
+import { MultiSessionManager, DEFAULT_SESSION_NAME, type NamedSessionKind } from '../browser/multi-session.js';
 import type { BrowserBackend } from '../browser/backend.js';
 import { BrowserAuthStore } from '../browser/auth-store.js';
 import { AuthCoordinator } from '../browser/auth-coordinator.js';
-import { AgentBrowserBackend } from '../browser/agent-browser-backend.js';
+import {
+  AgentBrowserBackend,
+} from '../browser/agent-browser-backend.js';
+import {
+  cleanupAgentBrowserSessions,
+  cleanupAgentBrowserSessionsSync,
+} from '../browser/agent-browser-cleanup.js';
 import { PlaywrightBackend } from '../browser/playwright-backend.js';
 import { LiveChromeBackend } from '../browser/live-chrome-backend.js';
 import { BoundedMap } from '../shared/bounded-map.js';
 import {
   cleanupManagedChromeLaunches,
   cleanupManagedChromeLaunchesSync,
+  cleanupOwnedBrowserLaunches,
+  cleanupOwnedBrowserLaunchesSync,
   listManagedChromeMetadata,
   launchManagedChrome,
   removeManagedChromeMetadata,
@@ -63,7 +71,12 @@ import { classifySite } from '../automation/classifier.js';
 import { updateStrategy } from '../automation/strategy.js';
 import type { NetworkEntry } from '../skill/types.js';
 import { canPromote, promoteSkill } from './promotion.js';
-import { handleFailure, getEffectiveTier, checkPromotion } from './tiering.js';
+import {
+  handleFailure,
+  getEffectiveTier,
+  checkPromotion,
+  sanitizeSiteRecommendedTier,
+} from './tiering.js';
 import { detectDrift } from '../healing/diff-engine.js';
 import { monitorSkills, shouldNudge } from '../healing/monitor.js';
 import { AmendmentEngine } from '../healing/amendment.js';
@@ -86,6 +99,8 @@ import { loadCachedTools } from '../discovery/webmcp-scanner.js';
 import { SkillStatus } from '../skill/types.js';
 import type { GeoEmulationConfig, PermanentTierLock, ExecutionTierName } from '../skill/types.js';
 import { withTimeout } from './utils.js';
+import { applyTransform } from '../replay/transform.js';
+import { executeWorkflow, type WorkflowCacheEntry } from '../replay/workflow-executor.js';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -109,6 +124,7 @@ export interface EngineStatus {
     promoted: number;
     skippedNoParams: number;
     skippedRateLimited: number;
+    skippedBrowserRequired: number;
     lastCycleProcessed: number;
   };
 }
@@ -139,6 +155,8 @@ export interface PipelineJob {
   result?: {
     skillsGenerated: number;
     signalCount: number;
+    htmlDocumentCount?: number;
+    ambiguousCount?: number;
     noiseCount: number;
     totalCount: number;
     warning?: string;
@@ -190,6 +208,7 @@ export interface RecoverExploreResult {
 interface RecoveryState {
   resumeToken: string;
   recoveryId: string;
+  recoveryKind: 'explore' | 'execute';
   siteId: string;
   url: string;
   hint: string;
@@ -209,12 +228,64 @@ interface RecoveryState {
 
 export interface SkillExecutionResult {
   success: boolean;
+  status?: 'browser_handoff_required';
   data?: unknown;
+  transformApplied?: boolean;
+  transformLabel?: string;
   error?: string;
   failureCause?: string;
   failureDetail?: string;
+  probeSuppressed?: boolean;
+  reason?: 'cloudflare_challenge';
+  recoveryMode?: 'real_browser_cdp';
+  siteId?: string;
+  url?: string;
+  hint?: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+  session?: string;
+  managedBrowser?: boolean;
   latencyMs: number;
 }
+
+export interface BatchSkillAction {
+  skillId: string;
+  params?: Record<string, unknown>;
+}
+
+export interface BatchSkillResult {
+  skillId: string;
+  success: boolean;
+  status?: SkillExecutionResult['status'];
+  data?: unknown;
+  transformApplied?: boolean;
+  transformLabel?: string;
+  error?: string;
+  failureCause?: string;
+  failureDetail?: string;
+  reason?: SkillExecutionResult['reason'];
+  recoveryMode?: SkillExecutionResult['recoveryMode'];
+  siteId?: string;
+  url?: string;
+  hint?: string;
+  resumeToken?: string;
+  advisoryHint?: string;
+  session?: string;
+  managedBrowser?: boolean;
+  latencyMs?: number;
+}
+
+interface SkillExecutionOptions {
+  skipMetrics?: boolean;
+  forceDirectTier?: boolean;
+  skipTransform?: boolean;
+  waitForPermit?: {
+    timeoutMs?: number;
+    minGapMs?: number;
+  };
+}
+
+const WORKFLOW_STEP_PERMIT_TIMEOUT_MS = 30_000;
 
 function formatExecutionError(cause: string, detail: string): string {
   return `Failure: ${cause} — ${detail.replace(/\.+$/, '')}. Use schrute_dry_run to preview.`;
@@ -339,6 +410,7 @@ export class Engine {
     promoted: 0,
     skippedNoParams: 0,
     skippedRateLimited: 0,
+    skippedBrowserRequired: 0,
     lastCycleProcessed: 0,
   };
   private authStore: BrowserAuthStore;
@@ -347,6 +419,11 @@ export class Engine {
   private fallbackExecutionBackend: PlaywrightBackend | null = null;
   private sharedPlaywrightBackends = new Map<string, PlaywrightBackend>();
   private liveChromeBackend?: LiveChromeBackend;
+  private executionBackendGroupIds = new WeakMap<BrowserBackend, string>();
+  private nextExecutionBackendGroupId = 0;
+  private workflowStepCache = new BoundedMap<string, WorkflowCacheEntry>({
+    maxSize: 1_000,
+  });
   private pathTrie?: PathTrie;
 
   constructor(config: SchruteConfig) {
@@ -414,23 +491,27 @@ export class Engine {
     cleanupManagedChromeLaunches(config).catch(err => {
       this.log.debug({ err }, 'Managed Chrome cleanup failed during startup');
     });
+    cleanupOwnedBrowserLaunches(config).catch(err => {
+      this.log.debug({ err }, 'Owned browser launch cleanup failed during startup');
+    });
+    cleanupAgentBrowserSessions(config).catch(err => {
+      this.log.debug({ err }, 'Agent-browser cleanup failed during startup');
+    });
 
     // Last-resort exit handler: send SIGTERM to any managed Chrome processes
     // when the MCP server exits unexpectedly (crash, uncaught exception, OOM).
     // process.on('exit') only allows synchronous code, so we use the sync variant.
     this.exitCleanupHandler = () => {
       try { cleanupManagedChromeLaunchesSync(config); } catch { /* best-effort */ }
+      try { cleanupOwnedBrowserLaunchesSync(config); } catch { /* best-effort */ }
+      try { cleanupAgentBrowserSessionsSync(config); } catch { /* best-effort */ }
     };
     process.on('exit', this.exitCleanupHandler);
 
     // HMAC key init is deferred to first skill execution (lazy) to avoid
     // blocking constructor and leaking promises when no skills are executed.
 
-    // Session sweep: clean up idle named sessions every 15 minutes
-    this.sessionSweepInterval = setInterval(() => {
-      this.multiSessionManager.sweepIdleSessions(3600_000);
-    }, 900_000);
-    this.sessionSweepInterval.unref();
+    this.startSessionSweep();
 
     // WS-10: Background sweep for stale/broken skills (every 6 hours)
     this.sweepInterval = setInterval(() => {
@@ -545,6 +626,85 @@ export class Engine {
   getAuthStore(): BrowserAuthStore { return this.authStore; }
   getAuthCoordinator(): AuthCoordinator { return this.authCoordinator; }
 
+  private getConfiguredBrowserIdleTimeoutMs(): number {
+    return this.config.browser?.idleTimeoutMs ?? 300_000;
+  }
+
+  private getRecoveryIdleTimeoutMs(): number {
+    const configuredIdleMs = this.getConfiguredBrowserIdleTimeoutMs();
+    return configuredIdleMs > 0 ? configuredIdleMs : 20 * 60 * 1000;
+  }
+
+  private getExecuteRecoveryIdleTimeoutMs(): number {
+    const configuredIdleMs = this.getConfiguredBrowserIdleTimeoutMs();
+    if (configuredIdleMs <= 0) {
+      return 60_000;
+    }
+    return Math.min(configuredIdleMs, 60_000);
+  }
+
+  private getSessionSweepIntervalMs(): number {
+    const smallestIdleMs = Math.min(
+      this.getRecoveryIdleTimeoutMs(),
+      this.getExecuteRecoveryIdleTimeoutMs(),
+    );
+    return Math.min(60_000, Math.max(15_000, Math.floor(smallestIdleMs / 2)));
+  }
+
+  private startSessionSweep(): void {
+    const intervalMs = this.getSessionSweepIntervalMs();
+    this.sessionSweepInterval = setInterval(() => {
+      this.sweepIdleNamedSessions().catch(err => {
+        this.log.warn({ err }, 'Idle session sweep failed');
+      });
+    }, intervalMs);
+    this.sessionSweepInterval.unref();
+  }
+
+  private async sweepIdleNamedSessions(): Promise<void> {
+    if (this.isClosing) return;
+
+    const now = Date.now();
+    const recoveryIdleMs = this.getRecoveryIdleTimeoutMs();
+    const executeRecoveryIdleMs = this.getExecuteRecoveryIdleTimeoutMs();
+    const agentBrowserIdleMs = this.getConfiguredBrowserIdleTimeoutMs();
+    const manualCdpIdleMs = 20 * 60 * 1000;
+    const launchIdleMs = 3600_000;
+    const sessions = this.multiSessionManager.list(undefined, this.config);
+
+    for (const session of sessions) {
+      if (session.name === DEFAULT_SESSION_NAME) continue;
+
+      const idleMs = now - session.lastUsedAt;
+
+      if (session.sessionKind === 'recovery_execute_cdp') {
+        if (idleMs <= executeRecoveryIdleMs) continue;
+      } else if (session.sessionKind === 'recovery_explore_cdp') {
+        if (this.mode === 'exploring' || this.mode === 'recording') continue;
+        if (this.exploreSessionName === session.name) continue;
+        if (idleMs <= recoveryIdleMs) continue;
+      } else if (session.isCdp) {
+        if (idleMs <= manualCdpIdleMs) continue;
+      } else if (idleMs <= launchIdleMs) {
+        continue;
+      }
+
+      try {
+        await this.multiSessionManager.close(session.name, { force: true, engineMode: this.mode });
+      } catch (err) {
+        this.log.warn({ err, session: session.name }, 'Session sweep close failed');
+      }
+    }
+
+    if (agentBrowserIdleMs > 0) {
+      try {
+        await this.agentBrowserBackend.sweepIdleSessions(agentBrowserIdleMs);
+      } catch (err) {
+        this.log.warn({ err }, 'Agent-browser idle session sweep failed');
+      }
+    }
+  }
+
   private cleanupStaleRecoveryPolicies(): void {
     try {
       const db = getDatabase(this.config);
@@ -646,6 +806,16 @@ export class Engine {
     return this.fallbackExecutionBackend;
   }
 
+  resolveExecutionGroupKey(skill: SkillSpec): string {
+    try {
+      const backend = this.getExecutionBackend(skill.siteId);
+      return `${skill.siteId}|${this.getOrCreateExecutionBackendGroupId(backend)}`;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return `${skill.siteId}|unresolved|${detail}`;
+    }
+  }
+
   private getOrCreateSharedPlaywrightBackend(sessionName: string, manager: BrowserManager): PlaywrightBackend {
     let backend = this.sharedPlaywrightBackends.get(sessionName);
     if (!backend) {
@@ -653,6 +823,16 @@ export class Engine {
       this.sharedPlaywrightBackends.set(sessionName, backend);
     }
     return backend;
+  }
+
+  private getOrCreateExecutionBackendGroupId(backend: BrowserBackend): string {
+    const existing = this.executionBackendGroupIds.get(backend);
+    if (existing) {
+      return existing;
+    }
+    const created = `backend-${this.nextExecutionBackendGroupId++}`;
+    this.executionBackendGroupIds.set(backend, created);
+    return created;
   }
 
   drainWarnings(): string[] {
@@ -702,10 +882,10 @@ export class Engine {
     return 'Cloudflare challenge detected. Call schrute_recover_explore to continue in real Chrome.';
   }
 
-  private getRecoveryBySiteId(siteId: string): RecoveryState | undefined {
+  private getRecoveryBySiteId(siteId: string, recoveryKind: RecoveryState['recoveryKind']): RecoveryState | undefined {
     let match: RecoveryState | undefined;
     for (const entry of this.recoveries.values()) {
-      if (entry.siteId === siteId && entry.currentState !== 'ready') {
+      if (entry.siteId === siteId && entry.recoveryKind === recoveryKind && entry.currentState !== 'ready') {
         if (!match || entry.createdAt > match.createdAt) {
           match = entry;
         }
@@ -734,8 +914,43 @@ export class Engine {
     };
   }
 
-  private upsertPendingRecovery(siteId: string, url: string, overrides?: ContextOverrides): RecoveryState {
-    const existing = this.getRecoveryBySiteId(siteId);
+  private createRecoveryState(
+    siteId: string,
+    url: string,
+    overrides: ContextOverrides | undefined,
+    recoveryKind: RecoveryState['recoveryKind'],
+  ): RecoveryState {
+    const recoveryId = randomUUID();
+    const resumeToken = randomUUID();
+    const cdpSessionName = `__recovery_${createHash('sha256').update(recoveryId).digest('hex').slice(0, 16)}`;
+    const managedProfileDir = path.join(this.config.dataDir, 'browser-data', 'live-chrome', recoveryId);
+    const createdAt = Date.now();
+    return {
+      resumeToken,
+      recoveryId,
+      recoveryKind,
+      siteId,
+      url,
+      hint: this.buildRecoveryHint(overrides),
+      createdAt,
+      cdpSessionName,
+      managedProfileDir,
+      managedBrowser: false,
+      exploreSessionNameBeforeRecovery: this.exploreSessionName,
+      currentState: 'pending',
+      advisoryHint: this.getCloudflareAdvisoryHint(),
+      overrides,
+      autoRecoverSupported: this.isAutomaticRecoverySupported(overrides),
+    };
+  }
+
+  private upsertPendingRecovery(
+    siteId: string,
+    url: string,
+    overrides?: ContextOverrides,
+    recoveryKind: RecoveryState['recoveryKind'] = 'explore',
+  ): RecoveryState {
+    const existing = this.getRecoveryBySiteId(siteId, recoveryKind);
     const autoRecoverSupported = this.isAutomaticRecoverySupported(overrides);
     const advisoryHint = this.getCloudflareAdvisoryHint();
     const hint = this.buildRecoveryHint(overrides);
@@ -751,29 +966,61 @@ export class Engine {
       return existing;
     }
 
-    const recoveryId = randomUUID();
-    const resumeToken = randomUUID();
-    const cdpSessionName = `__recovery_${createHash('sha256').update(recoveryId).digest('hex').slice(0, 16)}`;
-    const managedProfileDir = path.join(this.config.dataDir, 'browser-data', 'live-chrome', recoveryId);
-    const createdAt = Date.now();
-    const entry: RecoveryState = {
-      resumeToken,
-      recoveryId,
-      siteId,
-      url,
-      hint,
-      createdAt,
-      cdpSessionName,
-      managedProfileDir,
-      managedBrowser: false,
-      exploreSessionNameBeforeRecovery: this.exploreSessionName,
-      currentState: 'pending',
-      advisoryHint,
-      overrides,
-      autoRecoverSupported,
-    };
-    this.recoveries.set(resumeToken, entry);
+    const entry = this.createRecoveryState(siteId, url, overrides, recoveryKind);
+    entry.hint = hint;
+    entry.autoRecoverSupported = autoRecoverSupported;
+    entry.advisoryHint = advisoryHint;
+    this.recoveries.set(entry.resumeToken, entry);
     return entry;
+  }
+
+  private async ensureBrowserRequiredExecutionSession(skill: SkillSpec): Promise<void> {
+    if (!this.liveChromeBackend) {
+      return;
+    }
+
+    const currentPolicy = getSitePolicy(skill.siteId, this.config);
+    if (
+      currentPolicy.executionBackend === 'live-chrome'
+      && this.liveChromeBackend.findSession(skill.siteId, currentPolicy.executionSessionName)
+    ) {
+      return;
+    }
+
+    const bootstrapUrl = `https://${skill.allowedDomains[0] ?? skill.siteId}`;
+    const recovery = this.createRecoveryState(skill.siteId, bootstrapUrl, undefined, 'execute');
+
+    try {
+      const { managedBrowser } = await this.connectRecoverySession(recovery);
+      recovery.managedBrowser = managedBrowser;
+      await this.bindRecoveryPolicy(recovery);
+      await this.alignRecoveryPage(recovery);
+    } catch (err) {
+      this.log.warn({ err, siteId: skill.siteId }, 'Browser-required execution bootstrap failed');
+    }
+  }
+
+  private getRecoverySessionKind(recoveryKind: RecoveryState['recoveryKind']): NamedSessionKind {
+    return recoveryKind === 'execute' ? 'recovery_execute_cdp' : 'recovery_explore_cdp';
+  }
+
+  private getBoundExecutionSession(siteId: string) {
+    const policy = getSitePolicy(siteId, this.config);
+    if (policy.executionBackend !== 'live-chrome' || !policy.executionSessionName) {
+      return undefined;
+    }
+
+    const session = this.multiSessionManager.peek(policy.executionSessionName);
+    if (!session || !session.isCdp || session.siteId !== siteId) {
+      return undefined;
+    }
+
+    const browser = session.browserManager.getBrowser();
+    if (!browser?.isConnected()) {
+      return undefined;
+    }
+
+    return session;
   }
 
   private toHandoffResult(entry: RecoveryState): ExploreHandoffRequiredResult {
@@ -787,6 +1034,116 @@ export class Engine {
       ...(entry.autoRecoverSupported ? { resumeToken: entry.resumeToken } : {}),
       ...(entry.advisoryHint ? { advisoryHint: entry.advisoryHint } : {}),
     };
+  }
+
+  private toExecutionHandoffResult(
+    entry: RecoveryState,
+    latencyMs: number,
+    extra?: { session?: string; managedBrowser?: boolean; failureDetail?: string },
+  ): SkillExecutionResult {
+    const handoff = this.toHandoffResult(entry);
+    return {
+      success: false,
+      status: 'browser_handoff_required',
+      reason: handoff.reason,
+      recoveryMode: handoff.recoveryMode,
+      siteId: handoff.siteId,
+      url: handoff.url,
+      hint: handoff.hint,
+      ...(handoff.resumeToken ? { resumeToken: handoff.resumeToken } : {}),
+      ...(handoff.advisoryHint ? { advisoryHint: handoff.advisoryHint } : {}),
+      ...(extra?.session ? { session: extra.session } : {}),
+      ...(extra?.managedBrowser !== undefined ? { managedBrowser: extra.managedBrowser } : {}),
+      failureCause: FailureCause.CLOUDFLARE_CHALLENGE,
+      ...(extra?.failureDetail ? { failureDetail: extra.failureDetail } : {}),
+      latencyMs,
+    };
+  }
+
+  private async detectExecutionChallenge(
+    skill: SkillSpec,
+    result: Awaited<ReturnType<typeof replayExecuteSkill>>,
+    browserProvider: BrowserProvider | undefined,
+    stepResults: Array<{ tier: ExecutionTierName; failureCause?: string; success: boolean }>,
+  ): Promise<boolean> {
+    if (result.failureCause === FailureCause.CLOUDFLARE_CHALLENGE) {
+      return true;
+    }
+
+    if (stepResults.some(step => step.failureCause === FailureCause.CLOUDFLARE_CHALLENGE)) {
+      return true;
+    }
+
+    if (result.success || !browserProvider) {
+      return false;
+    }
+
+    const currentUrl = browserProvider.getCurrentUrl?.() ?? '';
+    if (/\/cdn-cgi\//i.test(currentUrl)) {
+      return true;
+    }
+
+    if (typeof browserProvider.detectChallengePage === 'function') {
+      try {
+        return await browserProvider.detectChallengePage();
+      } catch (err) {
+        this.log.debug({ err, skillId: skill.id }, 'Execution challenge detection failed');
+      }
+    }
+
+    return false;
+  }
+
+  private async maybeStartExecutionRecovery(
+    skill: SkillSpec,
+    browserProvider: BrowserProvider | undefined,
+    latencyMs: number,
+    failureDetail?: string,
+  ): Promise<SkillExecutionResult | undefined> {
+    const baseUrl = browserProvider?.getCurrentUrl?.();
+    const fallbackUrl = `https://${skill.allowedDomains[0] ?? skill.siteId}`;
+    const recovery = this.upsertPendingRecovery(skill.siteId, baseUrl || fallbackUrl, undefined, 'execute');
+
+    if (!recovery.autoRecoverSupported) {
+      return this.toExecutionHandoffResult(recovery, latencyMs, { failureDetail });
+    }
+
+    try {
+      const existingExecutionSession = this.getBoundExecutionSession(skill.siteId);
+      if (existingExecutionSession) {
+        recovery.recoveryKind = 'explore';
+        recovery.cdpSessionName = existingExecutionSession.name;
+        recovery.managedPid = existingExecutionSession.managedPid;
+        recovery.managedProfileDir = existingExecutionSession.managedProfileDir ?? recovery.managedProfileDir;
+        recovery.priorPolicySnapshot = existingExecutionSession.cdpPriorPolicyState ?? recovery.priorPolicySnapshot;
+        recovery.currentState = 'awaiting_user';
+        recovery.managedBrowser = !!existingExecutionSession.managedPid;
+        this.multiSessionManager.updateSessionKind(existingExecutionSession.name, 'recovery_explore_cdp');
+        this.recoveries.set(recovery.resumeToken, recovery);
+        return this.toExecutionHandoffResult(recovery, latencyMs, {
+          session: existingExecutionSession.name,
+          managedBrowser: recovery.managedBrowser,
+          failureDetail,
+        });
+      }
+
+      const { sessionName, managedBrowser } = await this.connectRecoverySession(recovery);
+      await this.bindRecoveryPolicy(recovery);
+      await this.alignRecoveryPage(recovery);
+      recovery.recoveryKind = 'explore';
+      recovery.currentState = 'awaiting_user';
+      recovery.managedBrowser = managedBrowser;
+      this.multiSessionManager.updateSessionKind(sessionName, 'recovery_explore_cdp');
+      this.recoveries.set(recovery.resumeToken, recovery);
+      return this.toExecutionHandoffResult(recovery, latencyMs, {
+        session: sessionName,
+        managedBrowser,
+        failureDetail,
+      });
+    } catch (err) {
+      this.log.warn({ err, siteId: skill.siteId }, 'Execute-time recovery handoff setup failed');
+      return this.toExecutionHandoffResult(recovery, latencyMs, { failureDetail });
+    }
   }
 
   private startCloudflareHeaderProbe(
@@ -1201,10 +1558,12 @@ export class Engine {
 
   private async connectRecoverySession(entry: RecoveryState): Promise<{ sessionName: string; managedBrowser: boolean }> {
     const multiSession = this.multiSessionManager;
+    const sessionKind = this.getRecoverySessionKind(entry.recoveryKind);
     const existing = multiSession.get(entry.cdpSessionName);
     if (existing) {
       const browser = existing.browserManager.getBrowser();
       if (browser?.isConnected()) {
+        multiSession.updateSessionKind(existing.name, sessionKind);
         return { sessionName: entry.cdpSessionName, managedBrowser: !!existing.managedPid };
       }
       await multiSession.close(entry.cdpSessionName, { force: true });
@@ -1213,7 +1572,7 @@ export class Engine {
     if (entry.managedPid && fs.existsSync(entry.managedProfileDir)) {
       try {
         const { wsEndpoint } = await waitForDevToolsActivePort(entry.managedProfileDir);
-        const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint }, entry.siteId);
+        const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint }, entry.siteId, undefined, sessionKind);
         session.managedPid = entry.managedPid;
         session.managedProfileDir = entry.managedProfileDir;
         session.cdpPriorPolicyState = entry.priorPolicySnapshot;
@@ -1224,7 +1583,7 @@ export class Engine {
     }
 
     try {
-      const attached = await multiSession.connectCDP(entry.cdpSessionName, { autoDiscover: true }, entry.siteId);
+      const attached = await multiSession.connectCDP(entry.cdpSessionName, { autoDiscover: true }, entry.siteId, undefined, sessionKind);
       attached.managedProfileDir = entry.managedProfileDir;
       return { sessionName: attached.name, managedBrowser: false };
     } catch (attachErr) {
@@ -1236,11 +1595,23 @@ export class Engine {
       });
       entry.managedPid = launch.pid;
       entry.managedBrowser = true;
-      const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint: launch.wsEndpoint }, entry.siteId);
-      session.managedPid = launch.pid;
-      session.managedProfileDir = entry.managedProfileDir;
-      session.cdpPriorPolicyState = entry.priorPolicySnapshot;
-      return { sessionName: session.name, managedBrowser: true };
+      try {
+        const session = await multiSession.connectCDP(entry.cdpSessionName, { wsEndpoint: launch.wsEndpoint }, entry.siteId, undefined, sessionKind);
+        session.managedPid = launch.pid;
+        session.managedProfileDir = entry.managedProfileDir;
+        session.cdpPriorPolicyState = entry.priorPolicySnapshot;
+        return { sessionName: session.name, managedBrowser: true };
+      } catch (launchAttachErr) {
+        entry.managedPid = undefined;
+        entry.managedBrowser = false;
+        try {
+          await terminateManagedChrome(launch.pid);
+        } catch (cleanupErr) {
+          this.log.warn({ cleanupErr, siteId: entry.siteId, pid: launch.pid }, 'Managed Chrome cleanup failed after recovery handoff attach error');
+        }
+        removeManagedChromeMetadata(entry.managedProfileDir);
+        throw launchAttachErr;
+      }
     }
   }
 
@@ -1854,6 +2225,8 @@ export class Engine {
       return {
         skillsGenerated: 0,
         signalCount: 0,
+        htmlDocumentCount: 0,
+        ambiguousCount: 0,
         noiseCount: 0,
         totalCount: 0,
       };
@@ -1901,6 +2274,8 @@ export class Engine {
       return {
         skillsGenerated: 0,
         signalCount: counts.signalCount,
+        htmlDocumentCount: counts.htmlDocumentCount,
+        ...(counts.ambiguousCount !== undefined ? { ambiguousCount: counts.ambiguousCount } : {}),
         noiseCount: counts.noiseCount,
         totalCount: counts.totalCount,
         warning: earlyWarning,
@@ -1962,6 +2337,7 @@ export class Engine {
           canonicalHost: cluster.canonicalHost,
           actionName: generateActionName(cluster.method, cluster.pathTemplate, cluster.canonicalHost, recording.siteId),
           inputSchema: cluster.bodyShape ? { type: 'object', properties: cluster.bodyShape } : {},
+          responseContentType: cluster.responseContentType,
           requiredHeaders: cluster.commonHeaders,
           sampleCount: cluster.requests.length,
         },
@@ -2127,11 +2503,16 @@ export class Engine {
     if (traffic.length > 0) {
       const classification = classifySite(recording.siteId, traffic);
       const siteRepo = new SiteRepository(db);
+      const policy = getSitePolicy(recording.siteId, this.config);
+      const sanitizedTier = sanitizeSiteRecommendedTier(
+        classification.recommendedTier,
+        policy.browserRequired === true,
+      );
       siteRepo.update(recording.siteId, {
-        recommendedTier: classification.recommendedTier,
+        recommendedTier: sanitizedTier,
       });
       this.log.info(
-        { siteId: recording.siteId, recommendedTier: classification.recommendedTier, authRequired: classification.authRequired },
+        { siteId: recording.siteId, recommendedTier: sanitizedTier, authRequired: classification.authRequired },
         'Site classified after recording',
       );
     }
@@ -2177,6 +2558,8 @@ export class Engine {
     return {
       skillsGenerated: generatedCount,
       signalCount: counts.signalCount,
+      htmlDocumentCount: counts.htmlDocumentCount,
+      ...(counts.ambiguousCount !== undefined ? { ambiguousCount: counts.ambiguousCount } : {}),
       noiseCount: counts.noiseCount,
       totalCount: counts.totalCount,
       warning,
@@ -2232,7 +2615,7 @@ export class Engine {
     skillId: string,
     params: Record<string, unknown>,
     callerId?: string,
-    options?: { skipMetrics?: boolean; forceDirectTier?: boolean },
+    options?: SkillExecutionOptions,
   ): Promise<SkillExecutionResult> {
     const startTime = Date.now();
 
@@ -2273,7 +2656,12 @@ export class Engine {
 
     // Dedup for read-only skills: collapse identical in-flight requests
     if (skill.sideEffectClass === SideEffectClass.READ_ONLY) {
-      const dedupKey = `${skillId}|${stableStringify(params)}`;
+      const dedupKey = [
+        skillId,
+        stableStringify(params),
+        options?.skipTransform ? 'raw' : 'transformed',
+        options?.waitForPermit ? 'wait' : 'check',
+      ].join('|');
       const existing = this.inflightDedup.get(dedupKey);
       if (existing) {
         this.log.debug({ skillId }, 'Dedup hit — returning in-flight result');
@@ -2291,18 +2679,202 @@ export class Engine {
     return this.executeSkillInner(skill, params, startTime, callerId, options);
   }
 
+  async executeBatch(
+    actions: BatchSkillAction[],
+    callerId?: string,
+  ): Promise<BatchSkillResult[]> {
+    const results: BatchSkillResult[] = new Array(actions.length);
+
+    const executeAction = async (
+      action: BatchSkillAction,
+      index: number,
+      skill?: SkillSpec,
+    ): Promise<void> => {
+      if (!skill) {
+        results[index] = { skillId: action.skillId, success: false, error: 'Skill not found' };
+        return;
+      }
+
+      try {
+        let result = await this.executeSkill(skill.id, action.params ?? {}, callerId);
+        if (!result.success && result.failureCause === 'rate_limited') {
+          const parsed = parseInt(result.failureDetail?.match(/(\d+)ms/)?.[1] ?? '1000', 10);
+          const waitMs = Math.min(Math.max(parsed, 100), 30_000);
+          await new Promise(resolve => setTimeout(resolve, waitMs + 50));
+          result = await this.executeSkill(skill.id, action.params ?? {}, callerId);
+        }
+        results[index] = {
+          skillId: action.skillId,
+          success: result.success,
+          status: result.status,
+          data: result.data,
+          transformApplied: result.transformApplied,
+          transformLabel: result.transformLabel,
+          error: result.error,
+          failureCause: result.failureCause,
+          failureDetail: result.failureDetail,
+          reason: result.reason,
+          recoveryMode: result.recoveryMode,
+          siteId: result.siteId,
+          url: result.url,
+          hint: result.hint,
+          resumeToken: result.resumeToken,
+          advisoryHint: result.advisoryHint,
+          session: result.session,
+          managedBrowser: result.managedBrowser,
+          latencyMs: result.latencyMs,
+        };
+      } catch (err) {
+        results[index] = {
+          skillId: action.skillId,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    };
+
+    const readWindow: Array<{ action: BatchSkillAction; index: number; skill: SkillSpec }> = [];
+    const flushReadWindow = async (): Promise<void> => {
+      if (readWindow.length === 0) {
+        return;
+      }
+
+      const grouped = new Map<string, Array<{ action: BatchSkillAction; index: number; skill: SkillSpec }>>();
+      for (const item of readWindow) {
+        const key = this.resolveExecutionGroupKey(item.skill);
+        const group = grouped.get(key);
+        if (group) {
+          group.push(item);
+        } else {
+          grouped.set(key, [item]);
+        }
+      }
+
+      await Promise.all(
+        [...grouped.values()].map(async (group) => {
+          const maxConcurrent = this.getBatchExecutionConcurrency(group[0].skill);
+          for (let start = 0; start < group.length; start += maxConcurrent) {
+            const chunk = group.slice(start, start + maxConcurrent);
+            await Promise.all(chunk.map((item) => executeAction(item.action, item.index, item.skill)));
+          }
+        }),
+      );
+
+      readWindow.length = 0;
+    };
+
+    for (let index = 0; index < actions.length; index++) {
+      const action = actions[index];
+      const skill = this.skillRepo.getById(action.skillId);
+
+      if (!skill) {
+        results[index] = { skillId: action.skillId, success: false, error: 'Skill not found' };
+        continue;
+      }
+
+      if (skill.sideEffectClass === SideEffectClass.READ_ONLY) {
+        readWindow.push({ action, index, skill });
+        continue;
+      }
+
+      await flushReadWindow();
+      await executeAction(action, index, skill);
+    }
+
+    await flushReadWindow();
+    return results;
+  }
+
+  private getBatchExecutionConcurrency(skill: SkillSpec): number {
+    const configured = getSitePolicy(skill.siteId, this.config).maxConcurrent;
+    if (!Number.isFinite(configured)) {
+      return 3;
+    }
+    return Math.max(1, Math.floor(configured));
+  }
+
+  private buildWorkflowStepExecutor(callerId?: string) {
+    return (skillId: string, params: Record<string, unknown>) =>
+      this.executeSkill(skillId, params, callerId, {
+        skipTransform: true,
+        waitForPermit: {
+          timeoutMs: WORKFLOW_STEP_PERMIT_TIMEOUT_MS,
+        },
+      });
+  }
+
+  private async acquireExecutionRatePermit(
+    siteId: string,
+    callerId: string | undefined,
+    policy: { minGapMs?: number },
+    options?: SkillExecutionOptions,
+  ): Promise<{ allowed: boolean; retryAfterMs?: number }> {
+    const minGapMs = options?.waitForPermit?.minGapMs ?? policy.minGapMs ?? 0;
+    if (options?.waitForPermit) {
+      return this.rateLimiter.waitForPermit(siteId, callerId, {
+        minGapMs,
+        timeoutMs: options.waitForPermit.timeoutMs,
+      });
+    }
+    return this.rateLimiter.checkRate(siteId, callerId, { minGapMs });
+  }
+
   private async executeSkillInner(
     skill: SkillSpec,
     params: Record<string, unknown>,
     startTime: number,
     callerId?: string,
-    options?: { skipMetrics?: boolean; forceDirectTier?: boolean },
+    options?: SkillExecutionOptions,
   ): Promise<SkillExecutionResult> {
     const skillId = skill.id;
 
+    if (skill.workflowSpec) {
+      const workflowResult = await executeWorkflow(
+        skill.workflowSpec,
+        params,
+        this.buildWorkflowStepExecutor(callerId),
+        this.skillRepo,
+        this.workflowStepCache,
+      );
+
+      if ('status' in workflowResult && workflowResult.status === 'browser_handoff_required') {
+        return workflowResult;
+      }
+
+      const workflowExecution = workflowResult as Exclude<
+        Awaited<ReturnType<typeof executeWorkflow>>,
+        SkillExecutionResult & { status: 'browser_handoff_required' }
+      >;
+
+      const workflowFailureCause = workflowExecution.success ? undefined : workflowExecution.failureCause;
+      const isInfra = workflowFailureCause && INFRA_FAILURE_CAUSES.has(workflowFailureCause as any);
+
+      if (workflowExecution.success) {
+        this.skillRepo.updateConfidence(skill.id, Math.min(skill.confidence + 0.1, 1.0), skill.consecutiveValidations + 1);
+      } else if (!isInfra) {
+        this.skillRepo.updateConfidence(skill.id, Math.max(skill.confidence - 0.2, 0), 0);
+      }
+
+      this.skillRepo.update(skill.id, { lastUsed: Date.now() });
+
+      const transformed = workflowExecution.success && !options?.skipTransform
+        ? await applyTransform(workflowExecution.data, skill.outputTransform)
+        : { data: workflowExecution.data, transformApplied: false as const };
+
+      return {
+        success: workflowExecution.success,
+        data: transformed.data,
+        ...(transformed.transformApplied ? { transformApplied: true, transformLabel: transformed.label } : {}),
+        error: workflowExecution.success ? undefined : workflowExecution.error,
+        failureCause: workflowFailureCause,
+        failureDetail: workflowExecution.success ? undefined : workflowExecution.failedAtStep ? `Failed at step: ${workflowExecution.failedAtStep}` : undefined,
+        latencyMs: workflowExecution.totalLatencyMs,
+      };
+    }
+
     // Both WebMCP and HTTP paths produce an ExecutionResult for the shared post-execution block
-    const policy = getSitePolicy(skill.siteId, this.config);
-    const effectiveDomains = policy.domainAllowlist.length > 0
+    let policy = getSitePolicy(skill.siteId, this.config);
+    let effectiveDomains = policy.domainAllowlist.length > 0
       ? policy.domainAllowlist
       : [...new Set([...skill.allowedDomains, skill.siteId])];
     const policyDecision: PolicyDecision = {
@@ -2315,7 +2887,12 @@ export class Engine {
     const site = this.siteRepo.getById(skill.siteId);
     const MAX_CANARY_ATTEMPTS = 5;
     let isCanaryProbe = false;
-    const isDirectRecommended = site?.recommendedTier === ExecutionTier.DIRECT;
+    let browserProvider: BrowserProvider | undefined;
+    const browserRequiredSkill = skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'browser_required';
+    const siteRecommendedTier = site
+      ? sanitizeSiteRecommendedTier(site.recommendedTier, policy.browserRequired === true)
+      : undefined;
+    const isDirectRecommended = siteRecommendedTier === ExecutionTier.DIRECT;
 
     let result: Awaited<ReturnType<typeof replayExecuteSkill>>;
 
@@ -2323,7 +2900,7 @@ export class Engine {
       // ── WebMCP execution path ────────────────────────────
       // Bypasses HTTP method/path checks and the replay pipeline,
       // but enforces rate limiting and flows through the shared post-execution path.
-      const rateCheck = this.rateLimiter.checkRate(skill.siteId, callerId);
+      const rateCheck = await this.acquireExecutionRatePermit(skill.siteId, callerId, policy, options);
       if (!rateCheck.allowed) {
         const detail = `Site '${skill.siteId}' rate limited, retry after ${rateCheck.retryAfterMs}ms`;
         return {
@@ -2376,8 +2953,20 @@ export class Engine {
         };
       }
 
+      if (options?.forceDirectTier && policy.browserRequired) {
+        const detail = `Direct probe suppressed for challenge-protected site '${skill.siteId}'`;
+        return {
+          success: false,
+          error: formatExecutionError('policy_denied', detail),
+          failureCause: 'policy_denied',
+          failureDetail: detail,
+          probeSuppressed: true,
+          latencyMs: Date.now() - startTime,
+        };
+      }
+
       // 3. Rate limit check (with per-caller fairness)
-      const rateCheck = this.rateLimiter.checkRate(skill.siteId, callerId);
+      const rateCheck = await this.acquireExecutionRatePermit(skill.siteId, callerId, policy, options);
       if (!rateCheck.allowed) {
         this.log.warn(
           { skillId, siteId: skill.siteId, retryAfterMs: rateCheck.retryAfterMs },
@@ -2393,10 +2982,17 @@ export class Engine {
         };
       }
 
+      if (browserRequiredSkill && !options?.forceDirectTier) {
+        await this.ensureBrowserRequiredExecutionSession(skill);
+        policy = getSitePolicy(skill.siteId, this.config);
+        effectiveDomains = policy.domainAllowlist.length > 0
+          ? policy.domainAllowlist
+          : [...new Set([...skill.allowedDomains, skill.siteId])];
+      }
+
       this.budgetTracker.setDomainAllowlist(effectiveDomains);
 
       // Wire browser provider: try execution backend first, fall back to explore Playwright
-      let browserProvider: BrowserProvider | undefined;
       const isHardSite = !!(
         (policy.executionBackend === 'playwright' || policy.executionBackend === 'live-chrome')
         && policy.executionSessionName
@@ -2435,18 +3031,23 @@ export class Engine {
         browserProvider,
         browserProviderFactory,
         config: this.config,
-        siteRecommendedTier: site?.recommendedTier,
+        siteRecommendedTier,
       };
 
       // 5. Execute — canary probe + tier escalation
-      const retryOpts: RetryOptions = { ...executorOptions, siteRecommendedTier: site?.recommendedTier };
+      const retryOpts: RetryOptions = {
+        ...executorOptions,
+        siteRecommendedTier,
+        directAllowed: policy.browserRequired !== true,
+      };
 
       // Auto-validation forces direct tier to test without browser
       if (options?.forceDirectTier) {
         retryOpts.forceStartTier = ExecutionTier.DIRECT;
       } else if (skill.directCanaryEligible && !skill.tierLock
           && (skill.directCanaryAttempts ?? 0) < MAX_CANARY_ATTEMPTS
-          && !isDirectRecommended) {
+          && !isDirectRecommended
+          && policy.browserRequired !== true) {
         retryOpts.forceStartTier = ExecutionTier.DIRECT;
         retryOpts.isCanaryProbe = true;
         isCanaryProbe = true;
@@ -2463,14 +3064,38 @@ export class Engine {
     }
 
     try {
+      const stepResults: Array<{
+        tier: ExecutionTierName;
+        failureCause?: string;
+        success: boolean;
+      }> = ('stepResults' in result && Array.isArray(result.stepResults))
+        ? result.stepResults as Array<{ tier: ExecutionTierName; failureCause?: string; success: boolean }>
+        : [];
+      const executionChallengeDetected = !options?.forceDirectTier
+        && await this.detectExecutionChallenge(skill, result, browserProvider, stepResults);
+      if (executionChallengeDetected && result.failureCause !== FailureCause.CLOUDFLARE_CHALLENGE) {
+        result.failureCause = FailureCause.CLOUDFLARE_CHALLENGE;
+        result.failureDetail ??= 'Cloudflare challenge detected during browser execution';
+      }
+      const firstFailedStep = stepResults.find(step => !step.success);
+      const directChallengeSeen = (
+        result.failureCause === FailureCause.CLOUDFLARE_CHALLENGE
+        && result.tier === ExecutionTier.DIRECT
+      ) || stepResults.some(step =>
+        step.tier === ExecutionTier.DIRECT
+        && step.failureCause === FailureCause.CLOUDFLARE_CHALLENGE,
+      );
+      const anyChallengeSeen = result.failureCause === FailureCause.CLOUDFLARE_CHALLENGE
+        || stepResults.some(step => step.failureCause === FailureCause.CLOUDFLARE_CHALLENGE);
 
       // 6. Update rate limiter with response info (pass latency for adaptive throttling on non-browser tiers)
       const adaptiveLatency = result.tier !== ExecutionTier.FULL_BROWSER ? result.latencyMs : undefined;
       this.rateLimiter.recordResponse(skill.siteId, result.status, result.headers, adaptiveLatency, callerId);
 
       // WS-4: Persist canary failure cause
-      if (isCanaryProbe && 'stepResults' in result && (result as any).stepResults[0] && !(result as any).stepResults[0].success) {
-        this.skillRepo.update(skill.id, { lastCanaryErrorType: (result as any).stepResults[0].failureCause ?? 'unknown' });
+      if (isCanaryProbe && firstFailedStep) {
+        const firstCanaryFailure = directChallengeSeen ? FailureCause.CLOUDFLARE_CHALLENGE : (firstFailedStep.failureCause ?? 'unknown');
+        this.skillRepo.update(skill.id, { lastCanaryErrorType: firstCanaryFailure });
       }
 
       // 7. Record metrics (skip for infra failures — they don't reflect skill health)
@@ -2512,7 +3137,9 @@ export class Engine {
       // WS-4: Canary re-arm — only for non-direct-recommended tier_3 skills on non-direct success
       if (result.success && result.tier !== ExecutionTier.DIRECT
           && skill.currentTier === TierState.TIER_3_DEFAULT
-          && !isDirectRecommended) {
+          && !isDirectRecommended
+          && !anyChallengeSeen
+          && policy.browserRequired !== true) {
         this.skillRepo.incrementValidationsSinceLastCanary(skill.id);
 
         const fresh = this.skillRepo.getById(skill.id);
@@ -2529,16 +3156,47 @@ export class Engine {
 
       // A2: Handle structural failures — tier lock
       const structuralCauses: ReadonlySet<PermanentTierLock['reason']> = new Set(['js_computed_field', 'protocol_sensitivity', 'signed_payload']);
-      if (result.failureCause && structuralCauses.has(result.failureCause as PermanentTierLock['reason'])) {
+      if (directChallengeSeen) {
+        const failResult = handleFailure(skill, FailureCause.CLOUDFLARE_CHALLENGE);
+        this.skillRepo.updateTier(skill.id, failResult.newTier, failResult.tierLock);
+        this.skillRepo.update(skill.id, {
+          directCanaryEligible: false,
+          directCanaryAttempts: 0,
+          validationsSinceLastCanary: 0,
+          ...(isCanaryProbe ? { lastCanaryErrorType: FailureCause.CLOUDFLARE_CHALLENGE } : {}),
+        });
+
+        if (!policy.browserRequired) {
+          mergeSitePolicy(skill.siteId, { browserRequired: true }, this.config);
+        }
+
+        const nextRecommendedTier = sanitizeSiteRecommendedTier(
+          site?.recommendedTier ?? ExecutionTier.BROWSER_PROXIED,
+          true,
+        );
+        this.siteRepo.update(skill.siteId, { recommendedTier: nextRecommendedTier });
+      } else if (result.failureCause && structuralCauses.has(result.failureCause as PermanentTierLock['reason'])) {
         const failResult = handleFailure(skill, result.failureCause);
         this.skillRepo.updateTier(skill.id, failResult.newTier, failResult.tierLock);
+      }
+
+      if (!result.success && executionChallengeDetected) {
+        const handoff = await this.maybeStartExecutionRecovery(
+          skill,
+          browserProvider,
+          result.latencyMs,
+          result.failureDetail,
+        );
+        if (handoff) {
+          return handoff;
+        }
       }
 
       // A3: Tier promotion check — only when direct execution succeeded on a tier_3 skill
       if (result.success && result.tier === ExecutionTier.DIRECT && skill.currentTier === TierState.TIER_3_DEFAULT) {
         const updatedSkill = this.skillRepo.getById(skill.id);
         if (updatedSkill) {
-          const promoCheck = checkPromotion(updatedSkill, [], { match: true, hasDynamicRequiredFields: false }, this.config, site?.recommendedTier);
+          const promoCheck = checkPromotion(updatedSkill, [], { match: true, hasDynamicRequiredFields: false }, this.config, siteRecommendedTier);
           if (promoCheck.promote) {
             this.skillRepo.updateTier(updatedSkill.id, TierState.TIER_1_PROMOTED, null);
             this.skillRepo.update(updatedSkill.id, { directCanaryEligible: false, directCanaryAttempts: 0, validationsSinceLastCanary: 0 });
@@ -2706,9 +3364,14 @@ export class Engine {
         });
       }
 
+      const transformed = options?.skipTransform
+        ? { data: result.data, transformApplied: false as const }
+        : await applyTransform(result.data, skill.outputTransform);
+
       return {
         success: result.success,
-        data: result.data,
+        data: transformed.data,
+        ...(transformed.transformApplied ? { transformApplied: true, transformLabel: transformed.label } : {}),
         error: result.failureCause
           ? formatExecutionError(result.failureCause, result.failureDetail ?? 'unknown')
           : undefined,
@@ -3009,6 +3672,12 @@ export class Engine {
           continue;
         }
 
+        const policy = getSitePolicy(skill.siteId, this.config);
+        if (policy.browserRequired) {
+          this.autoValidationStats.skippedBrowserRequired++;
+          continue;
+        }
+
         const rateCheck = this.rateLimiter.checkRate(skill.siteId, '__auto_validation__');
         if (!rateCheck.allowed) {
           this.autoValidationStats.skippedRateLimited++;
@@ -3016,6 +3685,10 @@ export class Engine {
         }
 
         const result = await this.executeSkill(skill.id, samples, '__auto_validation__', { forceDirectTier: true });
+        if (result.probeSuppressed) {
+          this.autoValidationStats.skippedBrowserRequired++;
+          continue;
+        }
 
         this.autoValidationStats.validated++;
         cycleProcessed++;
@@ -3166,6 +3839,16 @@ export class Engine {
       await cleanupManagedChromeLaunches(this.config);
     } catch (err) {
       this.log.debug({ err }, 'Managed Chrome cleanup failed during engine close');
+    }
+    try {
+      await cleanupOwnedBrowserLaunches(this.config);
+    } catch (err) {
+      this.log.debug({ err }, 'Owned browser launch cleanup failed during engine close');
+    }
+    try {
+      await cleanupAgentBrowserSessions(this.config);
+    } catch (err) {
+      this.log.debug({ err }, 'Agent-browser cleanup failed during engine close');
     }
 
     this.mode = 'idle';

@@ -11,6 +11,7 @@ export interface EndpointCluster {
   method: string;
   pathTemplate: string;
   canonicalHost: string;
+  responseContentType?: string;
   requests: StructuredRecord[];
   commonHeaders: Record<string, string>;
   commonQueryParams: string[];
@@ -87,11 +88,13 @@ export function clusterEndpoints(requests: StructuredRecord[], trie?: PathTrie):
     const commonHeaders = extractCommonHeaders(recs.map(r => r.request));
     const commonQueryParams = extractCommonQueryParams(recs.map(r => r.request));
     const bodyShape = inferBodyShape(recs.map(r => r.request));
+    const responseContentType = extractResponseContentType(recs);
 
     clusters.push({
       method,
       pathTemplate,
       canonicalHost,
+      responseContentType,
       requests: recs,
       commonHeaders,
       commonQueryParams,
@@ -212,6 +215,25 @@ function extractCommonQueryParams(requests: StructuredRequest[]): string[] {
   return Object.keys(first).filter(key =>
     requests.every(r => key in r.queryParams),
   );
+}
+
+function extractResponseContentType(records: StructuredRecord[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const record of records) {
+    const contentType = record.response.contentType;
+    if (!contentType) continue;
+    counts.set(contentType, (counts.get(contentType) ?? 0) + 1);
+  }
+
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [contentType, count] of counts) {
+    if (count > bestCount) {
+      best = contentType;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 // ─── Body Shape Inference ────────────────────────────────────────────
