@@ -10,7 +10,7 @@ Teach your AI a website once. After that, it can repeat the job much faster.
 
 Schrute is for repeated website tasks.
 
-It watches what happens in a real browser, learns the underlying network requests, and turns them into reusable tools. That means the first run can happen in the browser, but later runs can often skip the UI and go straight to the site's backend.
+It supports both paths: you can teach it by having it watch what happens in a real browser, or you can let it discover useful backend structure on its own when a site exposes it. Schrute can do either well, and it is up to you which path to use for a given site or task. Either way, it turns what it finds into reusable tools. That means the first run can happen in the browser, or you can start from direct discovery when that fits better, and later runs can often skip the UI and go straight to the site's backend.
 
 If you keep asking an AI to do the same website task over and over, Schrute is the layer that helps it stop starting from scratch every time.
 

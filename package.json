@@ -107,8 +107,6 @@
     "NOTICE",
     "CONTRIBUTING.md",
     "SECURITY.md",
-    "CLAUDE.md",
-    "AGENTS.md",
     "scripts/sync-version.js"
   ]
 }

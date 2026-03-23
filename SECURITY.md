@@ -2,55 +2,56 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Schrute, please report it responsibly.
+Please report security issues privately.
 
-### How to Report
+### Preferred Channel
 
-1. **GitHub Security Advisories** (preferred): Use [GitHub Security Advisories](https://github.com/sheeki03/schrute/security/advisories/new) to privately report the vulnerability.
+Use [GitHub Security Advisories](https://github.com/sheeki03/schrute/security/advisories/new) to submit a private report.
 
-2. **Email**: Send details to the repository maintainers via the email listed in the GitHub profile.
+### If Advisories Are Not Available
 
-### What to Include
+Contact the maintainers privately through the repository's listed contact channels. Do not open a public GitHub issue for an undisclosed vulnerability.
 
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact
-- Suggested fix (if any)
+### What To Include
 
-### What to Expect
+- A clear description of the issue
+- Affected version, commit, or deployment context
+- Reproduction steps or a proof of concept
+- Expected impact
+- Any suggested mitigation or patch idea
 
-- Acknowledgment within 48 hours
-- Status update within 7 days
-- We aim to release fixes within 30 days of confirmed vulnerabilities
+### Response Targets
+
+- Initial acknowledgment within 48 hours
+- A status update within 7 days
+- A fix or mitigation plan as soon as the issue is confirmed and triaged
 
 ## Scope
 
 ### In Scope
 
-- Authentication bypass in HTTP transport
-- SSRF via skill execution
-- Policy gate bypass
-- Credential leakage (auth tokens, cookies)
-- Command injection via skill parameters
-- Audit log tampering
-- Path traversal in data directory operations
+- Authentication or authorization bypass in network mode
+- Policy or confirmation gate bypass
+- SSRF or private-network access through discovery or replay
+- Credential leakage, token exposure, or cookie isolation failures
+- Command injection, path traversal, or unsafe local file access
+- Audit-log tampering or integrity bypass
 
 ### Out of Scope
 
-- Denial of service (Schrute is a local tool)
-- Issues requiring physical access
 - Social engineering
-- Issues in dependencies (report upstream)
+- Vulnerabilities that depend on physical access to the machine
+- Issues only affecting third-party dependencies without a Schrute-specific exploit path
+- Pure availability issues on a local-only deployment with no confidentiality or integrity impact
 
-## Security Architecture
+## Security Model At A Glance
 
-Schrute's security model is documented in `CLAUDE.md`. Key protections:
+Schrute is designed to fail closed. Important protections in the codebase include:
 
-- **9 policy gates** on every skill execution
-- **Fail-closed auth** for network mode (HTTP transport)
-- **HMAC-chained audit log** for tamper detection
-- **Timing-safe token comparison** to prevent timing attacks
-- **Domain allowlists** per site
-- **SSRF prevention** blocking private IP targets
-- **One-time confirmation** required for all new skills
-- **Credential isolation** — auth tokens never persist to config files
+- Policy checks around skill execution and browser-backed actions
+- Domain allowlists and request-shaping controls
+- SSRF protections, including private-IP blocking and redirect validation
+- Confirmation requirements for sensitive or newly learned actions
+- Audit logging and redaction for execution visibility
+- Timing-safe token verification for authenticated HTTP access
+- Separation of stored site data from runtime credentials where possible

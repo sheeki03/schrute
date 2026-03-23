@@ -5,6 +5,16 @@ native/target/
 *.node
 bun.lock
 yarn.lock
+package-lock.json
 .DS_Store
 .env
 .playwright-mcp/
+.factory/
+
+# Local AI/editor instruction files
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+COPILOT.md
+.cursorrules
+.clinerules

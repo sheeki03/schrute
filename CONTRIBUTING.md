@@ -1,82 +1,73 @@
 # Contributing to Schrute
 
-Thank you for your interest in contributing to Schrute!
+Thank you for contributing.
 
-## Getting Started
+## Prerequisites
 
-### Prerequisites
-
-- Node.js >= 22
+- Node.js 22 or newer
 - Git
+- Playwright Chromium: `npx playwright install chromium`
 
-### Setup
+## Setup
 
 ```bash
 git clone https://github.com/sheeki03/schrute.git
 cd schrute
 npm install
-npx playwright install chromium
 npm run build
 ```
 
-### Verify Setup
+## Verify Your Environment
 
 ```bash
-npx vitest run        # All tests should pass
-npx tsc --noEmit      # No type errors
-node dist/index.js doctor  # Health check
+npm run lint
+npx vitest run
+node bin/schrute.cjs doctor
 ```
 
-## Development Workflow
+## Development Expectations
 
-1. Create a feature branch from `main`
-2. Make your changes
-3. Run tests: `npx vitest run`
-4. Run type check: `npx tsc --noEmit`
-5. Submit a pull request
+- Keep changes focused. Prefer one feature or one fix per pull request.
+- Add or update tests for behavioral changes.
+- Update user-facing docs when behavior, flags, commands, or APIs change.
+- Route execution, browser, and skill behavior through the engine and existing repositories instead of adding side paths.
+- Keep error handling fail-closed. If an operation is unsafe or ambiguous, deny it and log the reason.
 
-## Code Style
+## Repo Hygiene
 
-- TypeScript strict mode
-- Fail-closed security: when in doubt, deny
-- Bare `catch` blocks must log the error (no silent swallowing)
-- Use `getLogger()` from `src/core/logger.ts` for logging
+- Do not commit local assistant/editor instruction files such as `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `COPILOT.md`, `.cursorrules`, or `.clinerules`.
+- Do not commit personal experiment artifacts or generated local assets unless they are intentionally part of the product.
+- Do not add package-manager lockfiles unless the project explicitly adopts one.
 
-## Testing
+## Testing Notes
 
-- Framework: vitest
-- Config objects in tests must include `daemon: { port: 19420, autoStart: false }`
-- Use the `makeTestConfig()` helper from `tests/helpers.ts`
-- Browser tests mock Playwright via `vi.mock('playwright')`
-- All tests must be deterministic (no timing-dependent assertions)
+- Tests use Vitest.
+- Prefer `makeTestConfig()` from `tests/helpers.ts` when a full config object is needed.
+- Browser-facing tests should mock Playwright unless the test is explicitly integration or E2E.
+- Keep tests deterministic. Avoid timing-sensitive assertions where possible.
 
-### Running Tests
+## Useful Commands
 
 ```bash
-npx vitest run                              # All tests
-npx vitest run tests/unit/config.test.ts    # Specific test
-npx vitest --watch                          # Watch mode
-npx vitest run --coverage                   # With coverage
+npm run build
+npm run lint
+npx vitest run
+npx vitest run tests/unit/engine.test.ts
+npx vitest --watch
 ```
 
-## Architecture Notes
+## Pull Requests
 
-- **Engine boundary**: All browser/skill operations go through Engine. Never bypass.
-- **Policy boundary**: 9 security gates on every execution. Never skip gates.
-- **Daemon boundary**: CLI connects to daemon via UDS. No direct engine access from CLI.
-- **Storage boundary**: All data access through repositories. Never raw SQL.
+Before opening a pull request:
 
-## Pull Request Process
+1. Run the relevant tests and type checks.
+2. Update documentation if the change affects how Schrute is used or operated.
+3. Review the diff for accidental local files or generated artifacts.
+4. Write a clear pull request description explaining the behavior change and validation performed.
 
-1. Ensure all tests pass
-2. Update documentation if needed
-3. Add tests for new functionality
-4. Keep PRs focused — one feature or fix per PR
-5. Write descriptive commit messages
+## Security Issues
 
-## Security
-
-If you discover a security vulnerability, please see [SECURITY.md](SECURITY.md) for responsible disclosure instructions. Do NOT open a public issue for security vulnerabilities.
+If you discover a security vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a public issue for undisclosed security bugs.
 
 ## License
 
