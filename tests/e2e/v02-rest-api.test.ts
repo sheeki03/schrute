@@ -45,6 +45,16 @@ vi.mock('../../src/core/engine.js', () => {
           uptime: 1000,
         };
       }
+      getMultiSessionManager() {
+        return {
+          getActive() {
+            return 'default';
+          },
+          get() {
+            return undefined;
+          },
+        };
+      }
       async explore(url: string) {
         return { sessionId: 'sess-1', siteId: new URL(url).hostname, url };
       }

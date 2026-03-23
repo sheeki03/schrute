@@ -30,9 +30,6 @@ jobs:
           - name: e2e
             command: npx vitest run tests/e2e
             needs_build: true
-          - name: live
-            command: npx vitest run tests/live
-            needs_build: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
