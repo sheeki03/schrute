@@ -391,6 +391,7 @@ describe('MCP wiring integration', () => {
         allowedMethods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'],
         maxQps: 100,
         maxConcurrent: 10,
+        minGapMs: 0,
         readOnlyDefault: true,
         requireConfirmation: [],
         domainAllowlist: [serverHostname, 'localhost', '127.0.0.1'],
@@ -587,7 +588,7 @@ describe('MCP wiring integration', () => {
       }
       // If no notifications, the skill was still healthy despite failures
       // (health monitor checks rolling window, may not trigger with few data points)
-    }, 15000);
+    }, EXECUTION_TIMEOUT_MS);
 
     it('health monitoring evaluates after execution (B2)', async () => {
       // Execute successfully — health monitor should report healthy

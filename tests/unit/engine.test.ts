@@ -378,11 +378,124 @@ import type { SkillSpec } from '../../src/skill/types.js';
 
 // TODO: add integration test with real DB/real fetch
 
+function resetMockObject(mockObject: Record<string, unknown>): void {
+  for (const value of Object.values(mockObject)) {
+    if (typeof value === 'function' && 'mockReset' in value && typeof value.mockReset === 'function') {
+      value.mockReset();
+    }
+  }
+}
+
 describe('Engine', () => {
   let engine: Engine;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetMockObject(mockDb);
+    mockDb.run.mockReturnValue({ changes: 0 });
+    mockDb.get.mockReturnValue(undefined);
+    mockDb.all.mockReturnValue([]);
+    mockDb.exec.mockReturnValue(undefined);
+    mockDb.open.mockReturnValue(undefined);
+    mockDb.close.mockReturnValue(undefined);
+    mockDb.transaction.mockImplementation((fn: () => unknown) => fn());
+
+    resetMockObject(mockSiteRepoInstance);
+    mockSiteRepoInstance.getById.mockReturnValue(undefined);
+    mockSiteRepoInstance.create.mockReturnValue(undefined);
+    mockSiteRepoInstance.update.mockReturnValue(undefined);
+    mockSiteRepoInstance.getAll.mockReturnValue([]);
+    mockSiteRepoInstance.delete.mockReturnValue(undefined);
+    mockSiteRepoInstance.updateMetrics.mockReturnValue(undefined);
+
+    resetMockObject(mockBrowserManager);
+    const defaultPage = {
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn().mockReturnValue('main-frame'),
+      url: vi.fn().mockReturnValue('about:blank'),
+      goto: vi.fn().mockResolvedValue(undefined),
+      title: vi.fn().mockResolvedValue(''),
+      evaluate: vi.fn().mockResolvedValue(false),
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+      waitForLoadState: vi.fn().mockResolvedValue(undefined),
+      isClosed: vi.fn().mockReturnValue(false),
+    };
+    const defaultContext = {
+      pages: () => [defaultPage],
+      newPage: vi.fn().mockResolvedValue(defaultPage),
+    };
+    mockBrowserManager.launchBrowser.mockResolvedValue({});
+    mockBrowserManager.getOrCreateContext.mockResolvedValue(defaultContext as any);
+    mockBrowserManager.getSelectedOrFirstPage.mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
+      const pages = context?.pages?.() ?? [];
+      if (pages.length > 0) return pages[0];
+      return context?.newPage ? context.newPage() : ({} as any);
+    });
+    mockBrowserManager.hasContext.mockReturnValue(false);
+    mockBrowserManager.tryGetContext.mockReturnValue(undefined);
+    mockBrowserManager.closeContext.mockResolvedValue(undefined);
+    mockBrowserManager.closeBrowser.mockResolvedValue(undefined);
+    mockBrowserManager.closeAll.mockResolvedValue(undefined);
+    mockBrowserManager.getHarPath.mockReturnValue(null);
+    mockBrowserManager.getCapabilities.mockReturnValue(null);
+    mockBrowserManager.getHandlerTimeoutMs.mockReturnValue(30000);
+    mockBrowserManager.supportsHarRecording.mockReturnValue(true);
+    mockBrowserManager.isCdpConnected.mockReturnValue(false);
+    mockBrowserManager.setSuppressIdleTimeout.mockReturnValue(undefined);
+    mockBrowserManager.withLease.mockImplementation(async (fn: () => Promise<unknown>) => fn());
+    mockBrowserManager.touchActivity.mockReturnValue(undefined);
+    mockBrowserManager.releaseActivity.mockReturnValue(undefined);
+    mockBrowserManager.isIdle.mockReturnValue(true);
+    mockBrowserManager.setAuthIntegration.mockReturnValue(undefined);
+    mockBrowserManager.snapshotAuth.mockResolvedValue(undefined);
+
+    mockSessionCreate.mockReset();
+    mockSessionCreate.mockResolvedValue({
+      session: {
+        id: 'sess-1',
+        siteId: 'example.com',
+        url: 'https://example.com',
+        createdAt: Date.now(),
+      },
+    });
+    mockSessionResume.mockReset();
+    mockSessionResume.mockResolvedValue({
+      id: 'sess-1',
+      siteId: 'example.com',
+      url: 'https://example.com',
+      createdAt: Date.now(),
+    });
+    mockSessionClose.mockReset();
+    mockSessionClose.mockResolvedValue(undefined);
+    mockSessionListActive.mockReset();
+    mockSessionListActive.mockReturnValue([]);
+    mockSessionGetSession.mockReset();
+    mockSessionGetSession.mockReturnValue(undefined);
+    mockSessionUpdateUrl.mockReset();
+    mockSessionUpdateUrl.mockReturnValue(undefined);
+    mockSessionRemove.mockReset();
+    mockSessionRemove.mockReturnValue(undefined);
+
+    mockDetectAndWaitForChallenge.mockReset();
+    mockDetectAndWaitForChallenge.mockResolvedValue(false);
+    mockIsCloudflareChallengePage.mockReset();
+    mockIsCloudflareChallengePage.mockResolvedValue(false);
+    mockCleanupManagedChromeLaunches.mockReset();
+    mockCleanupManagedChromeLaunches.mockResolvedValue(undefined);
+    mockCleanupManagedChromeLaunchesSync.mockReset();
+    mockCleanupOwnedBrowserLaunches.mockReset();
+    mockCleanupOwnedBrowserLaunches.mockResolvedValue(undefined);
+    mockCleanupOwnedBrowserLaunchesSync.mockReset();
+    mockLaunchManagedChrome.mockReset();
+    mockRemoveManagedChromeMetadata.mockReset();
+    mockTerminateManagedChrome.mockReset();
+    mockTerminateManagedChrome.mockResolvedValue(undefined);
+    mockWaitForDevToolsActivePort.mockReset();
+    mockWriteManagedChromeMetadata.mockReset();
+    mockListManagedChromeMetadata.mockReset();
+    mockListManagedChromeMetadata.mockReturnValue([]);
+
     (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValue({ blocked: false });
     (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -429,39 +542,6 @@ describe('Engine', () => {
     });
     (mergeSchemas as ReturnType<typeof vi.fn>).mockImplementation((a: any, b: any) => ({ ...a, ...b }));
     mockSiteRepoInstance.getById.mockReturnValue(undefined);
-    const defaultPage = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn().mockReturnValue('main-frame'),
-      url: vi.fn().mockReturnValue('about:blank'),
-      goto: vi.fn().mockResolvedValue(undefined),
-      title: vi.fn().mockResolvedValue(''),
-      evaluate: vi.fn().mockResolvedValue(false),
-      waitForFunction: vi.fn().mockResolvedValue(undefined),
-      waitForLoadState: vi.fn().mockResolvedValue(undefined),
-      isClosed: vi.fn().mockReturnValue(false),
-    };
-    const defaultContext = {
-      pages: () => [defaultPage],
-      newPage: vi.fn().mockResolvedValue(defaultPage),
-    };
-    mockBrowserManager.getOrCreateContext.mockResolvedValue(defaultContext as any);
-    mockBrowserManager.getSelectedOrFirstPage.mockImplementation(async (_siteId: string, context?: { pages?: () => unknown[]; newPage?: () => Promise<unknown> }) => {
-      const pages = context?.pages?.() ?? [];
-      if (pages.length > 0) return pages[0];
-      return context?.newPage ? context.newPage() : ({} as any);
-    });
-    mockBrowserManager.tryGetContext.mockReturnValue(undefined);
-    mockBrowserManager.withLease.mockImplementation(async (fn: () => Promise<unknown>) => fn());
-    mockBrowserManager.getCapabilities.mockReturnValue(null);
-    mockBrowserManager.hasContext.mockReturnValue(false);
-    mockBrowserManager.snapshotAuth.mockResolvedValue(undefined);
-    mockSessionGetSession.mockReturnValue(undefined);
-    mockDetectAndWaitForChallenge.mockResolvedValue(false);
-    mockIsCloudflareChallengePage.mockResolvedValue(false);
-    mockListManagedChromeMetadata.mockReturnValue([]);
-    mockCleanupManagedChromeLaunchesSync.mockReset();
-    mockCleanupOwnedBrowserLaunchesSync.mockReset();
     engine = new Engine(makeConfig());
   });
 
@@ -858,7 +938,7 @@ describe('Engine', () => {
         currentTier: 'tier_1',
         tierLock: null,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -884,7 +964,7 @@ describe('Engine', () => {
         currentTier: 'tier_1',
         tierLock: null,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -910,7 +990,7 @@ describe('Engine', () => {
         currentTier: 'tier_1',
         tierLock: null,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -919,7 +999,7 @@ describe('Engine', () => {
 
       // The RateLimiter mock needs to return not-allowed
       const { RateLimiter } = await import('../../src/automation/rate-limiter.js');
-      const rateLimiterInstance = (RateLimiter as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const rateLimiterInstance = (RateLimiter as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (rateLimiterInstance) {
         rateLimiterInstance.checkRate.mockReturnValueOnce({ allowed: false, retryAfterMs: 5000 });
       }
@@ -944,7 +1024,7 @@ describe('Engine', () => {
         tierLock: null,
         authType: undefined,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -988,7 +1068,7 @@ describe('Engine', () => {
           label: 'current_price',
         },
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1052,7 +1132,7 @@ describe('Engine', () => {
           expression: '$.payload.value',
         },
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById
           .mockReturnValueOnce(outerWorkflowSkill)
@@ -1110,7 +1190,7 @@ describe('Engine', () => {
         authType: undefined,
         consecutiveValidations: 1,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById
           .mockReturnValueOnce(mockSkill)  // first lookup (execute path)
@@ -1172,7 +1252,7 @@ describe('Engine', () => {
         authType: undefined,
         consecutiveValidations: 1,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1212,7 +1292,7 @@ describe('Engine', () => {
         tierLock: null,
         authType: undefined,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1252,7 +1332,7 @@ describe('Engine', () => {
         currentTier: 'tier_3',
         tierLock: null,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1296,7 +1376,7 @@ describe('Engine', () => {
         directCanaryAttempts: 1,
         validationsSinceLastCanary: 3,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1375,7 +1455,7 @@ describe('Engine', () => {
         directCanaryAttempts: 0,
         validationsSinceLastCanary: 1,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1421,7 +1501,7 @@ describe('Engine', () => {
         currentTier: 'tier_3',
         tierLock: null,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1467,7 +1547,7 @@ describe('Engine', () => {
         directCanaryAttempts: 0,
         validationsSinceLastCanary: 0,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1558,7 +1638,7 @@ describe('Engine', () => {
         directCanaryAttempts: 0,
         validationsSinceLastCanary: 0,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -1623,8 +1703,8 @@ describe('Engine', () => {
         tierLock: null,
         authType: undefined,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
-      const metricsInstance = (MetricsRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
+      const metricsInstance = (MetricsRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
 
       // First execution: skipMetrics = true → record should NOT be called
       if (repoInstance) {
@@ -1688,7 +1768,7 @@ describe('Engine', () => {
         sampleParams: {},
         parameters: [],
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getByStatus.mockReturnValueOnce([skill]);
       }
@@ -1832,7 +1912,7 @@ describe('Engine', () => {
         directCanaryAttempts: 0,
         validationsSinceLastCanary: 0,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }
@@ -2018,7 +2098,7 @@ describe('Engine', () => {
         successRate: 0.8,
         ...skillOverrides,
       };
-      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value;
       if (repoInstance) {
         repoInstance.getById.mockReturnValueOnce(mockSkill);
       }

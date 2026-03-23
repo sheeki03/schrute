@@ -52,7 +52,7 @@ class McpClient {
   constructor(serverPath: string, env: Record<string, string> = {}) {
     this.ready = new Promise(resolve => { this.readyResolve = resolve; });
 
-    this.proc = spawn('node', [serverPath, 'serve', '--no-daemon'], {
+    this.proc = spawn(process.execPath, [serverPath, 'serve', '--no-daemon'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: projectRoot,
       env: {

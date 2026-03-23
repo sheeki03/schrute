@@ -1,6 +1,6 @@
 {
   "id": "cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "name": "Schrute CLI",
   "description": "Self-learning browser agent — record browser actions, learn API patterns, replay as optimized MCP tools",
   "documentationURL": "https://github.com/sheeki03/schrute",

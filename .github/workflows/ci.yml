@@ -7,14 +7,41 @@ on:
     branches: [main]
 
 jobs:
-  build-and-test:
+  checks:
+    name: ${{ matrix.task.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - name: build
+            command: npm run build
+            needs_build: false
+          - name: typecheck
+            command: npx tsc --noEmit
+            needs_build: false
+          - name: unit
+            command: npx vitest run tests/unit tests/fixtures/mock-sites
+            needs_build: false
+          - name: integration
+            command: npx vitest run tests/integration
+            needs_build: false
+          - name: e2e
+            command: npx vitest run tests/e2e
+            needs_build: true
+          - name: live
+            command: npx vitest run tests/live
+            needs_build: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npm run build
-      - run: npx tsc --noEmit
-      - run: npx vitest run
+          cache: npm
+      - run: npm ci
+      - name: Build compiled entrypoints
+        if: ${{ matrix.task.needs_build }}
+        run: npm run build
+      - name: Run ${{ matrix.task.name }}
+        run: ${{ matrix.task.command }}

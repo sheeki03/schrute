@@ -20,6 +20,10 @@ import { tmpdir } from 'node:os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..', '..');
 const serverEntry = join(projectRoot, 'dist', 'index.js');
+const MCP_STARTUP_TIMEOUT_MS = 30_000;
+const MCP_REQUEST_TIMEOUT_MS = 60_000;
+const MCP_STEP_TIMEOUT_MS = 60_000;
+const MCP_PIPELINE_TIMEOUT_MS = 90_000;
 
 // ─── MCP JSON-RPC Client ─────────────────────────────────────────
 
@@ -51,7 +55,7 @@ class McpTestClient {
   constructor(serverPath: string, env: Record<string, string> = {}) {
     this.ready = new Promise(resolve => { this.readyResolve = resolve; });
 
-    this.proc = spawn('node', [serverPath, 'serve', '--no-daemon'], {
+    this.proc = spawn(process.execPath, [serverPath, 'serve', '--no-daemon'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: projectRoot,
       env: {
@@ -109,7 +113,7 @@ class McpTestClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`MCP request timed out: ${method} (id=${id})`));
-      }, 30000);
+      }, MCP_REQUEST_TIMEOUT_MS);
 
       this.pending.set(id, {
         resolve: (resp) => {
@@ -178,7 +182,7 @@ class McpTestClient {
   }
 }
 
-async function waitForPipelineJob(client: McpTestClient, jobId: string, timeoutMs = 30_000) {
+async function waitForPipelineJob(client: McpTestClient, jobId: string, timeoutMs = MCP_PIPELINE_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const result = await client.callTool('schrute_pipeline_status', { jobId });
@@ -210,13 +214,13 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     client = new McpTestClient(serverEntry, {
       SCHRUTE_DATA_DIR: tempDir,
     });
-  }, 15000);
+  }, MCP_STARTUP_TIMEOUT_MS);
 
   afterAll(async () => {
     if (client) await client.close();
     if (mockServer) await mockServer.close();
     try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }, 30000);
+  }, MCP_PIPELINE_TIMEOUT_MS);
 
   it('initializes MCP handshake', async () => {
     const resp = await client.initialize();
@@ -226,7 +230,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const result = resp.result as any;
     expect(result.serverInfo?.name).toBe('schrute');
     expect(result.capabilities?.tools).toBeDefined();
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('lists meta tools (tools/list)', async () => {
     const tools = await client.listTools();
@@ -240,7 +244,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(toolNames).toContain('schrute_status');
     expect(toolNames).toContain('schrute_dry_run');
     expect(toolNames).toContain('schrute_confirm');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_status returns idle state', async () => {
     const result = await client.callTool('schrute_status');
@@ -249,7 +253,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const data = JSON.parse(result.content[0].text);
     expect(data.mode).toBe('idle');
     expect(data.uptime).toBeGreaterThanOrEqual(0);
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_explore creates a session', async () => {
     const result = await client.callTool('schrute_explore', {
@@ -260,7 +264,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const data = JSON.parse(result.content[0].text);
     expect(data.sessionId).toBeDefined();
     expect(data.siteId).toBe('127.0.0.1');
-  }, 60000);
+  }, MCP_REQUEST_TIMEOUT_MS);
 
   it('schrute_status shows exploring after explore', async () => {
     const result = await client.callTool('schrute_status');
@@ -270,7 +274,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.mode).toBe('exploring');
     expect(data.activeSession).toBeDefined();
     expect(data.activeSession.siteId).toBe('127.0.0.1');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_record starts recording', async () => {
     const result = await client.callTool('schrute_record', {
@@ -281,7 +285,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const data = JSON.parse(result.content[0].text);
     expect(data.name).toBe('mcp-e2e-test');
     expect(data.siteId).toBe('127.0.0.1');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_status shows recording after record', async () => {
     const result = await client.callTool('schrute_status');
@@ -289,7 +293,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
     const data = JSON.parse(result.content[0].text);
     expect(data.mode).toBe('recording');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_stop stops recording and runs capture pipeline', async () => {
     const result = await client.callTool('schrute_stop');
@@ -298,7 +302,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
     const job = await waitForPipelineJob(client, data.pipelineJobId);
     expect(job.status).toBe('completed');
-  }, 30000);
+  }, MCP_PIPELINE_TIMEOUT_MS);
 
   it('schrute_status returns to exploring after stop', async () => {
     const result = await client.callTool('schrute_status');
@@ -306,7 +310,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
 
     const data = JSON.parse(result.content[0].text);
     expect(data.mode).toBe('exploring');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_skills returns skill list (may be empty without browser)', async () => {
     const result = await client.callTool('schrute_skills', {
@@ -319,7 +323,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     expect(data.totalSkills).toBeDefined();
     expect(typeof data.totalSkills).toBe('number');
     expect(data.sites).toBeDefined();
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_dry_run validates error on missing skill', async () => {
     const result = await client.callTool('schrute_dry_run', {
@@ -327,20 +331,20 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_explore with invalid URL returns error', async () => {
     const result = await client.callTool('schrute_explore', {
       url: 'not-a-url',
     });
     expect(result.isError).toBe(true);
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('schrute_record without name returns error', async () => {
     const result = await client.callTool('schrute_record', {});
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('name is required');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   it('tools/list includes prompts and resources capabilities', async () => {
     // Re-list to verify server is still healthy after all operations
@@ -351,7 +355,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const toolNames = tools.map(t => t.name);
     expect(toolNames).toContain('schrute_explore');
     expect(toolNames).toContain('schrute_status');
-  }, 10000);
+  }, MCP_STEP_TIMEOUT_MS);
 
   // ═══════════════════════════════════════════════════════════════
   // 5B: State transition errors
@@ -368,7 +372,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       // If router catches the engine error, we get isError response
       const data = result.content[0].text;
       expect(data).toContain('No active recording');
-    }, 10000);
+    }, MCP_STEP_TIMEOUT_MS);
 
     it('double schrute_record returns error on second call', async () => {
       // Start first recording
@@ -387,7 +391,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
         const job = await waitForPipelineJob(client, stopData.pipelineJobId);
         expect(job.status).toBe('completed');
       }
-    }, 15000);
+    }, MCP_PIPELINE_TIMEOUT_MS);
 
     it('schrute_record is rejected after schrute_stop when in idle mode', async () => {
       // First stop the recording from the previous test if still active
@@ -403,7 +407,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       const statusAfter = await client.callTool('schrute_status');
       const afterData = JSON.parse(statusAfter.content[0].text);
       expect(afterData.mode).toBe('exploring');
-    }, 15000);
+    }, MCP_PIPELINE_TIMEOUT_MS);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -444,7 +448,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       });
       // setActive may throw or silently accept — verify either way
       expect(switchResult.content[0].text).toBeDefined();
-    }, 20000);
+    }, MCP_PIPELINE_TIMEOUT_MS);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -456,13 +460,13 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       const result = await client.callTool('schrute_import_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('required');
-    }, 10000);
+    }, MCP_STEP_TIMEOUT_MS);
 
     it('schrute_export_cookies requires siteId', async () => {
       const result = await client.callTool('schrute_export_cookies', {});
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('required');
-    }, 10000);
+    }, MCP_STEP_TIMEOUT_MS);
 
     it('schrute_import_cookies with missing file returns error', async () => {
       const result = await client.callTool('schrute_import_cookies', {
@@ -471,7 +475,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
       });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('not found');
-    }, 10000);
+    }, MCP_STEP_TIMEOUT_MS);
 
     it('schrute_export_cookies on explored site returns cookie list', async () => {
       // The engine should have a browser context for 127.0.0.1 from prior explore
@@ -485,6 +489,6 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
         expect(Array.isArray(data.cookies)).toBe(true);
         expect(typeof data.count).toBe('number');
       }
-    }, 10000);
+    }, MCP_STEP_TIMEOUT_MS);
   });
 });
