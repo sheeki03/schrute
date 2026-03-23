@@ -96,6 +96,15 @@ describe('generator', () => {
       expect(spec.isComposite).toBe(true);
       expect(spec.chainSpec).toBe(chain);
     });
+
+    it('preserves html response content type and keeps html skills read-only', () => {
+      const spec = generateSkill('example.com', makeCluster({
+        responseContentType: 'text/html; charset=utf-8',
+      }));
+
+      expect(spec.responseContentType).toBe('text/html; charset=utf-8');
+      expect(spec.sideEffectClass).toBe('read-only');
+    });
   });
 
   describe('generateSkillMd', () => {

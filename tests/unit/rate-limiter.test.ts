@@ -60,6 +60,53 @@ describe('RateLimiter', () => {
       const result = limiter.checkRate('site-b');
       expect(result.allowed).toBe(true);
     });
+
+    it('enforces a per-site minimum gap between permits when configured', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+      try {
+        const first = limiter.checkRate('gap-site', undefined, { minGapMs: 100 });
+        const second = limiter.checkRate('gap-site', undefined, { minGapMs: 100 });
+
+        expect(first.allowed).toBe(true);
+        expect(second.allowed).toBe(false);
+        expect(second.retryAfterMs).toBe(100);
+
+        vi.advanceTimersByTime(100);
+        const third = limiter.checkRate('gap-site', undefined, { minGapMs: 100 });
+        expect(third.allowed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('waitForPermit waits until the configured minimum gap clears', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+      try {
+        expect(limiter.checkRate('wait-gap-site', undefined, { minGapMs: 100 }).allowed).toBe(true);
+
+        let settled = false;
+        const permitPromise = limiter.waitForPermit('wait-gap-site', undefined, {
+          minGapMs: 100,
+          timeoutMs: 500,
+        }).then((result) => {
+          settled = true;
+          return result;
+        });
+
+        await vi.advanceTimersByTimeAsync(99);
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(permitPromise).resolves.toEqual({ allowed: true });
+        expect(settled).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('429 response backoff', () => {

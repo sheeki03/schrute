@@ -208,6 +208,39 @@ describe('MultiSessionManager', () => {
       expect(session.name).toBe('electron');
       expect(session.siteId).toBe('cdp-electron');
       expect(session.isCdp).toBe(true);
+      expect(session.sessionKind).toBe('manual_cdp');
+    });
+
+    it('connectCDP stores recovery_execute_cdp session kind for execute-owned sessions', async () => {
+      const mockBrowser = createMockBrowser();
+      (connectViaCDP as ReturnType<typeof vi.fn>).mockResolvedValue(mockBrowser);
+
+      const session = await msm.connectCDP(
+        '__recovery_deadbeef',
+        { port: 9222 },
+        'example.com',
+        undefined,
+        'recovery_execute_cdp',
+      );
+
+      expect(session.sessionKind).toBe('recovery_execute_cdp');
+      expect(msm.list().find((entry) => entry.name === '__recovery_deadbeef')?.sessionKind).toBe('recovery_execute_cdp');
+    });
+
+    it('hides execute-owned recovery sessions when includeInternal is false', async () => {
+      const mockBrowser = createMockBrowser();
+      (connectViaCDP as ReturnType<typeof vi.fn>).mockResolvedValue(mockBrowser);
+
+      await msm.connectCDP(
+        '__recovery_deadbeef',
+        { port: 9222 },
+        'example.com',
+        undefined,
+        'recovery_execute_cdp',
+      );
+
+      expect(msm.list(undefined, undefined, { includeInternal: false }).map((entry) => entry.name)).not.toContain('__recovery_deadbeef');
+      expect(msm.list(undefined, undefined, { includeInternal: true }).map((entry) => entry.name)).toContain('__recovery_deadbeef');
     });
 
     it('connectCDP("default") is always rejected', async () => {

@@ -175,6 +175,39 @@ describe('retry', () => {
     expect(escalateDecision!.reason).toContain('Cookie refresh');
   });
 
+  it('escalates immediately on cloudflare_challenge without same-tier retry', async () => {
+    const skill = makeSkill({ sideEffectClass: 'read-only', currentTier: 'tier_1' });
+    const browserProvider = {
+      evaluateFetch: vi.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: '{"ok":true}',
+      }),
+    } as any;
+
+    const result = await retryWithEscalation(skill, {}, {
+      fetchFn: async () => ({
+        status: 403,
+        headers: { 'cf-mitigated': 'challenge' },
+        body: '<html>Verifying you are human</html>',
+      }),
+      browserProvider,
+      maxRetries: 3,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.tier).toBe(ExecutionTier.BROWSER_PROXIED);
+    expect(result.retryDecisions[0]).toMatchObject({
+      action: 'escalate',
+      tier: ExecutionTier.BROWSER_PROXIED,
+    });
+    expect(result.retryDecisions.filter((d) => d.action === 'retry')).toHaveLength(0);
+    expect(result.stepResults.map((step) => step.tier)).toEqual([
+      ExecutionTier.DIRECT,
+      ExecutionTier.BROWSER_PROXIED,
+    ]);
+  });
+
   it('records retry decisions with backoff for rate limiting', async () => {
     let callCount = 0;
     const skill = makeSkill({ sideEffectClass: 'read-only' });
@@ -284,6 +317,44 @@ describe('retry', () => {
       expect(result.tier).toBe('browser_proxied');
     });
 
+    it('starts at BROWSER_PROXIED for browser_required-locked skill', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_3',
+        tierLock: { type: 'permanent', reason: 'browser_required', evidence: 'challenge detected' },
+      });
+      const browserProvider = {
+        evaluateFetch: vi.fn().mockResolvedValue({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: '{"ok":true}',
+        }),
+        navigate: vi.fn().mockResolvedValue(undefined),
+        networkRequests: vi.fn().mockResolvedValue([
+          {
+            url: 'https://example.com/api/data',
+            method: 'GET',
+            status: 200,
+            requestHeaders: {},
+            responseHeaders: { 'content-type': 'application/json' },
+            responseBody: '{"ok":true}',
+            timing: { startTime: 0, endTime: 1, duration: 1 },
+          },
+        ]),
+      } as any;
+
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: async () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' }),
+        browserProvider,
+        siteRecommendedTier: ExecutionTier.DIRECT,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.tier).toBe(ExecutionTier.BROWSER_PROXIED);
+      expect(result.startingTier).toBe(ExecutionTier.BROWSER_PROXIED);
+      expect(browserProvider.evaluateFetch).toHaveBeenCalledTimes(1);
+      expect(browserProvider.navigate).not.toHaveBeenCalled();
+    });
+
     it('skips DIRECT tier for temporarily demoted skill', async () => {
       const skill = makeSkill({
         currentTier: 'tier_1',
@@ -297,6 +368,38 @@ describe('retry', () => {
         browserProvider: mockBrowserProvider as any,
       });
       expect(result.tier).toBe('browser_proxied');
+    });
+
+    it('masks direct-first startup when directAllowed is false even if site recommends direct', async () => {
+      const skill = makeSkill({
+        currentTier: 'tier_3',
+        tierLock: null,
+      });
+      const directFetch = vi.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: '{"ok":true}',
+      });
+      const browserProvider = {
+        evaluateFetch: vi.fn().mockResolvedValue({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: '{"ok":true}',
+        }),
+      } as any;
+
+      const result = await retryWithEscalation(skill, {}, {
+        fetchFn: directFetch,
+        browserProvider,
+        siteRecommendedTier: ExecutionTier.DIRECT,
+        directAllowed: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.tier).toBe(ExecutionTier.BROWSER_PROXIED);
+      expect(directFetch).not.toHaveBeenCalled();
+      expect(browserProvider.evaluateFetch).toHaveBeenCalledTimes(1);
+      expect(result.startingTier).toBe(ExecutionTier.BROWSER_PROXIED);
     });
   });
 });

@@ -137,6 +137,32 @@ describe('SchruteService', () => {
     });
   });
 
+  describe('listSessions', () => {
+    it('hides internal execute recovery sessions', () => {
+      const list = vi.fn().mockImplementation((_callerId, _config, options) =>
+        options?.includeInternal === false
+          ? [{ name: 'user-session', siteId: 'example.com', isCdp: true, sessionKind: 'manual_cdp' }]
+          : [
+              { name: '__recovery_exec', siteId: 'example.com', isCdp: true, sessionKind: 'recovery_execute_cdp' },
+              { name: 'user-session', siteId: 'example.com', isCdp: true, sessionKind: 'manual_cdp' },
+            ]
+      );
+      (deps.engine.getMultiSessionManager as ReturnType<typeof vi.fn>).mockReturnValue({
+        list,
+        getActive: vi.fn().mockReturnValue('user-session'),
+        setActive: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const sessions = service.listSessions();
+
+      expect(list).toHaveBeenCalledWith(undefined, deps.config, { includeInternal: false });
+      expect(sessions).toEqual([
+        { name: 'user-session', siteId: 'example.com', isCdp: true, active: true },
+      ]);
+    });
+  });
+
   describe('listSkills', () => {
     it('returns all skills when no filters', async () => {
       const skills = [makeSkill({ id: 'a' }), makeSkill({ id: 'b' })];
@@ -217,6 +243,32 @@ describe('SchruteService', () => {
       expect((result as any).method).toBe('POST');
       expect((result as any).pathTemplate).toBe('/api/data');
       expect(deps.engine.executeSkill).not.toHaveBeenCalled();
+    });
+
+    it('returns browser_handoff_required when the engine requests interactive recovery', async () => {
+      const skill = makeSkill();
+      vi.mocked(deps.skillRepo.getById).mockReturnValue(skill);
+      vi.mocked(deps.confirmation.isSkillConfirmed).mockReturnValue(true);
+      vi.mocked(deps.engine.executeSkill).mockResolvedValue({
+        success: false,
+        status: 'browser_handoff_required',
+        reason: 'cloudflare_challenge',
+        recoveryMode: 'real_browser_cdp',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        hint: 'Cloudflare challenge detected.',
+        resumeToken: 'recover-token',
+        latencyMs: 321,
+      } as any);
+
+      const result = await service.executeSkill('skill-1', { key: 'value' });
+
+      expect(result.status).toBe('browser_handoff_required');
+      if (result.status === 'browser_handoff_required') {
+        expect(result.result.resumeToken).toBe('recover-token');
+        expect(result.result.reason).toBe('cloudflare_challenge');
+      }
+      expect(deps.engine.executeSkill).toHaveBeenCalledWith('skill-1', { key: 'value' }, undefined);
     });
 
     it('throws when skill not found', async () => {

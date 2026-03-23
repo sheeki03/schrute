@@ -99,6 +99,7 @@ vi.mock('../../src/replay/tool-budget.js', () => ({
 vi.mock('../../src/automation/rate-limiter.js', () => ({
   RateLimiter: vi.fn().mockImplementation(() => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
+    waitForPermit: vi.fn().mockResolvedValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
     attachDatabase: vi.fn(),
@@ -227,6 +228,14 @@ vi.mock('../../src/core/tiering.js', () => ({
     newTier: 'tier_3',
     tierLock: { type: 'permanent', reason: 'js_computed_field', evidence: 'test' },
     reason: 'test',
+  }),
+  checkPromotion: vi.fn().mockReturnValue({ promote: false, reason: 'test' }),
+  getEffectiveTier: vi.fn().mockImplementation((skill: any) => skill.currentTier),
+  sanitizeSiteRecommendedTier: vi.fn().mockImplementation((recommendedTier: string, browserRequired: boolean) => {
+    if (browserRequired) {
+      return recommendedTier === 'full_browser' ? 'full_browser' : 'browser_proxied';
+    }
+    return recommendedTier === 'cookie_refresh' ? 'browser_proxied' : recommendedTier;
   }),
 }));
 

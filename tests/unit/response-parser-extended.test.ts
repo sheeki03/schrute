@@ -63,6 +63,18 @@ describe('response-parser (extended)', () => {
       );
       expect(result.errors.some((e) => e.type === 'parse_error')).toBe(true);
     });
+
+    it('treats explicit html content as text without forcing json parsing', () => {
+      const skill = makeSkill({
+        responseContentType: 'text/html',
+      });
+      const result = parseResponse(
+        { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: '<html><body>Hello</body></html>' },
+        skill,
+      );
+      expect(result.data).toBe('<html><body>Hello</body></html>');
+      expect(result.errors.some((e) => e.type === 'parse_error')).toBe(false);
+    });
   });
 
   describe('error signature detection in 200-range responses', () => {

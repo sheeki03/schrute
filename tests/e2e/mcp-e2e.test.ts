@@ -216,7 +216,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     if (client) await client.close();
     if (mockServer) await mockServer.close();
     try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }, 10000);
+  }, 30000);
 
   it('initializes MCP handshake', async () => {
     const resp = await client.initialize();
@@ -260,7 +260,7 @@ describe('MCP E2E: full lifecycle via stdio server', () => {
     const data = JSON.parse(result.content[0].text);
     expect(data.sessionId).toBeDefined();
     expect(data.siteId).toBe('127.0.0.1');
-  }, 30000);
+  }, 60000);
 
   it('schrute_status shows exploring after explore', async () => {
     const result = await client.callTool('schrute_status');

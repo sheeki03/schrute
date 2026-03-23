@@ -16,6 +16,7 @@ function makeEntry(overrides: Partial<{
   responseStatus: number;
   responseBodySize: number;
   startedDateTime: string;
+  resourceType: string;
 }>): HarEntry {
   const {
     method = 'GET',
@@ -26,6 +27,7 @@ function makeEntry(overrides: Partial<{
     responseStatus = 200,
     responseBodySize = 100,
     startedDateTime = '2025-01-01T00:00:00Z',
+    resourceType,
   } = overrides;
 
   return {
@@ -52,6 +54,7 @@ function makeEntry(overrides: Partial<{
       bodySize: responseBodySize,
     },
     timings: { send: 0, wait: 50, receive: 50 },
+    ...(resourceType ? { _resourceType: resourceType } : {}),
   };
 }
 
@@ -172,6 +175,50 @@ describe('noise-filter', () => {
       const result = filterRequests([makeEntry({ url: 'https://www.google-analytics.com/collect' })]);
       expect(result.noise).toHaveLength(1);
       expect(result.signal).toHaveLength(0);
+    });
+  });
+
+  describe('html document classification', () => {
+    it('classifies same-site GET html documents as html_document', () => {
+      const result = filterRequests([
+        makeEntry({
+          url: 'https://news.example.com/front-page',
+          responseContentType: 'text/html; charset=utf-8',
+          resourceType: 'document',
+        }),
+      ], [], 'www.example.com');
+
+      expect(result.htmlDocument).toHaveLength(1);
+      expect(result.signal).toHaveLength(0);
+      expect(result.ambiguous).toHaveLength(0);
+    });
+
+    it('classifies POST html responses as ambiguous', () => {
+      const result = filterRequests([
+        makeEntry({
+          method: 'POST',
+          url: 'https://www.example.com/search',
+          responseContentType: 'text/html',
+          resourceType: 'document',
+        }),
+      ], [], 'www.example.com');
+
+      expect(result.htmlDocument).toHaveLength(0);
+      expect(result.ambiguous).toHaveLength(1);
+    });
+
+    it('classifies PUT html responses as ambiguous', () => {
+      const result = filterRequests([
+        makeEntry({
+          method: 'PUT',
+          url: 'https://www.example.com/profile',
+          responseContentType: 'text/html',
+          resourceType: 'document',
+        }),
+      ], [], 'www.example.com');
+
+      expect(result.htmlDocument).toHaveLength(0);
+      expect(result.ambiguous).toHaveLength(1);
     });
   });
 

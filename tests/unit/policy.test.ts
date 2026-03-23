@@ -28,6 +28,7 @@ import {
   resolveAndValidate,
   setSitePolicy,
   getSitePolicy,
+  mergeSitePolicy,
   invalidatePolicyCache,
 } from '../../src/core/policy.js';
 import {
@@ -402,6 +403,104 @@ describe('policy', () => {
   // ─── Execution backend policy fields ────────────────────────────
 
   describe('executionBackend and executionSessionName', () => {
+    it('defaults browserRequired to false when not set', () => {
+      const loaded = getSitePolicy('browser-required-default');
+      expect(loaded.browserRequired).toBe(false);
+      expect(loaded.minGapMs).toBe(100);
+    });
+
+    it('persists minGapMs when configured', () => {
+      const policy: SitePolicy = {
+        siteId: 'min-gap-site',
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        minGapMs: 250,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: ['example.com'],
+        redactionRules: [],
+        capabilities: [],
+      };
+      setSitePolicy(policy);
+      const loaded = getSitePolicy('min-gap-site');
+      expect(loaded.minGapMs).toBe(250);
+    });
+
+    it('persists browserRequired when enabled', () => {
+      const policy: SitePolicy = {
+        siteId: 'browser-required-enabled',
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: ['example.com'],
+        redactionRules: [],
+        capabilities: [],
+        browserRequired: true,
+      };
+      setSitePolicy(policy);
+      const loaded = getSitePolicy('browser-required-enabled');
+      expect(loaded.browserRequired).toBe(true);
+    });
+
+    it('preserves browserRequired across merge overlays unless explicitly changed', () => {
+      const siteId = 'browser-required-merge';
+      setSitePolicy({
+        siteId,
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: ['example.com'],
+        redactionRules: [],
+        capabilities: [],
+        browserRequired: true,
+      });
+
+      mergeSitePolicy(siteId, {
+        executionBackend: 'live-chrome',
+        executionSessionName: '__recovery_deadbeef',
+      });
+
+      const loaded = getSitePolicy(siteId);
+      expect(loaded.browserRequired).toBe(true);
+      expect(loaded.executionBackend).toBe('live-chrome');
+      expect(loaded.executionSessionName).toBe('__recovery_deadbeef');
+    });
+
+    it('throws when browserRequired is not boolean', () => {
+      expect(() => setSitePolicy({
+        siteId: 'invalid-browser-required',
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: [],
+        redactionRules: [],
+        capabilities: [],
+        browserRequired: 'yes' as unknown as boolean,
+      })).toThrow(/browserRequired must be boolean/);
+    });
+
+    it('throws when minGapMs is negative', () => {
+      expect(() => setSitePolicy({
+        siteId: 'invalid-min-gap',
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        minGapMs: -1,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: [],
+        redactionRules: [],
+        capabilities: [],
+      })).toThrow(/minGapMs must be a finite number >= 0/);
+    });
+
     it('persists executionBackend on SitePolicy', () => {
       const policy: SitePolicy = {
         siteId: 'exec-backend-site',
@@ -511,6 +610,21 @@ describe('policy', () => {
       expect(() => setSitePolicy(policy)).toThrow(
         /executionSessionName requires executionBackend='playwright'/,
       );
+    });
+
+    it('throws when executionBackend is invalid', () => {
+      expect(() => setSitePolicy({
+        siteId: 'invalid-exec-backend',
+        allowedMethods: ['GET'],
+        maxQps: 10,
+        maxConcurrent: 3,
+        readOnlyDefault: true,
+        requireConfirmation: [],
+        domainAllowlist: [],
+        redactionRules: [],
+        capabilities: [],
+        executionBackend: 'firefox' as any,
+      })).toThrow(/executionBackend must be one of/);
     });
   });
 });

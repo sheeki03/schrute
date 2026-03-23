@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
 
-const { mockSetSitePolicy } = vi.hoisted(() => ({
+const { mockSetSitePolicy, mockValidateAndNormalizeImportablePolicy } = vi.hoisted(() => ({
   mockSetSitePolicy: vi.fn().mockReturnValue({ persisted: true }),
+  mockValidateAndNormalizeImportablePolicy: vi.fn().mockImplementation((policy: any, siteId: string) => ({
+    valid: true,
+    errors: [],
+    value: { ...policy, siteId, browserRequired: policy?.browserRequired === true },
+  })),
 }));
 
 vi.mock('node:fs');
@@ -10,6 +15,7 @@ vi.mock('node:fs');
 vi.mock('../../src/storage/import-validator.js', () => ({
   validateImportableSkill: vi.fn().mockReturnValue({ valid: true, errors: [] }),
   validateImportableSite: vi.fn().mockReturnValue({ valid: true, errors: [] }),
+  validateAndNormalizeImportablePolicy: mockValidateAndNormalizeImportablePolicy,
 }));
 
 vi.mock('../../src/core/policy.js', () => ({
@@ -97,6 +103,11 @@ describe('performImport', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockSetSitePolicy.mockReturnValue({ persisted: true });
+    mockValidateAndNormalizeImportablePolicy.mockImplementation((policy: any, siteId: string) => ({
+      valid: true,
+      errors: [],
+      value: { ...policy, siteId, browserRequired: policy?.browserRequired === true },
+    }));
     (validateImportableSkill as any).mockReturnValue({ valid: true, errors: [] });
     (validateImportableSite as any).mockReturnValue({ valid: true, errors: [] });
     (getSitePolicy as any).mockReturnValue({
@@ -334,7 +345,7 @@ describe('performImport', () => {
     consoleSpy.mockRestore();
   });
 
-  it('warns when policy siteId mismatches bundle site', async () => {
+  it('normalizes policy siteId to the bundle site during import', async () => {
     const bundle = makeBundle({
       policy: { siteId: 'other.com', maxConcurrent: 5 },
     });
@@ -342,12 +353,39 @@ describe('performImport', () => {
     (fs.readFileSync as any).mockReturnValue(JSON.stringify(bundle));
 
     const deps = makeDeps();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await performImport('test.json', deps, { yes: true });
 
-    expect(mockSetSitePolicy).not.toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('does not match site'));
-    consoleSpy.mockRestore();
+    expect(mockSetSitePolicy).toHaveBeenCalledOnce();
+    expect(mockSetSitePolicy.mock.calls[0][0].siteId).toBe('example.com');
+  });
+
+  it('defaults browserRequired to false for legacy policy bundles missing the field', async () => {
+    const bundle = makeBundle({
+      policy: {
+        siteId: 'example.com',
+        maxConcurrent: 5,
+        maxQps: 10,
+        readOnlyDefault: true,
+        allowedMethods: ['GET'],
+        requireConfirmation: [],
+        domainAllowlist: ['example.com'],
+        redactionRules: [],
+        capabilities: [],
+      },
+    });
+    (fs.existsSync as any).mockReturnValue(true);
+    (fs.readFileSync as any).mockReturnValue(JSON.stringify(bundle));
+
+    const deps = makeDeps();
+    await performImport('test.json', deps, { yes: true });
+
+    expect(mockSetSitePolicy).toHaveBeenCalledOnce();
+    expect(mockSetSitePolicy.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        siteId: 'example.com',
+        browserRequired: false,
+      }),
+    );
   });
 
   it('new import with no overwrites skips confirmation even without --yes', async () => {

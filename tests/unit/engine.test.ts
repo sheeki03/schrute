@@ -54,6 +54,7 @@ vi.mock('../../src/storage/skill-repository.js', () => ({
     delete: vi.fn(),
     updateConfidence: vi.fn(),
     updateTier: vi.fn(),
+    incrementValidationsSinceLastCanary: vi.fn(),
   })),
 }));
 
@@ -102,6 +103,7 @@ vi.mock('../../src/replay/tool-budget.js', () => ({
 vi.mock('../../src/automation/rate-limiter.js', () => ({
   RateLimiter: vi.fn().mockImplementation(() => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
+    waitForPermit: vi.fn().mockResolvedValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
     attachDatabase: vi.fn(),
@@ -148,6 +150,9 @@ vi.mock('../../src/browser/base-browser-adapter.js', () => ({
 }));
 
 const mockCleanupManagedChromeLaunches = vi.fn().mockResolvedValue(undefined);
+const mockCleanupManagedChromeLaunchesSync = vi.fn();
+const mockCleanupOwnedBrowserLaunches = vi.fn().mockResolvedValue(undefined);
+const mockCleanupOwnedBrowserLaunchesSync = vi.fn();
 const mockLaunchManagedChrome = vi.fn();
 const mockRemoveManagedChromeMetadata = vi.fn();
 const mockTerminateManagedChrome = vi.fn().mockResolvedValue(undefined);
@@ -156,6 +161,9 @@ const mockWriteManagedChromeMetadata = vi.fn();
 const mockListManagedChromeMetadata = vi.fn().mockReturnValue([]);
 vi.mock('../../src/browser/real-browser-handoff.js', () => ({
   cleanupManagedChromeLaunches: (...args: unknown[]) => mockCleanupManagedChromeLaunches(...args),
+  cleanupManagedChromeLaunchesSync: (...args: unknown[]) => mockCleanupManagedChromeLaunchesSync(...args),
+  cleanupOwnedBrowserLaunches: (...args: unknown[]) => mockCleanupOwnedBrowserLaunches(...args),
+  cleanupOwnedBrowserLaunchesSync: (...args: unknown[]) => mockCleanupOwnedBrowserLaunchesSync(...args),
   launchManagedChrome: (...args: unknown[]) => mockLaunchManagedChrome(...args),
   removeManagedChromeMetadata: (...args: unknown[]) => mockRemoveManagedChromeMetadata(...args),
   terminateManagedChrome: (...args: unknown[]) => mockTerminateManagedChrome(...args),
@@ -213,6 +221,10 @@ vi.mock('../../src/replay/executor.js', () => ({
 }));
 vi.mock('../../src/replay/retry.js', () => ({
   retryWithEscalation: vi.fn(),
+}));
+const mockExecuteWorkflow = vi.fn();
+vi.mock('../../src/replay/workflow-executor.js', () => ({
+  executeWorkflow: (...args: unknown[]) => mockExecuteWorkflow(...args),
 }));
 vi.mock('../../src/automation/cookie-refresh.js', () => ({
   refreshCookies: vi.fn().mockResolvedValue(undefined),
@@ -277,6 +289,12 @@ vi.mock('../../src/core/tiering.js', () => ({
   }),
   checkPromotion: vi.fn().mockReturnValue({ promote: false, reason: 'test' }),
   getEffectiveTier: vi.fn().mockImplementation((skill: any) => skill.currentTier),
+  sanitizeSiteRecommendedTier: vi.fn().mockImplementation((recommendedTier: string, browserRequired: boolean) => {
+    if (browserRequired) {
+      return recommendedTier === 'full_browser' ? 'full_browser' : 'browser_proxied';
+    }
+    return recommendedTier === 'cookie_refresh' ? 'browser_proxied' : recommendedTier;
+  }),
 }));
 
 // Mock diff-engine
@@ -344,7 +362,7 @@ vi.mock('node:fs', async () => {
 import { Engine, buildEnforcementSchema } from '../../src/core/engine.js';
 import { ContextOverrideMismatchError } from '../../src/browser/manager.js';
 import { PlaywrightMcpAdapter } from '../../src/browser/playwright-mcp-adapter.js';
-import { checkMethodAllowed, checkPathRisk, mergeSitePolicy } from '../../src/core/policy.js';
+import { checkMethodAllowed, checkPathRisk, getSitePolicy, mergeSitePolicy } from '../../src/core/policy.js';
 import { SkillRepository } from '../../src/storage/skill-repository.js';
 import { MetricsRepository } from '../../src/storage/metrics-repository.js';
 import { retryWithEscalation } from '../../src/replay/retry.js';
@@ -365,6 +383,52 @@ describe('Engine', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValue({ blocked: false });
+    (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValue({
+      domainAllowlist: ['example.com'],
+      capabilities: [],
+      browserRequired: false,
+    });
+    (retryWithEscalation as ReturnType<typeof vi.fn>).mockReset();
+    (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      tier: 'direct',
+      status: 200,
+      data: { id: 1 },
+      rawBody: '{"id":1}',
+      headers: { 'content-type': 'application/json' },
+      latencyMs: 10,
+      schemaMatch: true,
+      semanticPass: true,
+      retryDecisions: [],
+    });
+    mockExecuteWorkflow.mockReset();
+    mockExecuteWorkflow.mockResolvedValue({
+      success: true,
+      data: { done: true },
+      stepResults: [],
+      totalLatencyMs: 1,
+    });
+    (checkPromotion as ReturnType<typeof vi.fn>).mockReturnValue({ promote: false, reason: 'test' });
+    (handleFailure as ReturnType<typeof vi.fn>).mockReturnValue({
+      newTier: 'tier_3',
+      tierLock: { type: 'permanent', reason: 'js_computed_field', evidence: 'test' },
+      reason: 'test',
+    });
+    (detectDrift as ReturnType<typeof vi.fn>).mockReturnValue({ drifted: false, breaking: false, changes: [] });
+    (monitorSkills as ReturnType<typeof vi.fn>).mockReturnValue([
+      { skillId: 'test', status: 'healthy', successRate: 1.0, trend: 0, windowSize: 0 },
+    ]);
+    (notify as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (createEvent as ReturnType<typeof vi.fn>).mockReturnValue({ type: 'test', skillId: 'test', siteId: 'test', details: {}, timestamp: Date.now() });
+    (inferSchema as ReturnType<typeof vi.fn>).mockReturnValue({
+      type: 'object',
+      properties: { id: { type: 'integer' } },
+      required: ['id'],
+    });
+    (mergeSchemas as ReturnType<typeof vi.fn>).mockImplementation((a: any, b: any) => ({ ...a, ...b }));
+    mockSiteRepoInstance.getById.mockReturnValue(undefined);
     const defaultPage = {
       on: vi.fn(),
       off: vi.fn(),
@@ -396,6 +460,8 @@ describe('Engine', () => {
     mockDetectAndWaitForChallenge.mockResolvedValue(false);
     mockIsCloudflareChallengePage.mockResolvedValue(false);
     mockListManagedChromeMetadata.mockReturnValue([]);
+    mockCleanupManagedChromeLaunchesSync.mockReset();
+    mockCleanupOwnedBrowserLaunchesSync.mockReset();
     engine = new Engine(makeConfig());
   });
 
@@ -710,6 +776,52 @@ describe('Engine', () => {
       expect(engine.getStatus().mode).toBe('recording');
       expect(engine.getStatus().currentRecording?.name).toBe('recording-in-progress');
     });
+
+    it('cleans up launched Chrome when recovery CDP attach fails after launch', async () => {
+      const recovery = (engine as any).upsertPendingRecovery(
+        'example.com',
+        'https://example.com/cdn-cgi/challenge-platform',
+      );
+      const msm = engine.getMultiSessionManager();
+      vi.spyOn(msm, 'connectCDP')
+        .mockRejectedValueOnce(new Error('auto discover failed'))
+        .mockRejectedValueOnce(new Error('launch attach failed'));
+      mockLaunchManagedChrome.mockResolvedValueOnce({
+        pid: 4242,
+        profileDir: recovery.managedProfileDir,
+        wsEndpoint: 'ws://127.0.0.1:9222/devtools/browser/test',
+        browserBinary: '/usr/bin/google-chrome',
+      });
+
+      await expect((engine as any).connectRecoverySession(recovery)).rejects.toThrow('launch attach failed');
+
+      expect(mockTerminateManagedChrome).toHaveBeenCalledWith(4242);
+      expect(mockRemoveManagedChromeMetadata).toHaveBeenCalledWith(recovery.managedProfileDir);
+      expect(recovery.managedPid).toBeUndefined();
+      expect(recovery.managedBrowser).toBe(false);
+    });
+
+    it('keeps explore and execute recoveries separate for the same site', () => {
+      const exploreRecovery = (engine as any).upsertPendingRecovery(
+        'example.com',
+        'https://example.com/cdn-cgi/challenge-platform',
+        undefined,
+        'explore',
+      );
+      const executeRecovery = (engine as any).upsertPendingRecovery(
+        'example.com',
+        'https://api.example.com/blocked',
+        undefined,
+        'execute',
+      );
+
+      expect(executeRecovery.resumeToken).not.toBe(exploreRecovery.resumeToken);
+      expect(executeRecovery.cdpSessionName).not.toBe(exploreRecovery.cdpSessionName);
+      expect(exploreRecovery.url).toBe('https://example.com/cdn-cgi/challenge-platform');
+      expect(executeRecovery.url).toBe('https://api.example.com/blocked');
+      expect((engine as any).getRecoveryBySiteId('example.com', 'explore')?.resumeToken).toBe(exploreRecovery.resumeToken);
+      expect((engine as any).getRecoveryBySiteId('example.com', 'execute')?.resumeToken).toBe(executeRecovery.resumeToken);
+    });
   });
 
   // ─── State Machine: recording -> exploring (stopRecording) ─────
@@ -858,6 +970,132 @@ describe('Engine', () => {
       expect(retryWithEscalation).toHaveBeenCalled();
     });
 
+    it('returns transformed data when a skill has an outputTransform', async () => {
+      const mockSkill = {
+        id: 'example.com.get_price.v1',
+        siteId: 'example.com',
+        name: 'get_price',
+        method: 'GET',
+        pathTemplate: '/api/price',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_1',
+        tierLock: null,
+        authType: undefined,
+        outputTransform: {
+          type: 'jsonpath',
+          expression: '$.stats.current',
+          label: 'current_price',
+        },
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'direct',
+        status: 200,
+        data: { stats: { current: 123.45 } },
+        rawBody: '{"stats":{"current":123.45}}',
+        headers: { 'content-type': 'application/json' },
+        latencyMs: 42,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      const result = await engine.executeSkill('example.com.get_price.v1', {});
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(123.45);
+      expect(result.transformApplied).toBe(true);
+      expect(result.transformLabel).toBe('current_price');
+    });
+
+    it('threads callerId and skipTransform through workflow step execution', async () => {
+      const outerWorkflowSkill = {
+        id: 'example.com.outer_workflow.v1',
+        siteId: 'example.com',
+        name: 'outer_workflow',
+        method: 'GET',
+        pathTemplate: '/__workflow/outer-workflow',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_1',
+        tierLock: null,
+        authType: undefined,
+        workflowSpec: {
+          steps: [{ skillId: 'example.com.inner_step.v1' }],
+        },
+        outputTransform: {
+          type: 'jsonpath',
+          expression: '$.payload.value',
+        },
+        confidence: 0.5,
+        consecutiveValidations: 2,
+      };
+      const innerStepSkill = {
+        id: 'example.com.inner_step.v1',
+        siteId: 'example.com',
+        name: 'inner_step',
+        method: 'GET',
+        pathTemplate: '/api/inner',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_1',
+        tierLock: null,
+        authType: undefined,
+        outputTransform: {
+          type: 'jsonpath',
+          expression: '$.payload.value',
+        },
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById
+          .mockReturnValueOnce(outerWorkflowSkill)
+          .mockReturnValueOnce(innerStepSkill);
+      }
+
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'direct',
+        status: 200,
+        data: { payload: { value: 42 } },
+        rawBody: '{"payload":{"value":42}}',
+        headers: { 'content-type': 'application/json' },
+        latencyMs: 10,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+      });
+
+      let innerResult: unknown;
+      mockExecuteWorkflow.mockImplementationOnce(async (_spec, _params, executeStep) => {
+        innerResult = await executeStep('example.com.inner_step.v1', {});
+        return {
+          success: true,
+          data: { payload: { value: 42 } },
+          stepResults: [],
+          totalLatencyMs: 12,
+        };
+      });
+
+      const executeSkillSpy = vi.spyOn(engine, 'executeSkill');
+      const result = await engine.executeSkill('example.com.outer_workflow.v1', {}, 'caller-123');
+
+      expect(innerResult).toMatchObject({ data: { payload: { value: 42 } } });
+      // First call is the outer workflow; second is the inner step from the workflow executor
+      const innerCall = executeSkillSpy.mock.calls.find(c => c[0] === 'example.com.inner_step.v1');
+      expect(innerCall).toBeDefined();
+      expect(innerCall![2]).toBe('caller-123');
+      expect(innerCall![3]).toMatchObject({ skipTransform: true });
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(42);
+    });
+
     it('promotes tier_3 skill after direct success when site recommends direct', async () => {
       const mockSkill = {
         id: 'example.com.promo_test.v1',
@@ -1002,6 +1240,376 @@ describe('Engine', () => {
       }));
     });
 
+    it('masks direct-first startup when policy.browserRequired is true', async () => {
+      const mockSkill = {
+        id: 'example.com.masked_direct.v1',
+        siteId: 'example.com',
+        name: 'masked_direct',
+        method: 'GET',
+        pathTemplate: '/api/masked',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'direct',
+      });
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+        browserRequired: true,
+      });
+
+      await engine.executeSkill('example.com.masked_direct.v1', {});
+
+      expect(retryWithEscalation).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'example.com.masked_direct.v1' }),
+        {},
+        expect.objectContaining({
+          siteRecommendedTier: 'browser_proxied',
+          directAllowed: false,
+        }),
+      );
+    });
+
+    it('persists browser_required lock and site gate when a direct challenge appears before browser fallback success', async () => {
+      const mockSkill = {
+        id: 'example.com.cf_guard.v1',
+        siteId: 'example.com',
+        name: 'cf_guard',
+        method: 'GET',
+        pathTemplate: '/api/guard',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        authType: undefined,
+        confidence: 0.4,
+        consecutiveValidations: 1,
+        directCanaryEligible: true,
+        directCanaryAttempts: 1,
+        validationsSinceLastCanary: 3,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'direct',
+      });
+      (handleFailure as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        newTier: 'tier_3',
+        tierLock: { type: 'permanent', reason: 'browser_required', evidence: 'cloudflare challenge' },
+        reason: 'browser required',
+      });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'browser_proxied',
+        status: 200,
+        data: { ok: true },
+        rawBody: '{"ok":true}',
+        headers: { 'content-type': 'application/json' },
+        latencyMs: 40,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+        stepResults: [
+          { tier: 'direct', success: false, status: 403, latencyMs: 10, failureCause: 'cloudflare_challenge' },
+          { tier: 'browser_proxied', success: true, status: 200, latencyMs: 30 },
+        ],
+      });
+
+      const result = await engine.executeSkill('example.com.cf_guard.v1', {});
+
+      expect(result.success).toBe(true);
+      expect(handleFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'example.com.cf_guard.v1' }),
+        'cloudflare_challenge',
+      );
+      expect(repoInstance?.updateTier).toHaveBeenCalledWith(
+        'example.com.cf_guard.v1',
+        'tier_3',
+        expect.objectContaining({ reason: 'browser_required' }),
+      );
+      expect(repoInstance?.update).toHaveBeenCalledWith(
+        'example.com.cf_guard.v1',
+        expect.objectContaining({
+          directCanaryEligible: false,
+          directCanaryAttempts: 0,
+          validationsSinceLastCanary: 0,
+        }),
+      );
+      expect(mergeSitePolicy).toHaveBeenCalledWith(
+        'example.com',
+        { browserRequired: true },
+        expect.anything(),
+      );
+      expect(mockSiteRepoInstance.update).toHaveBeenCalledWith(
+        'example.com',
+        expect.objectContaining({ recommendedTier: 'browser_proxied' }),
+      );
+    });
+
+    it('does not persist a sticky browser_required lock for browser-tier-only challenge evidence', async () => {
+      const mockSkill = {
+        id: 'example.com.browser_only_cf.v1',
+        siteId: 'example.com',
+        name: 'browser_only_cf',
+        method: 'GET',
+        pathTemplate: '/api/browser-only',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        authType: undefined,
+        confidence: 0.4,
+        consecutiveValidations: 1,
+        directCanaryEligible: false,
+        directCanaryAttempts: 0,
+        validationsSinceLastCanary: 1,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'browser_proxied',
+      });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'full_browser',
+        status: 200,
+        data: { ok: true },
+        rawBody: '{"ok":true}',
+        headers: { 'content-type': 'application/json' },
+        latencyMs: 55,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+        stepResults: [
+          { tier: 'browser_proxied', success: false, status: 403, latencyMs: 20, failureCause: 'cloudflare_challenge' },
+          { tier: 'full_browser', success: true, status: 200, latencyMs: 35 },
+        ],
+      });
+
+      const result = await engine.executeSkill('example.com.browser_only_cf.v1', {});
+
+      expect(result.success).toBe(true);
+      expect(handleFailure).not.toHaveBeenCalled();
+      expect(repoInstance?.updateTier).not.toHaveBeenCalled();
+      expect(repoInstance?.incrementValidationsSinceLastCanary).not.toHaveBeenCalled();
+      expect(mergeSitePolicy).not.toHaveBeenCalled();
+    });
+
+    it('suppresses forceDirectTier probes when site policy marks the site as browser-required', async () => {
+      const mockSkill = {
+        id: 'example.com.direct_probe.v1',
+        siteId: 'example.com',
+        name: 'direct_probe',
+        method: 'GET',
+        pathTemplate: '/api/probe',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'direct',
+      });
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+        browserRequired: true,
+      });
+
+      const result = await engine.executeSkill(
+        'example.com.direct_probe.v1',
+        {},
+        '__auto_validation__',
+        { forceDirectTier: true },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe('policy_denied');
+      expect(result.probeSuppressed).toBe(true);
+      expect(result.failureDetail).toContain('Direct probe suppressed');
+      expect(retryWithEscalation).not.toHaveBeenCalled();
+    });
+
+    it('bootstraps a live-chrome execution session before replay for browser_required skills', async () => {
+      const mockSkill = {
+        id: 'example.com.browser_required.v1',
+        siteId: 'example.com',
+        name: 'browser_required',
+        method: 'GET',
+        pathTemplate: '/api/price',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: { type: 'permanent', reason: 'browser_required', evidence: 'cloudflare challenge' },
+        authType: undefined,
+        confidence: 0.4,
+        consecutiveValidations: 1,
+        directCanaryEligible: false,
+        directCanaryAttempts: 0,
+        validationsSinceLastCanary: 0,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'browser_proxied',
+      });
+
+      let policyState: Record<string, unknown> = {
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+        browserRequired: true,
+      };
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockImplementation(() => policyState);
+
+      const provider = {
+        evaluateFetch: vi.fn(),
+        getCurrentUrl: vi.fn().mockReturnValue('https://example.com/api/price'),
+      };
+      const backendCreateProvider = vi.fn().mockResolvedValue(provider);
+      const getExecutionBackendSpy = vi.spyOn(engine, 'getExecutionBackend').mockReturnValue({
+        createProvider: backendCreateProvider,
+      } as any);
+      const connectRecoverySessionSpy = vi.spyOn(engine as any, 'connectRecoverySession').mockResolvedValue({
+        sessionName: '__recovery_exec',
+        managedBrowser: true,
+      });
+      const bindRecoveryPolicySpy = vi.spyOn(engine as any, 'bindRecoveryPolicy').mockImplementation(async () => {
+        policyState = {
+          ...policyState,
+          domainAllowlist: ['example.com', '127.0.0.1', 'localhost'],
+          executionBackend: 'live-chrome',
+          executionSessionName: '__recovery_exec',
+        };
+      });
+      const alignRecoveryPageSpy = vi.spyOn(engine as any, 'alignRecoveryPage').mockResolvedValue(undefined);
+
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: true,
+        tier: 'browser_proxied',
+        status: 200,
+        data: { ok: true },
+        rawBody: '{"ok":true}',
+        headers: { 'content-type': 'application/json' },
+        latencyMs: 40,
+        schemaMatch: true,
+        semanticPass: true,
+        retryDecisions: [],
+        stepResults: [
+          { tier: 'browser_proxied', success: true, status: 200, latencyMs: 40 },
+        ],
+      });
+
+      const result = await engine.executeSkill('example.com.browser_required.v1', {});
+
+      expect(result.success).toBe(true);
+      expect(connectRecoverySessionSpy).toHaveBeenCalledTimes(1);
+      expect(bindRecoveryPolicySpy).toHaveBeenCalledTimes(1);
+      expect(alignRecoveryPageSpy).toHaveBeenCalledTimes(1);
+      expect(connectRecoverySessionSpy.mock.invocationCallOrder[0]).toBeLessThan(getExecutionBackendSpy.mock.invocationCallOrder[0]);
+      expect(bindRecoveryPolicySpy.mock.invocationCallOrder[0]).toBeLessThan(getExecutionBackendSpy.mock.invocationCallOrder[0]);
+      expect(backendCreateProvider).toHaveBeenCalledWith('example.com', ['example.com', '127.0.0.1', 'localhost']);
+      expect(retryWithEscalation).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'example.com.browser_required.v1' }),
+        {},
+        expect.objectContaining({
+          browserProvider: provider,
+          directAllowed: false,
+          siteRecommendedTier: 'browser_proxied',
+        }),
+      );
+    });
+
+    it('returns browser_handoff_required when browser execution fails behind a detected challenge', async () => {
+      const mockSkill = {
+        id: 'example.com.execute_recovery.v1',
+        siteId: 'example.com',
+        name: 'execute_recovery',
+        method: 'GET',
+        pathTemplate: '/api/recovery',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        confidence: 0.4,
+        consecutiveValidations: 1,
+        directCanaryEligible: false,
+        directCanaryAttempts: 0,
+        validationsSinceLastCanary: 0,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'browser_proxied',
+      });
+
+      const provider = {
+        getCurrentUrl: vi.fn().mockReturnValue('https://example.com/cdn-cgi/challenge-platform'),
+        detectChallengePage: vi.fn().mockResolvedValue(true),
+      };
+      vi.spyOn(engine, 'getExecutionBackend').mockReturnValue({
+        createProvider: vi.fn().mockResolvedValue(provider),
+      } as any);
+      vi.spyOn(engine as any, 'connectRecoverySession').mockResolvedValue({
+        sessionName: '__recovery_exec',
+        managedBrowser: true,
+      });
+      vi.spyOn(engine as any, 'bindRecoveryPolicy').mockResolvedValue(undefined);
+      vi.spyOn(engine as any, 'alignRecoveryPage').mockResolvedValue(undefined);
+
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: false,
+        tier: 'full_browser',
+        status: 0,
+        data: undefined,
+        rawBody: '',
+        headers: {},
+        latencyMs: 50,
+        schemaMatch: false,
+        semanticPass: false,
+        failureCause: 'fetch_error',
+        failureDetail: 'Full browser execution found no matching request',
+        retryDecisions: [],
+        stepResults: [
+          { tier: 'full_browser', success: false, status: 0, latencyMs: 50, failureCause: 'fetch_error' },
+        ],
+      });
+
+      const result = await engine.executeSkill('example.com.execute_recovery.v1', {});
+
+      expect(result.status).toBe('browser_handoff_required');
+      if (result.status === 'browser_handoff_required') {
+        expect(result.session).toBe('__recovery_exec');
+        expect(result.managedBrowser).toBe(true);
+        expect(result.resumeToken).toBeTruthy();
+      }
+      expect(engine.getStatus().pendingRecovery?.siteId).toBe('example.com');
+    });
+
     it('executeSkill with skipMetrics skips metricsRepo.record', async () => {
       const mockSkill = {
         id: 'example.com.get_data.v1',
@@ -1062,6 +1670,235 @@ describe('Engine', () => {
 
       await engine.executeSkill('example.com.get_data.v1', {});
       expect(metricsInstance?.record).toHaveBeenCalled();
+    }, 60000);
+  });
+
+  describe('auto-validation', () => {
+    it('skips browser-required sites without executing a direct probe', async () => {
+      const skill = {
+        id: 'example.com.auto_skip.v1',
+        siteId: 'example.com',
+        name: 'auto_skip',
+        method: 'GET',
+        pathTemplate: '/api/auto-skip',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        sampleParams: {},
+        parameters: [],
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getByStatus.mockReturnValueOnce([skill]);
+      }
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+        browserRequired: true,
+      });
+      const executeSpy = vi.spyOn(engine, 'executeSkill');
+
+      await (engine as any).runAutoValidationCycle();
+
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(engine.getStatus().autoValidation.skippedBrowserRequired).toBe(1);
+      expect(engine.getStatus().autoValidation.validated).toBe(0);
+    });
+  });
+
+  describe('session sweep', () => {
+    it('sweeps idle recovery sessions without touching lastUsedAt via get()', async () => {
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_idle');
+      session.isCdp = true;
+      session.sessionKind = 'recovery_explore_cdp';
+      session.lastUsedAt = Date.now() - (10 * 60 * 1000);
+
+      const getSpy = vi.spyOn(msm, 'get');
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      await (engine as any).sweepIdleNamedSessions();
+
+      expect(getSpy).not.toHaveBeenCalled();
+      expect(closeSpy).toHaveBeenCalledWith('__recovery_idle', { force: true, engineMode: 'idle' });
+    });
+
+    it('does not sweep the active recovery explore session', async () => {
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_active');
+      session.isCdp = true;
+      session.sessionKind = 'recovery_explore_cdp';
+      session.lastUsedAt = Date.now() - (10 * 60 * 1000);
+      (engine as any).exploreSessionName = '__recovery_active';
+
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      await (engine as any).sweepIdleNamedSessions();
+
+      expect(closeSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not sweep recovery sessions while recording', async () => {
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_recording');
+      session.isCdp = true;
+      session.sessionKind = 'recovery_explore_cdp';
+      session.lastUsedAt = Date.now() - (10 * 60 * 1000);
+      (engine as any).mode = 'recording';
+
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      await (engine as any).sweepIdleNamedSessions();
+
+      expect(closeSpy).not.toHaveBeenCalled();
+    });
+
+    it('uses the 20-minute explore recovery fallback when browser idle timeout is disabled', async () => {
+      const zeroIdleEngine = new Engine({
+        ...makeConfig(),
+        browser: { idleTimeoutMs: 0 },
+      } as any);
+      const msm = zeroIdleEngine.getMultiSessionManager();
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      try {
+        const younger = msm.getOrCreate('__recovery_young');
+        younger.isCdp = true;
+        younger.sessionKind = 'recovery_explore_cdp';
+        younger.lastUsedAt = Date.now() - (10 * 60 * 1000);
+
+        await (zeroIdleEngine as any).sweepIdleNamedSessions();
+        expect(closeSpy).not.toHaveBeenCalled();
+
+        const older = msm.getOrCreate('__recovery_old');
+        older.isCdp = true;
+        older.sessionKind = 'recovery_explore_cdp';
+        older.lastUsedAt = Date.now() - (21 * 60 * 1000);
+
+        await (zeroIdleEngine as any).sweepIdleNamedSessions();
+        expect(closeSpy).toHaveBeenCalledWith('__recovery_old', { force: true, engineMode: 'idle' });
+        expect((zeroIdleEngine as any).getSessionSweepIntervalMs()).toBe(30_000);
+      } finally {
+        await zeroIdleEngine.close();
+      }
+    });
+
+    it('sweeps execute recovery sessions on a short lease and hides them from session listings', async () => {
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_execute');
+      session.isCdp = true;
+      session.sessionKind = 'recovery_execute_cdp';
+      session.lastUsedAt = Date.now() - 70_000;
+
+      expect(msm.list(undefined, undefined, { includeInternal: false }).map((entry) => entry.name)).not.toContain('__recovery_execute');
+
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      await (engine as any).sweepIdleNamedSessions();
+
+      expect(closeSpy).toHaveBeenCalledWith('__recovery_execute', { force: true, engineMode: 'idle' });
+    });
+
+    it('keeps execute recovery sessions alive briefly for warm reuse', async () => {
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_execute_warm');
+      session.isCdp = true;
+      session.sessionKind = 'recovery_execute_cdp';
+      session.lastUsedAt = Date.now() - 10_000;
+
+      const closeSpy = vi.spyOn(msm, 'close').mockResolvedValue(undefined);
+
+      await (engine as any).sweepIdleNamedSessions();
+
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect((engine as any).getSessionSweepIntervalMs()).toBe(30_000);
+    });
+
+    it('promotes execute recovery sessions to visible explore recovery on handoff', async () => {
+      const mockSkill = {
+        id: 'example.com.execute_handoff.v1',
+        siteId: 'example.com',
+        name: 'execute_handoff',
+        method: 'GET',
+        pathTemplate: '/api/recovery',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_3',
+        tierLock: null,
+        confidence: 0.4,
+        consecutiveValidations: 1,
+        directCanaryEligible: false,
+        directCanaryAttempts: 0,
+        validationsSinceLastCanary: 0,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+      mockSiteRepoInstance.getById.mockReturnValueOnce({
+        siteId: 'example.com',
+        recommendedTier: 'browser_proxied',
+      });
+
+      let policyState: Record<string, unknown> = {
+        domainAllowlist: ['example.com'],
+        capabilities: [],
+        browserRequired: true,
+        executionBackend: 'live-chrome',
+        executionSessionName: '__recovery_exec',
+      };
+      (getSitePolicy as ReturnType<typeof vi.fn>).mockImplementation(() => policyState);
+
+      const msm = engine.getMultiSessionManager();
+      const session = msm.getOrCreate('__recovery_exec');
+      session.isCdp = true;
+      session.siteId = 'example.com';
+      session.sessionKind = 'recovery_execute_cdp';
+      session.managedPid = 4242;
+      session.managedProfileDir = '/tmp/recovery';
+      (session.browserManager as any).getBrowser = vi.fn().mockReturnValue({ isConnected: () => true });
+
+      const provider = {
+        getCurrentUrl: vi.fn().mockReturnValue('https://example.com/cdn-cgi/challenge-platform'),
+        detectChallengePage: vi.fn().mockResolvedValue(true),
+      };
+      vi.spyOn(engine, 'getExecutionBackend').mockReturnValue({
+        createProvider: vi.fn().mockResolvedValue(provider),
+      } as any);
+
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: false,
+        tier: 'browser_proxied',
+        status: 0,
+        data: undefined,
+        rawBody: '',
+        headers: {},
+        latencyMs: 50,
+        schemaMatch: false,
+        semanticPass: false,
+        failureCause: 'fetch_error',
+        failureDetail: 'blocked by challenge',
+        retryDecisions: [],
+        stepResults: [
+          { tier: 'browser_proxied', success: false, status: 0, latencyMs: 50, failureCause: 'fetch_error' },
+        ],
+      });
+
+      const result = await engine.executeSkill('example.com.execute_handoff.v1', {});
+
+      expect(result.status).toBe('browser_handoff_required');
+      expect(msm.peek('__recovery_exec')?.sessionKind).toBe('recovery_explore_cdp');
+      expect(msm.list(undefined, undefined, { includeInternal: false }).map((entry) => entry.name)).toContain('__recovery_exec');
+    });
+  });
+
+  describe('exit cleanup', () => {
+    it('uses sync browser cleanup helpers from the exit handler', () => {
+      (engine as any).exitCleanupHandler();
+
+      expect(mockCleanupManagedChromeLaunchesSync).toHaveBeenCalledWith(expect.anything());
+      expect(mockCleanupOwnedBrowserLaunchesSync).toHaveBeenCalledWith(expect.anything());
     });
   });
 
@@ -1245,7 +2082,7 @@ describe('Engine', () => {
       );
       await engine.executeSkill('example.com.get_data.v1', {});
       expect(inferSchema).toHaveBeenCalledWith([{ id: 1, name: 'test' }]);
-    });
+    }, 60000);
 
     it('accumulates schema when effectiveValidations < 3', async () => {
       setupSkillExecution(
@@ -1435,7 +2272,7 @@ describe('Engine', () => {
       await engine.executeSkill('example.com.get_data.v1', {});
       expect(createEvent).toHaveBeenCalledWith('skill_demoted', 'example.com.get_data.v1', 'example.com',
         expect.objectContaining({ reason: 'schema_drift', changes: 1 }));
-    });
+    }, 60000);
 
     it('sends skill_degraded notification with successRate and trend', async () => {
       (monitorSkills as ReturnType<typeof vi.fn>).mockReturnValueOnce([

@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { validateImportableSkill, validateImportableSite } from '../../src/storage/import-validator.js';
+import {
+  validateImportableSkill,
+  validateImportableSite,
+  validateAndNormalizeImportablePolicy,
+} from '../../src/storage/import-validator.js';
 
 describe('validateImportableSkill', () => {
   function validSkill() {
@@ -203,5 +207,47 @@ describe('validateImportableSite', () => {
     const result = validateImportableSite({ ...validSite(), totalRequests: 'many' });
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('totalRequests must be a finite number');
+  });
+});
+
+describe('validateAndNormalizeImportablePolicy', () => {
+  it('fills defaults and strips unknown fields from imported policies', () => {
+    const result = validateAndNormalizeImportablePolicy({
+      executionBackend: 'playwright',
+      executionSessionName: 'shared-session',
+      unknownField: 'ignored',
+    }, 'example.com');
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.value).toMatchObject({
+      siteId: 'example.com',
+      allowedMethods: ['GET', 'HEAD'],
+      maxQps: 10,
+      maxConcurrent: 3,
+      readOnlyDefault: true,
+      requireConfirmation: [],
+      domainAllowlist: [],
+      redactionRules: [],
+      browserRequired: false,
+      executionBackend: 'playwright',
+      executionSessionName: 'shared-session',
+    });
+    expect(result.value).not.toHaveProperty('unknownField');
+  });
+
+  it('rejects malformed policy fields instead of spreading them through', () => {
+    const result = validateAndNormalizeImportablePolicy({
+      allowedMethods: ['GET', 42],
+      domainAllowlist: 'example.com',
+      redactionRules: [true],
+      capabilities: ['not.a.real.capability'],
+    }, 'example.com');
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain('allowedMethods[1] must be a string');
+    expect(result.errors).toContain('domainAllowlist must be an array');
+    expect(result.errors).toContain('redactionRules[0] must be a string');
+    expect(result.errors).toContain('capabilities[0] has invalid capability "not.a.real.capability"');
   });
 });

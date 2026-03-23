@@ -115,7 +115,7 @@ describe('dry-run', () => {
     expect(result.volatilityReport).toBeDefined();
     expect(result.volatilityReport).toHaveLength(1);
     expect(result.tierDecision).toContain('tierLock.type=permanent');
-    expect(result.tierDecision).toContain('tierLock.reason=js_computed_field');
+    expect(result.tierDecision).toContain('tierLock.reason=JS-computed field');
   });
 
   it('does not include volatility report in agent-safe mode', async () => {
