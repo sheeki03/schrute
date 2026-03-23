@@ -267,4 +267,61 @@ describe('rest-server', () => {
       expect(body.mode).toBe('idle');
     });
   });
+
+  describe('POST with empty body', () => {
+    it('returns 200 when POST body is empty', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/skills/test-id/activate',
+        headers: { 'content-type': 'application/json' },
+        payload: '',
+      });
+      // Should not fail with a parse error — 200 or 404 are both acceptable
+      expect(response.statusCode).not.toBe(400);
+    });
+
+    it('still parses valid JSON body', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/explore',
+        payload: { url: 'https://example.com' },
+      });
+      expect(response.statusCode).toBe(200);
+    });
+  });
+
+  describe('v0 deprecation header', () => {
+    it('adds Deprecation header to v0 data routes', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/sites',
+      });
+      expect(response.headers['deprecation']).toBe('true');
+      expect(response.headers['link']).toBe('</api/v1/>; rel="successor-version"');
+    });
+
+    it('does NOT add Deprecation header to v1 routes', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sites',
+      });
+      expect(response.headers['deprecation']).toBeUndefined();
+    });
+
+    it('does NOT add Deprecation header to exempt routes', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/health',
+      });
+      expect(response.headers['deprecation']).toBeUndefined();
+    });
+
+    it('does NOT add Deprecation header to /api/openapi.json', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/openapi.json',
+      });
+      expect(response.headers['deprecation']).toBeUndefined();
+    });
+  });
 });

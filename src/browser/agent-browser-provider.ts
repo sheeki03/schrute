@@ -10,6 +10,7 @@ import type {
 } from '../skill/types.js';
 import type { CookieEntry } from './backend.js';
 import type { AgentBrowserIpcClient } from './agent-browser-ipc.js';
+import { isCloudflareChallengeSignal } from '../shared/cloudflare-challenge.js';
 
 const log = getLogger();
 
@@ -23,9 +24,11 @@ export class AgentBrowserProvider implements BrowserProvider {
   constructor(
     private ipc: AgentBrowserIpcClient,
     private allowedDomains: string[],
+    private onActivity?: () => void,
   ) {}
 
   async navigate(url: string): Promise<void> {
+    this.onActivity?.();
     await this.ipc.send({ action: 'navigate', url });
     // Refresh cached URL from daemon
     const urlResp = await this.ipc.send({ action: 'url' }) as { url?: string } | string;
@@ -33,6 +36,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async snapshot(): Promise<PageSnapshot> {
+    this.onActivity?.();
     const result = await this.ipc.send({ action: 'snapshot', interactive: true }) as {
       snapshot?: string;
       refs?: object;
@@ -49,6 +53,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async click(ref: string): Promise<void> {
+    this.onActivity?.();
     await this.ipc.send({ action: 'click', selector: ref });
     // Refresh cached URL (navigation may have occurred)
     const urlResp = await this.ipc.send({ action: 'url' }) as { url?: string } | string;
@@ -56,10 +61,12 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async type(ref: string, text: string): Promise<void> {
+    this.onActivity?.();
     await this.ipc.send({ action: 'fill', selector: ref, value: text });
   }
 
   async evaluateFetch(req: SealedFetchRequest): Promise<SealedFetchResponse> {
+    this.onActivity?.();
     // Domain check before executing in browser
     try {
       const url = new URL(req.url);
@@ -98,6 +105,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async evaluateModelContext(req: SealedModelContextRequest): Promise<SealedModelContextResponse> {
+    this.onActivity?.();
     const script = `await (async () => {
       const mc = navigator.modelContext;
       if (!mc || typeof mc.callTool !== 'function') {
@@ -120,6 +128,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async listModelContextTools(): Promise<SealedModelContextResponse> {
+    this.onActivity?.();
     const script = `await (async () => {
       const mc = navigator.modelContext;
       if (!mc) return JSON.stringify({ result: null, error: 'WebMCP not available' });
@@ -168,6 +177,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async screenshot(): Promise<Buffer> {
+    this.onActivity?.();
     const result = await this.ipc.send({ action: 'screenshot', format: 'png' }) as {
       base64?: string;
     };
@@ -175,9 +185,22 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async networkRequests(): Promise<NetworkEntry[]> {
+    this.onActivity?.();
     const result = await this.ipc.send({ action: 'network_requests' });
     if (Array.isArray(result)) return result;
     return [];
+  }
+
+  async detectChallengePage(): Promise<boolean> {
+    try {
+      const snapshot = await this.snapshot();
+      return isCloudflareChallengeSignal({
+        url: this.currentUrl,
+        content: snapshot.content ?? '',
+      });
+    } catch {
+      return false;
+    }
   }
 
   getCurrentUrl(): string {
@@ -185,6 +208,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async getCookies(): Promise<CookieEntry[]> {
+    this.onActivity?.();
     // Let IPC failures propagate — callers must distinguish read-failure
     // from genuine empty cookie jar to avoid wiping canonical auth state.
     const result = await this.ipc.send({ action: 'cookies_get' });
@@ -193,6 +217,7 @@ export class AgentBrowserProvider implements BrowserProvider {
   }
 
   async hydrateCookies(cookies: CookieEntry[]): Promise<void> {
+    this.onActivity?.();
     // Batch entire array in ONE command
     await this.ipc.send({ action: 'cookies_set', cookies });
   }

@@ -213,6 +213,7 @@ function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
       getExploreSessionName: vi.fn().mockReturnValue('default'),
       getRecordingSessionName: vi.fn().mockReturnValue(null),
       executeSkill: vi.fn().mockResolvedValue({ success: true, data: { result: 'ok' } }),
+      executeBatch: vi.fn().mockResolvedValue([{ skillId: 'example.com.get_users.v1', success: true, data: { result: 'ok' } }]),
       recoverExplore: vi.fn().mockResolvedValue({
         status: 'ready',
         siteId: 'example.com',
@@ -441,6 +442,8 @@ describe('tool-dispatch', () => {
           getByStatus: vi.fn().mockReturnValue([skill]),
           getById: vi.fn().mockReturnValue(skill),
           getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
         } as any,
       });
 
@@ -456,12 +459,13 @@ describe('tool-dispatch', () => {
           getByStatus: vi.fn().mockReturnValue([skill]),
           getById: vi.fn().mockReturnValue(skill),
           getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
         } as any,
       });
 
       const tools = buildToolList(deps);
-      // At least meta + browser + skill
-      expect(tools.length).toBeGreaterThanOrEqual(10); // 8 meta + 1 browser + 1 skill
+      expect(tools.length).toBeGreaterThanOrEqual(10);
     });
 
     it('admin caller dynamic skills have descriptions trimmed to maxDescriptionLength', () => {
@@ -479,7 +483,6 @@ describe('tool-dispatch', () => {
       const tools = buildToolList(deps);
       const skillTool = tools.find(t => t.name === 'example.com.get_users.v1');
       expect(skillTool).toBeDefined();
-      // Description should be trimmed: 200 chars + '...' = 203 max
       expect(skillTool!.description.length).toBeLessThanOrEqual(203);
       expect(skillTool!.description.endsWith('...')).toBe(true);
     });
@@ -771,6 +774,48 @@ describe('tool-dispatch', () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(false);
       expect(data.error).toBe('timeout');
+    });
+
+    it('returns browser_handoff_required without marking the tool call as an error', async () => {
+      const skill = makeSkill();
+      const mockExecute = vi.fn().mockResolvedValue({
+        success: false,
+        status: 'browser_handoff_required',
+        reason: 'cloudflare_challenge',
+        recoveryMode: 'real_browser_cdp',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        hint: 'Cloudflare challenge detected.',
+        resumeToken: 'recover-token',
+        latencyMs: 400,
+      });
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle' }),
+          executeSkill: mockExecute,
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({}),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+        } as any,
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+        confirmation: {
+          isSkillConfirmed: vi.fn().mockReturnValue(true),
+        } as any,
+      });
+
+      const result = await dispatchToolCall('schrute_execute', { skillId: skill.id }, deps);
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.status).toBe('browser_handoff_required');
+      expect(data.resumeToken).toBe('recover-token');
     });
   });
 
@@ -1085,7 +1130,16 @@ describe('tool-dispatch', () => {
     });
 
     it('buildToolList for stdio caller when server.network=true includes all tools', () => {
-      const deps = makeNetworkDeps();
+      const skill = makeSkill();
+      const deps = makeNetworkDeps({
+        skillRepo: {
+          getByStatus: vi.fn().mockReturnValue([skill]),
+          getById: vi.fn().mockReturnValue(skill),
+          getBySiteId: vi.fn().mockReturnValue([skill]),
+          getAll: vi.fn().mockReturnValue([skill]),
+          getActive: vi.fn().mockReturnValue([skill]),
+        } as any,
+      });
       const tools = buildToolList(deps, 'stdio');
       const names = tools.map(t => t.name);
 
@@ -1097,6 +1151,7 @@ describe('tool-dispatch', () => {
 
       // Should include browser tools
       expect(names).toContain('browser_click');
+      expect(names).toContain('example.com.get_users.v1');
     });
 
     it('buildToolList for MCP HTTP caller when server.network=false includes all tools', () => {
@@ -1146,7 +1201,11 @@ describe('tool-dispatch', () => {
       const result = await dispatchToolCall('schrute_sessions', {}, deps, 'mcp-session-123');
       const data = JSON.parse(result.content[0].text);
       expect(data).toEqual([]);
-      expect(multiMock.list).toHaveBeenCalledWith('mcp-session-123', expect.objectContaining({ server: { network: true } }));
+      expect(multiMock.list).toHaveBeenCalledWith(
+        'mcp-session-123',
+        expect.objectContaining({ server: { network: true } }),
+        { includeInternal: false },
+      );
     });
   });
 
@@ -1281,6 +1340,43 @@ describe('tool-dispatch', () => {
       expect(data).toHaveLength(1);
       expect(data[0].snapshotFields).toEqual({ key: 'value' });
       expect(typeof data[0].snapshotFields).toBe('object');
+    });
+  });
+
+  // ─── Batch Execute Rate Limit Retry ──────────────────────────
+  describe('schrute_batch_execute', () => {
+    it('delegates to engine.executeBatch and preserves results', async () => {
+      const skill = makeSkill();
+      const mockExecuteBatch = vi.fn().mockResolvedValue([
+        { skillId: skill.id, success: true, data: { result: 'ok' } },
+      ]);
+
+      const deps = makeDeps({
+        engine: {
+          getStatus: vi.fn().mockReturnValue({ mode: 'idle', activeSession: null }),
+          getMode: vi.fn().mockReturnValue('idle'),
+          getExploreSessionName: vi.fn().mockReturnValue('default'),
+          getRecordingSessionName: vi.fn().mockReturnValue(null),
+          executeSkill: vi.fn(),
+          executeBatch: mockExecuteBatch,
+          getSessionManager: vi.fn().mockReturnValue({
+            getBrowserManager: vi.fn().mockReturnValue({
+              hasContext: vi.fn().mockReturnValue(false),
+            }),
+          }),
+          getMultiSessionManager: vi.fn().mockReturnValue(makeMultiSessionMock()),
+          getMetricsRepo: vi.fn().mockReturnValue({ getRecentBySkillId: vi.fn().mockReturnValue([]) }),
+        } as any,
+      });
+
+      const actions = [{ skillId: skill.id, params: {} }];
+      const result = await dispatchToolCall('schrute_batch_execute', { actions }, deps);
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.batch).toBe(true);
+      expect(data.results[0].success).toBe(true);
+      expect(mockExecuteBatch).toHaveBeenCalledWith(actions, undefined);
     });
   });
 });

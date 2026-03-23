@@ -71,6 +71,7 @@ const DEFAULT_CONFIG: SchruteConfig = {
   server: {
     network: false,
     httpPort: 3000,
+    mcpHttpAdmin: false,
   },
   daemon: {
     port: 19420,
@@ -419,6 +420,13 @@ export function loadConfig(configPath?: string): SchruteConfig {
     if (typeof loaded.server.network !== 'boolean') {
       throw new Error(
         `Invalid config: server.network must be a boolean. Got: ${typeof loaded.server.network}`,
+      );
+    }
+
+    // Validate server.mcpHttpAdmin is boolean if present
+    if (loaded.server.mcpHttpAdmin !== undefined && typeof loaded.server.mcpHttpAdmin !== 'boolean') {
+      throw new Error(
+        `Invalid config: server.mcpHttpAdmin must be a boolean. Got: ${JSON.stringify(loaded.server.mcpHttpAdmin)}`,
       );
     }
 

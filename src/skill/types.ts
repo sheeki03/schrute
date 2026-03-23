@@ -38,6 +38,7 @@ export const FailureCause = {
   SCHEMA_DRIFT: 'schema_drift',
   AUTH_EXPIRED: 'auth_expired',
   COOKIE_REFRESH: 'cookie_refresh',
+  CLOUDFLARE_CHALLENGE: 'cloudflare_challenge',
   FETCH_ERROR: 'fetch_error',
   UNKNOWN: 'unknown',
 } as const;
@@ -55,6 +56,7 @@ const FAILURE_CAUSE_PRECEDENCE: FailureCauseName[] = [
   FailureCause.SCHEMA_DRIFT,
   FailureCause.AUTH_EXPIRED,
   FailureCause.COOKIE_REFRESH,
+  FailureCause.CLOUDFLARE_CHALLENGE,
   FailureCause.FETCH_ERROR,
   FailureCause.UNKNOWN,
 ];
@@ -63,6 +65,7 @@ export const INFRA_FAILURE_CAUSES = new Set<FailureCauseName>([
   FailureCause.POLICY_DENIED,
   FailureCause.RATE_LIMITED,
   FailureCause.BUDGET_DENIED,
+  FailureCause.CLOUDFLARE_CHALLENGE,
   FailureCause.FETCH_ERROR,
 ]);
 
@@ -76,7 +79,7 @@ export type TierStateName = (typeof TierState)[keyof typeof TierState];
 
 export interface PermanentTierLock {
   type: 'permanent';
-  reason: 'js_computed_field' | 'protocol_sensitivity' | 'signed_payload' | 'webmcp_requires_browser';
+  reason: 'js_computed_field' | 'protocol_sensitivity' | 'signed_payload' | 'webmcp_requires_browser' | 'browser_required';
   evidence: string;
 }
 
@@ -141,6 +144,7 @@ export const RequestClassification = {
   NOISE: 'noise',
   SIGNAL: 'signal',
   AMBIGUOUS: 'ambiguous',
+  HTML_DOCUMENT: 'html_document',
 } as const;
 
 export type RequestClassificationName = (typeof RequestClassification)[keyof typeof RequestClassification];
@@ -218,6 +222,7 @@ export interface BrowserProvider {
   networkRequests(): Promise<NetworkEntry[]>;
   evaluateModelContext?(req: SealedModelContextRequest): Promise<SealedModelContextResponse>;
   listModelContextTools?(): Promise<SealedModelContextResponse>;
+  detectChallengePage?(): Promise<boolean>;
   getCurrentUrl(): string;
 }
 
@@ -326,6 +331,30 @@ export interface RequestChain {
   canReplayWithCookiesOnly: boolean;
 }
 
+export type OutputTransform =
+  | { type: 'jsonpath'; expression: string; label?: string }
+  | { type: 'regex'; expression: string; flags?: string; label?: string }
+  | {
+      type: 'css';
+      selector: string;
+      mode?: 'text' | 'html' | 'attr' | 'list';
+      attr?: string;
+      fields?: Record<string, { selector: string; mode?: 'text' | 'attr'; attr?: string }>;
+      label?: string;
+    };
+
+export interface WorkflowStep {
+  skillId: string;
+  name?: string;
+  paramMapping?: Record<string, string>;
+  transform?: OutputTransform;
+  cache?: { ttlMs: number };
+}
+
+export interface WorkflowSpec {
+  steps: WorkflowStep[];
+}
+
 // ─── Auth Recipe ───────────────────────────────────────────────────
 export type AuthType = 'bearer' | 'cookie' | 'api_key' | 'oauth2';
 export type RefreshTrigger = '401' | '403' | 'redirect_to_login' | 'token_expired_field';
@@ -399,11 +428,14 @@ export interface SkillSpec {
   pathTemplate: string;
   inputSchema: Record<string, unknown>;  // JSON Schema
   outputSchema?: Record<string, unknown>;
+  outputTransform?: OutputTransform;
+  responseContentType?: string;
   authType?: AuthType;
   requiredHeaders?: Record<string, string>;
   dynamicHeaders?: Record<string, string>;
   isComposite: boolean;
   chainSpec?: RequestChain;
+  workflowSpec?: WorkflowSpec;
   parameterEvidence?: ParameterEvidence[];
 
   // Metadata
@@ -457,11 +489,13 @@ export interface SitePolicy {
   allowedMethods: HttpMethod[];
   maxQps: number;
   maxConcurrent: number;
+  minGapMs?: number;
   readOnlyDefault: boolean;
   requireConfirmation: string[];
   domainAllowlist: string[];
   redactionRules: string[];
   capabilities: CapabilityName[];
+  browserRequired?: boolean;                           // sticky gate for challenge-protected sites
   executionBackend?: 'playwright' | 'agent-browser' | 'live-chrome';  // override global default for this site
   executionSessionName?: string;                       // for hard-site shared Playwright
 }
@@ -649,6 +683,7 @@ export interface SchruteConfig {
     network: boolean;            // default: false (v0.2+)
     authToken?: string;          // Required when network=true
     httpPort?: number;           // REST server port (default 3000, MCP HTTP = httpPort + 1)
+    mcpHttpAdmin?: boolean;      // default: false — grant admin to authenticated MCP HTTP clients
   };
   daemon: {
     port: number;

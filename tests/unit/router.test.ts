@@ -281,6 +281,31 @@ describe('router', () => {
       const result = await router.executeSkill('example.com', 'get_users', { id: '123' });
       expect(result.success).toBe(true);
     });
+
+    it('returns 202 with browser_handoff_required when execution needs interactive recovery', async () => {
+      const skill = makeSkill({ consecutiveValidations: 3 });
+      (deps.skillRepo.getBySiteId as ReturnType<typeof vi.fn>).mockReturnValue([skill]);
+      (deps.confirmation.isSkillConfirmed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      (deps.engine.executeSkill as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        status: 'browser_handoff_required',
+        reason: 'cloudflare_challenge',
+        recoveryMode: 'real_browser_cdp',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        hint: 'Cloudflare challenge detected.',
+        resumeToken: 'recover-token',
+        latencyMs: 250,
+      });
+
+      const router = createRouter(deps);
+      const result = await router.executeSkill('example.com', 'get_users', { id: '123' });
+
+      expect(result.success).toBe(false);
+      expect(result.statusCode).toBe(202);
+      expect(result.error).toContain('Cloudflare challenge');
+      expect((result.data as Record<string, unknown>).status).toBe('browser_handoff_required');
+    });
   });
 
   describe('recoverExplore', () => {

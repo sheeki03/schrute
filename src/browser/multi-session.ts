@@ -11,12 +11,18 @@ import { removeManagedChromeMetadata, terminateManagedChrome } from './real-brow
 const log = getLogger();
 
 export const DEFAULT_SESSION_NAME = 'default';
+export type NamedSessionKind =
+  | 'launch'
+  | 'manual_cdp'
+  | 'recovery_explore_cdp'
+  | 'recovery_execute_cdp';
 
 export interface NamedSession {
   name: string;
   siteId: string;
   browserManager: BrowserManager;
   isCdp: boolean;
+  sessionKind: NamedSessionKind;
   createdAt: number;
   lastUsedAt: number;
   ownedBy?: string;
@@ -50,6 +56,7 @@ export class MultiSessionManager {
       siteId: '',
       browserManager: defaultBrowserManager,
       isCdp: false,
+      sessionKind: 'launch',
       createdAt: now,
       lastUsedAt: now,
     });
@@ -91,6 +98,7 @@ export class MultiSessionManager {
       siteId: '',
       browserManager: manager,
       isCdp: false,
+      sessionKind: 'launch',
       createdAt: now,
       lastUsedAt: now,
     };
@@ -107,6 +115,7 @@ export class MultiSessionManager {
     options: import('./cdp-connector.js').CdpConnectionOptions,
     siteId: string,
     ownedBy?: string,
+    sessionKind: NamedSessionKind = 'manual_cdp',
   ): Promise<NamedSession> {
     if (name === DEFAULT_SESSION_NAME) {
       throw new Error('Cannot use "default" for CDP sessions. The default session is reserved for launch-based browser automation.');
@@ -129,6 +138,7 @@ export class MultiSessionManager {
       siteId,
       browserManager: manager,
       isCdp: true,
+      sessionKind,
       createdAt: now,
       lastUsedAt: now,
       ownedBy,
@@ -148,19 +158,40 @@ export class MultiSessionManager {
   }
 
   /**
+   * Read a session without mutating its idle timestamp.
+   */
+  peek(name: string): NamedSession | undefined {
+    return this.sessions.get(name);
+  }
+
+  /**
    * List sessions, optionally filtered by caller ownership.
    * In multi-user mode, non-admin callers see only their own named sessions
    * (default session is hidden as it contains the admin's browsing context).
    */
-  list(callerId?: string, config?: SchruteConfig): NamedSession[] {
+  list(
+    callerId?: string,
+    config?: SchruteConfig,
+    options?: { includeInternal?: boolean },
+  ): NamedSession[] {
     const all = [...this.sessions.values()];
-    if (!callerId) return all;  // admin/legacy — see everything
+    const visible = options?.includeInternal === false
+      ? all.filter(session => session.sessionKind !== 'recovery_execute_cdp')
+      : all;
+    if (!callerId) return visible;  // admin/legacy — see everything
     const effectiveConfig = config ?? this.config;
-    if (!effectiveConfig || isAdminCaller(callerId, effectiveConfig)) return all;  // admin — see everything
+    if (!effectiveConfig || isAdminCaller(callerId, effectiveConfig)) return visible;  // admin — see everything
     // Non-admin in multi-user mode: hide default + other callers' sessions
-    return all.filter(s =>
+    return visible.filter(s =>
       s.name !== DEFAULT_SESSION_NAME && (!s.ownedBy || s.ownedBy === callerId)
     );
+  }
+
+  updateSessionKind(name: string, sessionKind: NamedSessionKind): void {
+    const session = this.sessions.get(name);
+    if (session) {
+      session.sessionKind = sessionKind;
+    }
   }
 
   /**

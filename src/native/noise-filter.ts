@@ -39,6 +39,7 @@ export function filterRequestsNative(
       // Map indices back to entries
       return {
         signal: parsed.signalIndices.map(i => entries[i]),
+        htmlDocument: [],
         noise: parsed.noiseIndices.map(i => entries[i]),
         ambiguous: parsed.ambiguousIndices.map(i => entries[i]),
       };

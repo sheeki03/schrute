@@ -52,11 +52,13 @@ const DEFAULT_SITE_POLICY: Omit<SitePolicy, 'siteId'> = {
   allowedMethods: ['GET', 'HEAD'] as HttpMethod[],
   maxQps: 10,
   maxConcurrent: 3,
+  minGapMs: 100,
   readOnlyDefault: true,
   requireConfirmation: [],
   domainAllowlist: [],
   redactionRules: [],
   capabilities: [...V01_DEFAULT_CAPABILITIES],
+  browserRequired: false,
 };
 
 const POLICY_CACHE_TTL_MS = 300_000; // 5 minutes
@@ -79,11 +81,13 @@ function loadPolicyFromDb(siteId: string, config?: SchruteConfig): SitePolicy | 
       allowed_methods: string;
       max_qps: number;
       max_concurrent: number;
+      min_gap_ms: number | null;
       read_only_default: number;
       require_confirmation: string;
       domain_allowlist: string | null;
       redaction_rules: string;
       capabilities: string;
+      browser_required: number | null;
       execution_backend: string | null;
       execution_session_name: string | null;
     }>('SELECT * FROM policies WHERE site_id = ?', siteId);
@@ -98,19 +102,21 @@ function loadPolicyFromDb(siteId: string, config?: SchruteConfig): SitePolicy | 
       log.warn({ siteId, invalid: rawMethods.filter(m => !VALID_HTTP_METHODS.has(m)) }, 'Filtered invalid HTTP methods from persisted policy');
     }
 
-    return {
+    return normalizeSitePolicy({
       siteId: row.site_id,
       allowedMethods,
       maxQps: row.max_qps,
       maxConcurrent: row.max_concurrent,
+      minGapMs: row.min_gap_ms ?? DEFAULT_SITE_POLICY.minGapMs,
       readOnlyDefault: row.read_only_default === 1,
       requireConfirmation: JSON.parse(row.require_confirmation),
       domainAllowlist: row.domain_allowlist ? JSON.parse(row.domain_allowlist) : [],
       redactionRules: JSON.parse(row.redaction_rules),
       capabilities: JSON.parse(row.capabilities),
+      browserRequired: row.browser_required === 1,
       executionBackend: (row.execution_backend as SitePolicy['executionBackend']) ?? undefined,
       executionSessionName: row.execution_session_name ?? undefined,
-    };
+    });
   } catch (err) {
     const policyLog = getLogger();
     policyLog.error(
@@ -118,6 +124,46 @@ function loadPolicyFromDb(siteId: string, config?: SchruteConfig): SitePolicy | 
       'Failed to load site policy from database — falling back to restrictive defaults',
     );
     return null;
+  }
+}
+
+const VALID_EXECUTION_BACKENDS = new Set<NonNullable<SitePolicy['executionBackend']>>([
+  'playwright',
+  'agent-browser',
+  'live-chrome',
+]);
+
+function normalizeSitePolicy(policy: SitePolicy): SitePolicy {
+  return {
+    ...DEFAULT_SITE_POLICY,
+    ...policy,
+    browserRequired: policy.browserRequired === true,
+  };
+}
+
+function validateSitePolicy(policy: SitePolicy): void {
+  if (policy.minGapMs !== undefined && (!Number.isFinite(policy.minGapMs) || policy.minGapMs < 0)) {
+    throw new Error(`minGapMs must be a finite number >= 0. Got '${policy.minGapMs}'.`);
+  }
+
+  if (policy.browserRequired !== undefined && typeof policy.browserRequired !== 'boolean') {
+    throw new Error(`browserRequired must be boolean when provided. Got '${typeof policy.browserRequired}'.`);
+  }
+
+  if (policy.executionBackend !== undefined && !VALID_EXECUTION_BACKENDS.has(policy.executionBackend)) {
+    throw new Error(
+      `executionBackend must be one of: ${[...VALID_EXECUTION_BACKENDS].join(', ')}. ` +
+      `Got executionBackend='${policy.executionBackend}'.`,
+    );
+  }
+
+  if (policy.executionSessionName
+      && policy.executionBackend !== 'playwright'
+      && policy.executionBackend !== 'live-chrome') {
+    throw new Error(
+      `executionSessionName requires executionBackend='playwright' or 'live-chrome'. ` +
+      `Got executionBackend='${policy.executionBackend ?? 'undefined'}'.`,
+    );
   }
 }
 
@@ -135,22 +181,15 @@ export function getSitePolicy(siteId: string, config?: SchruteConfig): SitePolic
     return dbPolicy;
   }
 
-  return { siteId, ...DEFAULT_SITE_POLICY };
+  return normalizeSitePolicy({ siteId, ...DEFAULT_SITE_POLICY });
 }
 
 export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): { persisted: boolean } {
-  // Validate: executionSessionName requires executionBackend='playwright'
-  if (policy.executionSessionName
-      && policy.executionBackend !== 'playwright'
-      && policy.executionBackend !== 'live-chrome') {
-    throw new Error(
-      `executionSessionName requires executionBackend='playwright' or 'live-chrome'. ` +
-      `Got executionBackend='${policy.executionBackend ?? 'undefined'}'.`,
-    );
-  }
+  validateSitePolicy(policy);
+  const normalized = normalizeSitePolicy(policy);
 
-  const key = policyCacheKey(policy.siteId, config);
-  sitePolicies.set(key, policy);
+  const key = policyCacheKey(normalized.siteId, config);
+  sitePolicies.set(key, normalized);
 
   try {
     const db = getDatabase(config);
@@ -161,23 +200,23 @@ export function setSitePolicy(policy: SitePolicy, config?: SchruteConfig): { per
     // we only need the row to exist, not to update it.
     db.run(
       `INSERT OR IGNORE INTO sites (id, first_seen, last_visited) VALUES (?, ?, ?)`,
-      policy.siteId, Date.now(), Date.now(),
+      normalized.siteId, Date.now(), Date.now(),
     );
     db.run(
-      `INSERT OR REPLACE INTO policies (site_id, allowed_methods, max_qps, max_concurrent, read_only_default,
+      `INSERT OR REPLACE INTO policies (site_id, allowed_methods, max_qps, max_concurrent, min_gap_ms, read_only_default,
          require_confirmation, domain_allowlist, redaction_rules, capabilities,
-         execution_backend, execution_session_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      policy.siteId, JSON.stringify(policy.allowedMethods), policy.maxQps, policy.maxConcurrent,
-      policy.readOnlyDefault ? 1 : 0, JSON.stringify(policy.requireConfirmation),
-      JSON.stringify(policy.domainAllowlist), JSON.stringify(policy.redactionRules),
-      JSON.stringify(policy.capabilities),
-      policy.executionBackend ?? null, policy.executionSessionName ?? null,
+         browser_required, execution_backend, execution_session_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      normalized.siteId, JSON.stringify(normalized.allowedMethods), normalized.maxQps, normalized.maxConcurrent,
+      normalized.minGapMs ?? DEFAULT_SITE_POLICY.minGapMs, normalized.readOnlyDefault ? 1 : 0, JSON.stringify(normalized.requireConfirmation),
+      JSON.stringify(normalized.domainAllowlist), JSON.stringify(normalized.redactionRules),
+      JSON.stringify(normalized.capabilities), normalized.browserRequired ? 1 : 0,
+      normalized.executionBackend ?? null, normalized.executionSessionName ?? null,
     );
     return { persisted: true };
   } catch (err) {
     const log = getLogger();
-    log.warn({ siteId: policy.siteId, err }, 'Failed to persist site policy to database');
+    log.warn({ siteId: normalized.siteId, err }, 'Failed to persist site policy to database');
     return { persisted: false };
   }
 }

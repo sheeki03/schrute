@@ -20,6 +20,8 @@ export interface RetryOptions extends ExecutorOptions {
   maxRetries?: number;
   /** Site-recommended tier passed from engine (which owns siteRepo) */
   siteRecommendedTier?: ExecutionTierName;
+  /** Site policy can suppress all automatic direct probes */
+  directAllowed?: boolean;
   /** WS-4: Force execution to start at this tier (canary probe support) */
   forceStartTier?: ExecutionTierName;
   /** WS-4: Marks this execution as a canary probe */
@@ -62,12 +64,12 @@ export async function retryWithEscalation(
     );
 
     const result = await executeSkill(skill, params, options);
-    const startTier = options?.forceTier ?? (getEffectiveTier(skill) === 'tier_1' ? ExecutionTier.DIRECT : ExecutionTier.BROWSER_PROXIED);
+    const startTier = options?.forceTier ?? determineStartingTier(skill);
     return { ...result, retryDecisions: [], startingTier: startTier, stepResults: [] };
   }
 
   // Determine tier cascade based on skill
-  const tierCascade = buildTierCascade(skill, options?.siteRecommendedTier);
+  const tierCascade = buildTierCascade(skill, options?.siteRecommendedTier, options?.directAllowed ?? true);
   let currentTierIndex = 0;
 
   // WS-4: Honor forceStartTier — start from its position in cascade, or prepend it
@@ -212,6 +214,13 @@ function decideRetry(
     return decision('abort', currentTier, 'Fetch error — all tiers exhausted');
   }
 
+  if (cause === FailureCause.CLOUDFLARE_CHALLENGE) {
+    if (canEscalate) {
+      return decision('escalate', tierCascade[nextTierIndex], 'Cloudflare challenge — escalating tier');
+    }
+    return decision('abort', currentTier, 'Cloudflare challenge — all tiers exhausted');
+  }
+
   // JS computed field, protocol sensitivity, signed payload: escalate tier
   if (
     cause === FailureCause.JS_COMPUTED_FIELD ||
@@ -252,19 +261,42 @@ function decideRetry(
 
 // ─── Tier Cascade ───────────────────────────────────────────────
 
-function buildTierCascade(skill: SkillSpec, siteRecommendedTier?: ExecutionTierName): ExecutionTierName[] {
+function buildTierCascade(
+  skill: SkillSpec,
+  siteRecommendedTier?: ExecutionTierName,
+  directAllowed: boolean = true,
+): ExecutionTierName[] {
+  if (isBrowserRequiredSkill(skill)) {
+    return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
+  }
   if (skill.tierLock?.type === 'permanent' || skill.tierLock?.type === 'temporary_demotion') {
     return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
   const effectiveTier = getEffectiveTier(skill);
-  if (effectiveTier === 'tier_1') {
+  if (effectiveTier === 'tier_1' && directAllowed) {
     return [ExecutionTier.DIRECT, ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
+  if (effectiveTier === 'tier_1') {
+    return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
+  }
   // tier_3 but site recommends direct — try direct first, fall back to browser
-  if (siteRecommendedTier === ExecutionTier.DIRECT) {
+  if (siteRecommendedTier === ExecutionTier.DIRECT && directAllowed) {
     return [ExecutionTier.DIRECT, ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
   }
   return [ExecutionTier.BROWSER_PROXIED, ExecutionTier.FULL_BROWSER];
+}
+
+function determineStartingTier(skill: SkillSpec): ExecutionTierName {
+  if (isBrowserRequiredSkill(skill)) {
+    return ExecutionTier.BROWSER_PROXIED;
+  }
+  return getEffectiveTier(skill) === 'tier_1'
+    ? ExecutionTier.DIRECT
+    : ExecutionTier.BROWSER_PROXIED;
+}
+
+function isBrowserRequiredSkill(skill: SkillSpec): boolean {
+  return skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'browser_required';
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

@@ -8,7 +8,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    globalSetup: ['tests/global-setup.ts'],
     include: ['tests/**/*.test.ts'],
+    exclude: ['tests/live/**'],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { BrowserBackend, CookieEntry } from '../../src/browser/backend.js';
 
 // Mock logger
@@ -14,6 +17,7 @@ vi.mock('../../src/core/logger.js', () => ({
 // Mock child_process
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
 // Mock IPC client
@@ -53,11 +57,20 @@ vi.mock('../../src/browser/agent-browser-provider.js', () => ({
 
 import { AgentBrowserBackend } from '../../src/browser/agent-browser-backend.js';
 import { execFile } from 'node:child_process';
+import {
+  cleanupAgentBrowserSessions,
+  getAgentBrowserSessionRoot,
+  writeAgentBrowserSessionMetadata,
+} from '../../src/browser/agent-browser-cleanup.js';
 import type { SchruteConfig } from '../../src/skill/types.js';
 
+const tempDirs: string[] = [];
+
 function makeConfig(): SchruteConfig {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'schrute-test-'));
+  tempDirs.push(dataDir);
   return {
-    dataDir: '/tmp/schrute-test',
+    dataDir,
     logLevel: 'silent',
     features: {
       webmcp: false,
@@ -149,6 +162,9 @@ describe('AgentBrowserBackend', () => {
 
   afterEach(async () => {
     await backend.shutdown();
+    for (const dir of tempDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('ensureProbed (once-promise probe)', () => {
@@ -279,7 +295,12 @@ describe('AgentBrowserBackend', () => {
       };
 
       // Access private sessions map
-      (backendWithAuth as any).sessions.set('site1', { provider: mockProv, ipc: mockIpc });
+      (backendWithAuth as any).sessions.set('site1', {
+        provider: mockProv,
+        ipc: mockIpc,
+        sessionName: 'exec-site1',
+        lastUsedAt: Date.now(),
+      });
 
       await backendWithAuth.closeAndPersist('site1');
 
@@ -314,7 +335,12 @@ describe('AgentBrowserBackend', () => {
       };
       const mockIpc = { close: vi.fn() };
 
-      (backendWithAuth as any).sessions.set('site1', { provider: mockProv, ipc: mockIpc });
+      (backendWithAuth as any).sessions.set('site1', {
+        provider: mockProv,
+        ipc: mockIpc,
+        sessionName: 'exec-site1',
+        lastUsedAt: Date.now(),
+      });
 
       await backendWithAuth.closeAndPersist('site1');
 
@@ -334,7 +360,12 @@ describe('AgentBrowserBackend', () => {
       };
       const mockIpc = { close: vi.fn() };
 
-      (backend as any).sessions.set('site1', { provider: mockProv, ipc: mockIpc });
+      (backend as any).sessions.set('site1', {
+        provider: mockProv,
+        ipc: mockIpc,
+        sessionName: 'exec-site1',
+        lastUsedAt: Date.now(),
+      });
 
       await backend.discardSession('site1');
 
@@ -351,8 +382,18 @@ describe('AgentBrowserBackend', () => {
       const mockProv2 = { ...mockProvider, close: vi.fn().mockResolvedValue(undefined) };
       const mockIpc2 = { close: vi.fn() };
 
-      (backend as any).sessions.set('site1', { provider: mockProv1, ipc: mockIpc1 });
-      (backend as any).sessions.set('site2', { provider: mockProv2, ipc: mockIpc2 });
+      (backend as any).sessions.set('site1', {
+        provider: mockProv1,
+        ipc: mockIpc1,
+        sessionName: 'exec-site1',
+        lastUsedAt: Date.now(),
+      });
+      (backend as any).sessions.set('site2', {
+        provider: mockProv2,
+        ipc: mockIpc2,
+        sessionName: 'exec-site2',
+        lastUsedAt: Date.now(),
+      });
 
       await backend.shutdown();
 
@@ -361,6 +402,78 @@ describe('AgentBrowserBackend', () => {
       expect(mockProv2.close).toHaveBeenCalled();
       expect(mockIpc2.close).toHaveBeenCalled();
       expect((backend as any).sessions.size).toBe(0);
+    });
+
+    it('tracks created sessions on disk and removes metadata on shutdown', async () => {
+      const config = makeConfig();
+      const trackedBackend = new AgentBrowserBackend(config);
+
+      await trackedBackend.createProvider('site1', ['example.com']);
+
+      const root = getAgentBrowserSessionRoot(config);
+      expect(fs.readdirSync(root)).toHaveLength(1);
+
+      await trackedBackend.shutdown();
+
+      expect(fs.existsSync(root)).toBe(true);
+      expect(fs.readdirSync(root)).toHaveLength(0);
+    });
+
+    it('sweeps idle sessions while leaving active ones alone', async () => {
+      vi.useFakeTimers();
+      const now = new Date('2026-03-23T12:00:00.000Z');
+      vi.setSystemTime(now);
+
+      const idleProvider = { ...mockProvider, close: vi.fn().mockResolvedValue(undefined) };
+      const idleIpc = { close: vi.fn() };
+      const activeProvider = { ...mockProvider, close: vi.fn().mockResolvedValue(undefined) };
+      const activeIpc = { close: vi.fn() };
+
+      (backend as any).sessions.set('idle-site', {
+        provider: idleProvider,
+        ipc: idleIpc,
+        sessionName: 'exec-idle-site',
+        lastUsedAt: now.getTime() - 10 * 60 * 1000,
+      });
+      (backend as any).sessions.set('active-site', {
+        provider: activeProvider,
+        ipc: activeIpc,
+        sessionName: 'exec-active-site',
+        lastUsedAt: now.getTime() - 1_000,
+      });
+
+      await backend.sweepIdleSessions(5 * 60 * 1000);
+
+      expect(idleProvider.close).toHaveBeenCalled();
+      expect(idleIpc.close).toHaveBeenCalled();
+      expect((backend as any).sessions.has('idle-site')).toBe(false);
+
+      expect(activeProvider.close).not.toHaveBeenCalled();
+      expect((backend as any).sessions.has('active-site')).toBe(true);
+
+      vi.useRealTimers();
+    });
+  });
+
+  describe('cleanupAgentBrowserSessions', () => {
+    it('closes tracked sessions by session name and removes stale metadata', async () => {
+      const config = makeConfig();
+      writeAgentBrowserSessionMetadata(config, {
+        sessionName: 'exec-site1',
+        siteId: 'site1',
+        createdAt: Date.now(),
+        purpose: 'exec',
+      });
+
+      await cleanupAgentBrowserSessions(config);
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'agent-browser',
+        ['--session', 'exec-site1', '--json', 'close'],
+        expect.objectContaining({ timeout: 10000 }),
+        expect.any(Function),
+      );
+      expect(fs.readdirSync(getAgentBrowserSessionRoot(config))).toHaveLength(0);
     });
   });
 });

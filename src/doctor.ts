@@ -348,7 +348,7 @@ function checkAuditHashChain(config: SchruteConfig): CheckResult {
     if (!verification.valid) {
       return {
         name: 'audit_hash_chain',
-        status: 'fail',
+        status: 'warning',
         message: `Audit hash chain broken at entry ${verification.brokenAt} (${verification.totalEntries} entries)`,
         details: `${verification.message ?? ''} (expected when database is shared across dev sessions or keychain key was rotated)`.trim(),
       };

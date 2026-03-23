@@ -15,12 +15,16 @@ import { detectAndWaitForChallenge } from '../../src/browser/base-browser-adapte
 function createMockPage(overrides: {
   evaluateResult?: boolean;
   titleResult?: string;
+  contentResult?: string;
+  urlResult?: string;
   waitForFunctionResolves?: boolean;
   waitForFunctionDelay?: number;
 } = {}): Page {
   const {
     evaluateResult = false,
     titleResult = 'Example Page',
+    contentResult = `<html><head><title>${titleResult}</title></head><body></body></html>`,
+    urlResult = 'https://example.com/',
     waitForFunctionResolves = true,
     waitForFunctionDelay = 0,
   } = overrides;
@@ -28,6 +32,8 @@ function createMockPage(overrides: {
   return {
     evaluate: vi.fn().mockResolvedValue(evaluateResult),
     title: vi.fn().mockResolvedValue(titleResult),
+    content: vi.fn().mockResolvedValue(contentResult),
+    url: vi.fn().mockReturnValue(urlResult),
     waitForFunction: vi.fn().mockImplementation(() => {
       if (!waitForFunctionResolves) {
         return Promise.reject(new Error('Timeout'));
@@ -59,6 +65,7 @@ describe('detectAndWaitForChallenge', () => {
     const page = createMockPage({
       evaluateResult: false,
       titleResult: 'Just a moment...',
+      contentResult: '<html><head><title>Just a moment...</title></head><body>__cf_chl_ token</body></html>',
     });
 
     const result = await detectAndWaitForChallenge(page);
@@ -69,6 +76,20 @@ describe('detectAndWaitForChallenge', () => {
     const call = vi.mocked(page.waitForFunction).mock.calls[0];
     const ctx = call[1] as { hadSelectors: boolean };
     expect(ctx.hadSelectors).toBe(false);
+  });
+
+  it('should NOT detect a generic challenge title without Cloudflare-specific corroboration', async () => {
+    const page = createMockPage({
+      evaluateResult: false,
+      titleResult: 'Just a moment...',
+      contentResult: '<html><head><title>Just a moment...</title></head><body>Please wait</body></html>',
+      urlResult: 'https://example.com/interstitial',
+    });
+
+    const result = await detectAndWaitForChallenge(page);
+
+    expect(result).toBe(false);
+    expect(page.waitForFunction).not.toHaveBeenCalled();
   });
 
   it('should NOT detect generic "Attention Required" without "Cloudflare"', async () => {
@@ -115,6 +136,7 @@ describe('detectAndWaitForChallenge', () => {
     const page = createMockPage({
       evaluateResult: false,
       titleResult: 'Verify you are human',
+      contentResult: '<html><head><title>Verify you are human</title></head><body>__cf_chl_ present</body></html>',
     });
 
     const result = await detectAndWaitForChallenge(page);
@@ -198,17 +220,13 @@ describe('detectAndWaitForChallenge selector vs title resolution', () => {
 });
 
 describe('challenge-aware snapshot content', () => {
-  it('Cloudflare title regex matches challenge page titles', () => {
-    const regex = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i;
+  it('treats only explicit Cloudflare branding as sufficient title-only evidence', () => {
+    const explicitCloudflareTitle = /Attention Required!.*Cloudflare/i;
 
-    // These should trigger challenge-aware snapshot content
-    expect(regex.test('Just a moment...')).toBe(true);
-    expect(regex.test('Verify you are human')).toBe(true);
-    expect(regex.test('Attention Required! | Cloudflare')).toBe(true);
-
-    // These should NOT trigger
-    expect(regex.test('My Normal Page')).toBe(false);
-    expect(regex.test('Attention Required!')).toBe(false);
+    expect(explicitCloudflareTitle.test('Attention Required! | Cloudflare')).toBe(true);
+    expect(explicitCloudflareTitle.test('Just a moment...')).toBe(false);
+    expect(explicitCloudflareTitle.test('Verify you are human')).toBe(false);
+    expect(explicitCloudflareTitle.test('Attention Required!')).toBe(false);
   });
 
   it('engine hint is only shown for vanilla playwright engine', () => {
@@ -272,37 +290,26 @@ describe('detectAndWaitForChallenge pre-check error handling', () => {
   });
 });
 
-describe('Cloudflare challenge title regex', () => {
-  const regex = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i;
+describe('Cloudflare challenge title heuristics', () => {
+  const explicitCloudflareTitle = /Attention Required!.*Cloudflare/i;
+  const genericChallengeTitle = /^Just a moment\b|Verify you are human/i;
 
-  it('should match "Just a moment..."', () => {
-    expect(regex.test('Just a moment...')).toBe(true);
+  it('matches explicit Cloudflare-branded challenge titles', () => {
+    expect(explicitCloudflareTitle.test('Attention Required! | Cloudflare')).toBe(true);
   });
 
-  it('should match "Just a moment" exactly', () => {
-    expect(regex.test('Just a moment')).toBe(true);
+  it('treats generic challenge titles as generic, not decisive, signals', () => {
+    expect(genericChallengeTitle.test('Just a moment...')).toBe(true);
+    expect(genericChallengeTitle.test('Verify you are human')).toBe(true);
+    expect(explicitCloudflareTitle.test('Just a moment...')).toBe(false);
+    expect(explicitCloudflareTitle.test('Verify you are human')).toBe(false);
   });
 
-  it('should match "Attention Required! | Cloudflare"', () => {
-    expect(regex.test('Attention Required! | Cloudflare')).toBe(true);
-  });
-
-  it('should match "Verify you are human"', () => {
-    expect(regex.test('Verify you are human')).toBe(true);
-  });
-
-  it('should NOT match "Attention Required!" without Cloudflare', () => {
-    expect(regex.test('Attention Required!')).toBe(false);
-  });
-
-  it('should NOT match generic titles', () => {
-    expect(regex.test('Google')).toBe(false);
-    expect(regex.test('My Website')).toBe(false);
-  });
-
-  it('should NOT match "Just another moment"', () => {
-    // \b ensures "Just a moment" is at a word boundary
-    expect(regex.test('Just a momentary pause')).toBe(false);
+  it('does not match unrelated titles', () => {
+    expect(explicitCloudflareTitle.test('Attention Required!')).toBe(false);
+    expect(genericChallengeTitle.test('Google')).toBe(false);
+    expect(genericChallengeTitle.test('My Website')).toBe(false);
+    expect(genericChallengeTitle.test('Just a momentary pause')).toBe(false);
   });
 });
 

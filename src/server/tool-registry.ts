@@ -8,6 +8,7 @@ export function rankToolsByIntent(
   skills: SkillSpec[],
   intent: string | undefined,
   k: number,
+  opts?: { preFiltered?: boolean },
 ): SkillSpec[] {
   if (!intent) {
     return skills.slice(0, k);
@@ -22,7 +23,8 @@ export function rankToolsByIntent(
   const queryPathWords = words.filter(w => !HTTP_METHODS.has(w));
 
   const scored = skills.map((skill) => {
-    let score = 0;
+    let relevance = 0; // lexical matches only
+    let quality = 0;   // non-textual boosts (tie-breakers)
     const nameLower = (skill.name ?? '').toLowerCase();
     const descLower = (skill.description ?? '').toLowerCase();
     const idLower = skill.id.toLowerCase();
@@ -32,45 +34,49 @@ export function rankToolsByIntent(
     const pathSegments = pathLower.split('/').filter(Boolean);
 
     for (const word of words) {
-      if (nameLower.includes(word)) score += 3;
-      if (descLower.includes(word)) score += 2;
-      if (idLower.includes(word)) score += 1;
-      if (pathLower.includes(word)) score += 3;
-      if (siteIdLower.includes(word)) score += 1;
+      if (nameLower.includes(word)) relevance += 3;
+      if (descLower.includes(word)) relevance += 2;
+      if (idLower.includes(word)) relevance += 1;
+      if (pathLower.includes(word)) relevance += 3;
+      if (siteIdLower.includes(word)) relevance += 1;
       // Exact method match gets +2, substring match gets +1
       if (methodLower === word) {
-        score += 2;
+        relevance += 2;
       } else if (methodLower.includes(word)) {
-        score += 1;
+        relevance += 1;
       }
       // Whole-path-segment bonus
-      if (pathSegments.includes(word)) score += 2;
+      if (pathSegments.includes(word)) relevance += 2;
     }
 
     // Method+path combo bonus: if query has e.g. "GET users", boost skills matching both
     if (queryMethod && queryPathWords.length > 0 && methodLower === queryMethod) {
       const pathMatch = queryPathWords.some(pw => pathSegments.includes(pw));
-      if (pathMatch) score += 3;
+      if (pathMatch) relevance += 3;
     }
 
     // Boost by success rate and recency
-    score += skill.successRate * 2;
+    quality += skill.successRate * 2;
     if (skill.lastUsed) {
       const ageHours = (Date.now() - skill.lastUsed) / (1000 * 60 * 60);
-      if (ageHours < 24) score += 1;
+      if (ageHours < 24) quality += 1;
     }
 
     // Boost direct-proven skills
-    if (skill.currentTier === 'tier_1') score += 1;
+    if (skill.currentTier === 'tier_1') quality += 1;
     // Boost lower latency
     const avgLatencyMs = 'avgLatencyMs' in skill ? (skill as unknown as Record<string, unknown>).avgLatencyMs : undefined;
-    if (typeof avgLatencyMs === 'number' && avgLatencyMs < 500) score += 1;
+    if (typeof avgLatencyMs === 'number' && avgLatencyMs < 500) quality += 1;
 
-    return { skill, score };
+    return { skill, relevance, quality, score: relevance + quality };
   });
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, k).map((s) => s.skill);
+  // When intent is provided and skills are NOT pre-filtered (e.g., by FTS),
+  // require at least one lexical match. Pre-filtered skills (from FTS with
+  // porter stemming) are already relevance-validated.
+  const candidates = opts?.preFiltered ? scored : scored.filter(s => s.relevance > 0);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.slice(0, k).map((s) => s.skill);
 }
 
 // ─── Parameter Key Sanitization ─────────────────────────────────
@@ -301,6 +307,74 @@ export const META_TOOLS = [
         },
       },
       required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_set_transform',
+    description: 'Set or clear an output transform for a skill',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to update' },
+        transform: {
+          type: 'object',
+          description: 'Output transform definition',
+          additionalProperties: true,
+        },
+        responseContentType: {
+          type: 'string',
+          description: 'Optional response content type override, e.g. text/html',
+        },
+        clear: {
+          type: 'boolean',
+          description: 'Clear the current transform',
+        },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'schrute_export_skill',
+    description: 'Export a skill as standalone curl, fetch, Python, or Playwright code',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        skillId: { type: 'string', description: 'Skill ID to export' },
+        format: {
+          type: 'string',
+          enum: ['curl', 'fetch.ts', 'requests.py', 'playwright.ts'],
+          description: 'Output format',
+        },
+        params: {
+          type: 'object',
+          description: 'Optional params used to resolve the request URL, headers, and body',
+          additionalProperties: true,
+        },
+      },
+      required: ['skillId', 'format'],
+    },
+  },
+  {
+    name: 'schrute_create_workflow',
+    description: 'Create a read-only linear workflow skill from existing active GET/HEAD skills',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        siteId: { type: 'string', description: 'Site ID that owns the workflow' },
+        name: { type: 'string', description: 'Workflow name' },
+        description: { type: 'string', description: 'Optional workflow description' },
+        workflowSpec: {
+          type: 'object',
+          description: 'Workflow specification with ordered steps',
+          additionalProperties: true,
+        },
+        outputTransform: {
+          type: 'object',
+          description: 'Optional transform applied to the final workflow output',
+          additionalProperties: true,
+        },
+      },
+      required: ['siteId', 'name', 'workflowSpec'],
     },
   },
   {
@@ -541,7 +615,7 @@ export const META_TOOLS = [
   },
   {
     name: 'schrute_capture_recent',
-    description: 'Capture recent network activity and generate skills from it (no pre-recording needed)',
+    description: 'Capture recent network activity and generate skills from it. Requires a CDP-connected session (schrute_connect_cdp). Does not work with schrute_explore sessions.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -719,6 +793,25 @@ export function getBrowserToolDefinitions() {
         inputSchema: {
           type: 'object' as const,
           properties: {},
+        },
+      };
+    }
+
+    // Special-case: explicit schema for browser_fill_form
+    if (name === 'browser_fill_form') {
+      return {
+        name,
+        description: 'Fill multiple form fields at once. Keys are field labels, input name attributes, or @e refs from browser_snapshot.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            values: {
+              type: 'object' as const,
+              description: 'Map of field identifiers to values. Keys: label text, input name, or @eN ref.',
+              additionalProperties: { type: 'string' as const },
+            },
+          },
+          required: ['values'] as const,
         },
       };
     }

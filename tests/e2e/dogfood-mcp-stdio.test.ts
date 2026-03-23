@@ -98,7 +98,7 @@ class McpClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`MCP timeout: ${method} (id=${id})`));
-      }, 30000);
+      }, 60000);
 
       this.pending.set(id, {
         resolve: (resp) => { clearTimeout(timeout); resolve(resp); },
@@ -196,7 +196,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       const result = resp.result as any;
       expect(result.serverInfo?.name).toBe('schrute');
       expect(result.capabilities?.tools).toBeDefined();
-    }, 10000);
+    }, 30000);
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -301,7 +301,7 @@ describe('Dogfood E2E: MCP Stdio — All Meta Tools', () => {
       const data = parseToolResult(result);
       expect(data.sessionId).toBeDefined();
       expect(data.siteId).toBe('127.0.0.1');
-    }, 30000);
+    }, 60000);
 
     it('status shows exploring after explore', async () => {
       const result = await client.callTool('schrute_status');

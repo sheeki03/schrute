@@ -8,12 +8,14 @@ import type {
   SideEffectClassName,
   AuthType,
   RequestChain,
+  OutputTransform,
   ParameterEvidence,
   CapabilityName,
   SkillParameter,
   SkillValidation,
   SkillRedactionInfo,
   ReplayStrategy,
+  WorkflowSpec,
 } from '../skill/types.js';
 import {
   SkillStatus,
@@ -108,6 +110,79 @@ function assertRequestChainShape(value: unknown): RequestChain {
   return value as RequestChain;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function assertOutputTransformShape(value: unknown): OutputTransform {
+  if (!isRecord(value) || typeof value.type !== 'string') {
+    throw new Error('Invalid OutputTransform shape: expected object with string "type"');
+  }
+  if (value.type === 'jsonpath') {
+    if (typeof value.expression !== 'string') {
+      throw new Error('Invalid OutputTransform.jsonpath: missing "expression"');
+    }
+    return value as OutputTransform;
+  }
+  if (value.type === 'regex') {
+    if (typeof value.expression !== 'string') {
+      throw new Error('Invalid OutputTransform.regex: missing "expression"');
+    }
+    if (value.flags !== undefined && typeof value.flags !== 'string') {
+      throw new Error('Invalid OutputTransform.regex: "flags" must be a string');
+    }
+    return value as OutputTransform;
+  }
+  if (value.type === 'css') {
+    if (typeof value.selector !== 'string') {
+      throw new Error('Invalid OutputTransform.css: missing "selector"');
+    }
+    if (value.fields !== undefined) {
+      if (!isRecord(value.fields)) {
+        throw new Error('Invalid OutputTransform.css: "fields" must be an object');
+      }
+      for (const [key, field] of Object.entries(value.fields)) {
+        if (!isRecord(field) || typeof field.selector !== 'string') {
+          throw new Error(`Invalid OutputTransform.css field "${key}": missing "selector"`);
+        }
+      }
+    }
+    return value as OutputTransform;
+  }
+  throw new Error(`Invalid OutputTransform shape: unknown type "${String(value.type)}"`);
+}
+
+function assertWorkflowSpecShape(value: unknown): WorkflowSpec {
+  if (!isRecord(value) || !Array.isArray(value.steps)) {
+    throw new Error('Invalid WorkflowSpec shape: missing "steps" array');
+  }
+  for (let index = 0; index < value.steps.length; index++) {
+    const step = value.steps[index];
+    if (!isRecord(step) || typeof step.skillId !== 'string') {
+      throw new Error(`Invalid WorkflowSpec step at index ${index}: missing "skillId"`);
+    }
+    if (step.paramMapping !== undefined) {
+      if (!isRecord(step.paramMapping)) {
+        throw new Error(`Invalid WorkflowSpec step at index ${index}: "paramMapping" must be an object`);
+      }
+      for (const [param, source] of Object.entries(step.paramMapping)) {
+        if (typeof source !== 'string') {
+          throw new Error(`Invalid WorkflowSpec step at index ${index}: paramMapping["${param}"] must be a string`);
+        }
+      }
+    }
+    if (step.transform !== undefined) {
+      assertOutputTransformShape(step.transform);
+    }
+    if (step.cache !== undefined) {
+      if (!isRecord(step.cache) || typeof step.cache.ttlMs !== 'number') {
+        throw new Error(`Invalid WorkflowSpec step at index ${index}: cache.ttlMs must be a number`);
+      }
+    }
+  }
+  return value as unknown as WorkflowSpec;
+}
+
 interface SkillRow {
   id: string;
   site_id: string;
@@ -119,12 +194,15 @@ interface SkillRow {
   path_template: string;
   input_schema: string | null;
   output_schema: string | null;
+  output_transform: string | null;
+  response_content_type: string | null;
   auth_type: string | null;
   required_headers: string | null;
   dynamic_headers: string | null;
   side_effect_class: string;
   is_composite: number;
   chain_spec: string | null;
+  workflow_spec: string | null;
   current_tier: string;
   tier_lock: string | null;
   confidence: number;
@@ -182,12 +260,19 @@ function rowToSkill(row: SkillRow): SkillSpec {
     pathTemplate: row.path_template,
     inputSchema: parseJson<Record<string, unknown>>(row.input_schema, {}),
     outputSchema: row.output_schema ? parseJson<Record<string, unknown>>(row.output_schema, {}) : undefined,
+    outputTransform: row.output_transform
+      ? parseJson<OutputTransform>(row.output_transform, undefined as unknown as OutputTransform, assertOutputTransformShape)
+      : undefined,
+    responseContentType: row.response_content_type ?? undefined,
     authType: row.auth_type ? validateAuthType(row.auth_type) : undefined,
     requiredHeaders: row.required_headers ? parseJson<Record<string, string>>(row.required_headers, {}) : undefined,
     dynamicHeaders: row.dynamic_headers ? parseJson<Record<string, string>>(row.dynamic_headers, {}) : undefined,
     sideEffectClass: validateSideEffectClass(row.side_effect_class),
     isComposite: row.is_composite === 1,
     chainSpec: row.chain_spec ? parseJson<RequestChain>(row.chain_spec, undefined as unknown as RequestChain, assertRequestChainShape) : undefined,
+    workflowSpec: row.workflow_spec
+      ? parseJson<WorkflowSpec>(row.workflow_spec, undefined as unknown as WorkflowSpec, assertWorkflowSpecShape)
+      : undefined,
     currentTier: validateTierState(row.current_tier),
     tierLock: parseJson<TierLock>(row.tier_lock, null, assertTierLockShape),
     confidence: row.confidence,
@@ -230,8 +315,9 @@ export class SkillRepository {
     this.db.run(
       `INSERT INTO skills (
         id, site_id, name, version, status, description, method, path_template,
-        input_schema, output_schema, auth_type, required_headers, dynamic_headers,
-        side_effect_class, is_composite, chain_spec, current_tier, tier_lock,
+        input_schema, output_schema, output_transform, response_content_type,
+        auth_type, required_headers, dynamic_headers,
+        side_effect_class, is_composite, chain_spec, workflow_spec, current_tier, tier_lock,
         confidence, consecutive_validations, sample_count, parameter_evidence,
         last_verified, last_used, success_rate, skill_md, openapi_fragment,
         created_at, updated_at,
@@ -239,7 +325,7 @@ export class SkillRepository {
         avg_latency_ms, last_successful_tier,
         direct_canary_eligible, direct_canary_attempts, validations_since_last_canary, last_canary_error_type,
         review_required, sample_params
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       skill.id,
       skill.siteId,
       skill.name,
@@ -250,12 +336,15 @@ export class SkillRepository {
       skill.pathTemplate,
       JSON.stringify(skill.inputSchema),
       skill.outputSchema ? JSON.stringify(skill.outputSchema) : null,
+      skill.outputTransform ? JSON.stringify(skill.outputTransform) : null,
+      skill.responseContentType ?? null,
       skill.authType ?? null,
       skill.requiredHeaders ? JSON.stringify(skill.requiredHeaders) : null,
       skill.dynamicHeaders ? JSON.stringify(skill.dynamicHeaders) : null,
       skill.sideEffectClass,
       skill.isComposite ? 1 : 0,
       skill.chainSpec ? JSON.stringify(skill.chainSpec) : null,
+      skill.workflowSpec ? JSON.stringify(skill.workflowSpec) : null,
       skill.currentTier,
       skill.tierLock ? JSON.stringify(skill.tierLock) : null,
       skill.confidence,
@@ -332,7 +421,7 @@ export class SkillRepository {
     const directColumns: Array<[keyof typeof updates, string]> = [
       ['name', 'name'], ['version', 'version'], ['status', 'status'],
       ['description', 'description'], ['method', 'method'],
-      ['pathTemplate', 'path_template'], ['authType', 'auth_type'],
+      ['pathTemplate', 'path_template'], ['responseContentType', 'response_content_type'], ['authType', 'auth_type'],
       ['sideEffectClass', 'side_effect_class'], ['currentTier', 'current_tier'],
       ['confidence', 'confidence'], ['consecutiveValidations', 'consecutive_validations'],
       ['sampleCount', 'sample_count'], ['lastVerified', 'last_verified'],
@@ -347,8 +436,9 @@ export class SkillRepository {
     // JSON-serialized columns
     const jsonColumns: Array<[keyof typeof updates, string]> = [
       ['inputSchema', 'input_schema'], ['outputSchema', 'output_schema'],
+      ['outputTransform', 'output_transform'],
       ['requiredHeaders', 'required_headers'], ['dynamicHeaders', 'dynamic_headers'],
-      ['chainSpec', 'chain_spec'], ['parameterEvidence', 'parameter_evidence'],
+      ['chainSpec', 'chain_spec'], ['workflowSpec', 'workflow_spec'], ['parameterEvidence', 'parameter_evidence'],
       ['allowedDomains', 'allowed_domains'], ['requiredCapabilities', 'required_capabilities'],
       ['parameters', 'parameters'], ['validation', 'validation'], ['redaction', 'redaction'],
       ['sampleParams', 'sample_params'],
@@ -364,7 +454,7 @@ export class SkillRepository {
     for (const [prop, col] of jsonColumns) {
       if (updates[prop] !== undefined) {
         fields.push(`${col} = ?`);
-        values.push(JSON.stringify(updates[prop]));
+        values.push(updates[prop] === null ? null : JSON.stringify(updates[prop]));
       }
     }
 

@@ -19,11 +19,20 @@ interface RateCheckResult {
   retryAfterMs?: number;
 }
 
+interface RateCheckOptions {
+  minGapMs?: number;
+}
+
+interface WaitForPermitOptions extends RateCheckOptions {
+  timeoutMs?: number;
+}
+
 interface SiteBucket {
   tokens: number;
   maxTokens: number;
   refillRate: number; // tokens per second
   lastRefill: number;
+  lastGrantedAt: number;
   backoffUntil: number;
   backoffMultiplier: number;
   latencyEwa: number;
@@ -95,63 +104,78 @@ export class RateLimiter {
    * 1. Global site bucket — protects upstream API (shared across all callers)
    * 2. Per-caller sub-bucket — ensures fairness (one caller can't exhaust the budget)
    */
-  checkRate(siteId: string, callerId?: string): RateCheckResult {
+  checkRate(siteId: string, callerId?: string, options?: RateCheckOptions): RateCheckResult {
+    return this.tryAcquirePermit(siteId, callerId, options);
+  }
+
+  async waitForPermit(
+    siteId: string,
+    callerId?: string,
+    options?: WaitForPermitOptions,
+  ): Promise<RateCheckResult> {
+    const timeoutMs = Math.max(options?.timeoutMs ?? 30_000, 0);
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      const result = this.tryAcquirePermit(siteId, callerId, options);
+      if (result.allowed) {
+        return result;
+      }
+
+      const retryAfterMs = Math.max(Math.ceil(result.retryAfterMs ?? 0), 1);
+      if (Date.now() + retryAfterMs > deadline) {
+        return result;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+    }
+  }
+
+  /**
+   * Two-tier rate check:
+   * 1. Global site bucket — protects upstream API (shared across all callers)
+   * 2. Per-caller sub-bucket — ensures fairness (one caller can't exhaust the budget)
+   */
+  private tryAcquirePermit(
+    siteId: string,
+    callerId?: string,
+    options?: RateCheckOptions,
+  ): RateCheckResult {
+    const minGapMs = Math.max(Math.floor(options?.minGapMs ?? 0), 0);
+
     // 1. Check global site bucket first — protects upstream
     const siteBucket = this.getOrCreateSiteBucket(siteId);
     this.refillTokens(siteBucket);
 
     const now = Date.now();
-
-    // Check site-level backoff
-    if (now < siteBucket.backoffUntil) {
-      const retryAfterMs = siteBucket.backoffUntil - now;
-      log.debug(
-        { siteId, retryAfterMs },
-        'Rate limited: in backoff period',
-      );
-      return { allowed: false, retryAfterMs };
-    }
-
-    // Check site-level tokens
-    if (siteBucket.tokens < 1) {
-      const retryAfterMs = Math.ceil((1 - siteBucket.tokens) / siteBucket.refillRate * 1000);
-      log.debug(
-        { siteId, tokens: siteBucket.tokens, retryAfterMs },
-        'Rate limited: insufficient tokens',
-      );
-      return { allowed: false, retryAfterMs };
-    }
+    let retryAfterMs = this.getBucketRetryAfterMs(siteBucket, now);
+    retryAfterMs = Math.max(retryAfterMs, this.getMinGapRetryAfterMs(siteBucket, now, minGapMs));
 
     // 2. If callerId provided, also check per-caller sub-bucket
+    let callerBucket: SiteBucket | undefined;
     if (callerId) {
       const callerKey = `${siteId}::${callerId}`;
-      const callerBucket = this.getOrCreateCallerBucket(callerKey, siteBucket);
+      callerBucket = this.getOrCreateCallerBucket(callerKey, siteBucket);
       this.refillTokens(callerBucket);
+      retryAfterMs = Math.max(retryAfterMs, this.getBucketRetryAfterMs(callerBucket, now));
+    }
 
-      if (now < callerBucket.backoffUntil) {
-        const retryAfterMs = callerBucket.backoffUntil - now;
-        log.debug(
-          { siteId, callerId, retryAfterMs },
-          'Rate limited: caller in backoff period',
-        );
-        return { allowed: false, retryAfterMs };
-      }
+    if (retryAfterMs > 0) {
+      log.debug(
+        { siteId, callerId, retryAfterMs, minGapMs },
+        'Rate limited: permit unavailable',
+      );
+      return { allowed: false, retryAfterMs };
+    }
 
-      if (callerBucket.tokens < 1) {
-        const retryAfterMs = Math.ceil((1 - callerBucket.tokens) / callerBucket.refillRate * 1000);
-        log.debug(
-          { siteId, callerId, tokens: callerBucket.tokens, retryAfterMs },
-          'Rate limited: caller insufficient tokens',
-        );
-        return { allowed: false, retryAfterMs };
-      }
-
-      // Consume from caller bucket
+    if (callerBucket) {
       callerBucket.tokens -= 1;
+      callerBucket.lastGrantedAt = now;
     }
 
     // 3. Consume from global bucket
     siteBucket.tokens -= 1;
+    siteBucket.lastGrantedAt = now;
     return { allowed: true };
   }
 
@@ -275,6 +299,7 @@ export class RateLimiter {
         maxTokens: Math.max(Math.ceil(this.defaultQps * BURST_CAPACITY_MULTIPLIER), 1),
         refillRate: this.defaultQps,
         lastRefill: Date.now(),
+        lastGrantedAt: 0,
         backoffUntil: 0,
         backoffMultiplier: INITIAL_BACKOFF_MULTIPLIER,
         latencyEwa: 0,
@@ -294,6 +319,7 @@ export class RateLimiter {
         maxTokens,
         refillRate: Math.max(0.1, siteBucket.refillRate * this.callerFraction),
         lastRefill: Date.now(),
+        lastGrantedAt: 0,
         backoffUntil: 0,
         backoffMultiplier: INITIAL_BACKOFF_MULTIPLIER,
         latencyEwa: 0,
@@ -312,6 +338,32 @@ export class RateLimiter {
       bucket.tokens + elapsed * bucket.refillRate,
     );
     bucket.lastRefill = now;
+  }
+
+  private getBucketRetryAfterMs(bucket: SiteBucket, now: number): number {
+    let retryAfterMs = 0;
+
+    if (now < bucket.backoffUntil) {
+      retryAfterMs = Math.max(retryAfterMs, bucket.backoffUntil - now);
+    }
+
+    if (bucket.tokens < 1) {
+      retryAfterMs = Math.max(
+        retryAfterMs,
+        Math.ceil((1 - bucket.tokens) / bucket.refillRate * 1000),
+      );
+    }
+
+    return retryAfterMs;
+  }
+
+  private getMinGapRetryAfterMs(bucket: SiteBucket, now: number, minGapMs: number): number {
+    if (minGapMs <= 0 || bucket.lastGrantedAt === 0) {
+      return 0;
+    }
+
+    const nextAllowedAt = bucket.lastGrantedAt + minGapMs;
+    return nextAllowedAt > now ? nextAllowedAt - now : 0;
   }
 
   private parseRetryAfter(headers: Record<string, string>): number | null {

@@ -124,3 +124,35 @@ describe('AgentBrowserProvider.evaluateFetch', () => {
     });
   });
 });
+
+describe('AgentBrowserProvider.detectChallengePage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('does not treat generic interstitial text alone as a Cloudflare challenge', async () => {
+    const ipc = makeIpc({
+      send: vi.fn()
+        .mockResolvedValueOnce({ snapshot: 'Just a moment... Checking your browser' })
+        .mockResolvedValueOnce({ url: 'https://example.com/interstitial' }),
+    });
+    const provider = new AgentBrowserProvider(ipc, ['example.com']);
+
+    const detected = await provider.detectChallengePage();
+
+    expect(detected).toBe(false);
+  });
+
+  it('treats Cloudflare-specific corroboration as a challenge signal', async () => {
+    const ipc = makeIpc({
+      send: vi.fn()
+        .mockResolvedValueOnce({ snapshot: 'Just a moment... __cf_chl_ token present' })
+        .mockResolvedValueOnce({ url: 'https://example.com/cdn-cgi/challenge-platform' }),
+    });
+    const provider = new AgentBrowserProvider(ipc, ['example.com']);
+
+    const detected = await provider.detectChallengePage();
+
+    expect(detected).toBe(true);
+  });
+});

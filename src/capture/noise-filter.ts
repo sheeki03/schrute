@@ -25,6 +25,7 @@ const STATIC_RESOURCE_TYPE_SET = buildStaticResourceTypeSet();
 
 export interface FilterResult {
   signal: HarEntry[];
+  htmlDocument: HarEntry[];
   noise: HarEntry[];
   ambiguous: HarEntry[];
 }
@@ -92,6 +93,7 @@ export function filterRequests(
   siteHost?: string,
 ): FilterResult {
   const signal: HarEntry[] = [];
+  const htmlDocument: HarEntry[] = [];
   const noise: HarEntry[] = [];
   const ambiguous: HarEntry[] = [];
 
@@ -105,16 +107,22 @@ export function filterRequests(
 
   for (const entry of entries) {
     const { classification } = classifyEntry(entry, overrideMap, pollingUrls, siteHost);
-    const bucket = classification === 'noise' ? noise : classification === 'ambiguous' ? ambiguous : signal;
+    const bucket = classification === 'noise'
+      ? noise
+      : classification === 'ambiguous'
+        ? ambiguous
+        : classification === 'html_document'
+          ? htmlDocument
+          : signal;
     bucket.push(entry);
   }
 
   log.debug(
-    { signal: signal.length, noise: noise.length, ambiguous: ambiguous.length },
+    { signal: signal.length, htmlDocument: htmlDocument.length, noise: noise.length, ambiguous: ambiguous.length },
     'Filtered requests',
   );
 
-  return { signal, noise, ambiguous };
+  return { signal, htmlDocument, noise, ambiguous };
 }
 
 export function isObviousNoise(
@@ -199,6 +207,7 @@ export function recordFilteredEntries(
   const pollingUrls = detectPollingPatterns(entries);
 
   const signal: HarEntry[] = [];
+  const htmlDocument: HarEntry[] = [];
   const noise: HarEntry[] = [];
   const ambiguous: HarEntry[] = [];
 
@@ -221,11 +230,17 @@ export function recordFilteredEntries(
       log.warn({ frameId, requestHash, err }, 'Failed to insert action_frame_entry, skipping');
     }
 
-    const bucket = classification === 'noise' ? noise : classification === 'ambiguous' ? ambiguous : signal;
+    const bucket = classification === 'noise'
+      ? noise
+      : classification === 'ambiguous'
+        ? ambiguous
+        : classification === 'html_document'
+          ? htmlDocument
+          : signal;
     bucket.push(entry);
   }
 
-  return { signal, noise, ambiguous };
+  return { signal, htmlDocument, noise, ambiguous };
 }
 
 // ─── Classification Logic ────────────────────────────────────────────
@@ -300,8 +315,12 @@ function classifyEntry(
     return { classification: 'noise', reason: 'polling' };
   }
 
+  if (isHtmlDocumentEntry(entry, hostname, siteHost)) {
+    return { classification: 'html_document', reason: 'html_document' };
+  }
+
   // If we get here and the response is a non-API content type, mark ambiguous
-  const contentType = getResponseContentType(entry);
+  const contentType = (getResponseContentType(entry) ?? '').toLowerCase();
   if (contentType && (contentType.includes('text/html') || contentType.includes('text/css'))) {
     return { classification: 'ambiguous', reason: 'non_api_content_type' };
   }
@@ -490,6 +509,24 @@ function getResponseContentType(entry: HarEntry): string | undefined {
     h => h.name.toLowerCase() === 'content-type',
   );
   return header?.value;
+}
+
+function isHtmlDocumentEntry(entry: HarEntry, hostname: string, siteHost?: string): boolean {
+  const method = entry.request.method.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    return false;
+  }
+  if (entry.response.status !== 200) {
+    return false;
+  }
+  if (!siteHost || !isLearnableHost(hostname, siteHost)) {
+    return false;
+  }
+  const contentType = (getResponseContentType(entry) ?? '').toLowerCase();
+  if (!contentType.includes('text/html')) {
+    return false;
+  }
+  return (entry._resourceType ?? '').toLowerCase() === 'document';
 }
 
 function hashEntry(entry: HarEntry): string {

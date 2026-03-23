@@ -7,6 +7,7 @@ import type {
   FieldVolatility,
 } from '../skill/types.js';
 import { buildRequest } from './request-builder.js';
+import { formatPermanentTierLockReason } from '../core/tiering.js';
 import {
   redactHeaders as canonicalRedactHeaders,
   redactBody as canonicalRedactBody,
@@ -26,6 +27,8 @@ interface DryRunResult {
   tier: ExecutionTierName;
   volatilityReport?: FieldVolatility[];
   tierDecision?: string;
+  outputTransform?: SkillSpec['outputTransform'];
+  responseContentType?: string;
 }
 
 // ─── Dry Run ────────────────────────────────────────────────────
@@ -81,6 +84,8 @@ export async function dryRun(
       redactionsApplied,
     },
     tier,
+    outputTransform: skill.outputTransform,
+    responseContentType: skill.responseContentType,
   };
 
   // developer-debug mode includes extra info
@@ -126,7 +131,7 @@ function describeTierDecision(skill: SkillSpec): string {
   if (skill.tierLock) {
     parts.push(`tierLock.type=${skill.tierLock.type}`);
     if (skill.tierLock.type === 'permanent') {
-      parts.push(`tierLock.reason=${skill.tierLock.reason}`);
+      parts.push(`tierLock.reason=${formatPermanentTierLockReason(skill.tierLock.reason)}`);
     }
   } else {
     parts.push('tierLock=none');

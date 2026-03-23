@@ -1,0 +1,1 @@
+ALTER TABLE policies ADD COLUMN browser_required INTEGER NOT NULL DEFAULT 0;

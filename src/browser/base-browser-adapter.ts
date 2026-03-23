@@ -41,11 +41,13 @@ import { resizeScreenshotBuffer, estimateScale, DEFAULT_MAX_DIMENSION, DEFAULT_M
 import { humanMousePreamble } from './human-input.js';
 import { isObviousNoise, shouldCaptureResponseBody } from '../capture/noise-filter.js';
 import { getLogger } from '../core/logger.js';
+import { isCloudflareChallengeSignal } from '../shared/cloudflare-challenge.js';
 
 const log = getLogger();
 
-// Cloudflare page title patterns — used for both challenge detection and snapshot warnings
-const CF_CHALLENGE_TITLE_RE = /^Just a moment\b|Attention Required!.*Cloudflare|Verify you are human/i;
+// Cloudflare page title patterns — generic titles require additional corroboration,
+// while explicit Cloudflare-branded titles remain sufficient on their own.
+const CF_EXPLICIT_CHALLENGE_TITLE_RE = /Attention Required!.*Cloudflare/i;
 const CF_PHISHING_TITLE_RE = /Suspected phishing|phishing site.*Cloudflare/i;
 
 // Browser-context globals used in page.evaluate/waitForFunction callbacks.
@@ -66,19 +68,28 @@ export async function isCloudflareChallengePage(page: Page): Promise<boolean> {
 
   let challengeElements: boolean;
   let title: string;
+  let content: string;
   try {
-    [challengeElements, title] = await Promise.all([
+    [challengeElements, title, content] = await Promise.all([
       page.evaluate((selectors: string[]) => {
         return selectors.some(sel => document.querySelector(sel) !== null);
       }, indicators),
       page.title(),
+      page.content(),
     ]);
   } catch {
     // Page context destroyed or closed — safe to return false
     return false;
   }
 
-  return challengeElements || CF_CHALLENGE_TITLE_RE.test(title) || CF_PHISHING_TITLE_RE.test(title);
+  if (challengeElements || CF_PHISHING_TITLE_RE.test(title) || CF_EXPLICIT_CHALLENGE_TITLE_RE.test(title)) {
+    return true;
+  }
+
+  return isCloudflareChallengeSignal({
+    url: page.url(),
+    content: `${title}\n${content}`,
+  });
 }
 
 /**
@@ -96,12 +107,14 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
 
   let challengeElements: boolean;
   let title: string;
+  let content: string;
   try {
-    [challengeElements, title] = await Promise.all([
+    [challengeElements, title, content] = await Promise.all([
       page.evaluate((selectors: string[]) => {
         return selectors.some(sel => document.querySelector(sel) !== null);
       }, indicators),
       page.title(),
+      page.content(),
     ]);
   } catch {
     // Page context destroyed or closed — safe to return false
@@ -121,7 +134,11 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
     return false;
   }
 
-  const titleMatch = CF_CHALLENGE_TITLE_RE.test(title);
+  const titleMatch = CF_EXPLICIT_CHALLENGE_TITLE_RE.test(title)
+    || isCloudflareChallengeSignal({
+      url: page.url(),
+      content: `${title}\n${content}`,
+    });
 
   if (!challengeElements && !titleMatch) return false;
 
@@ -924,7 +941,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       case 'browser_fill_form': {
         const values = args.values;
         if (typeof values !== 'object' || values === null || Array.isArray(values)) {
-          throw new Error('Expected values to be a Record<string, string>');
+          throw new Error(
+            'browser_fill_form expects { values: { "<label|name|@ref>": "value", ... } }. ' +
+            'Keys can be field labels, input name attributes, or @e refs from browser_snapshot. ' +
+            'For single-field input, use browser_type instead.'
+          );
         }
         await this.fillForm(values as Record<string, string>);
         return { success: true };
@@ -1237,7 +1258,11 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     }
 
     // Cloudflare challenge / interstitial page detection
-    const isChallenged = CF_CHALLENGE_TITLE_RE.test(title);
+    const isChallenged = CF_EXPLICIT_CHALLENGE_TITLE_RE.test(title)
+      || isCloudflareChallengeSignal({
+        url,
+        content: `${title}\n${content}`,
+      });
     const isPhishingPage = CF_PHISHING_TITLE_RE.test(title);
     if (isChallenged || isPhishingPage) {
       const currentEngine = this.capabilities?.effectiveEngine ?? 'unknown';
@@ -1430,6 +1455,14 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
 
   getCurrentUrl(): string {
     return this.page.url();
+  }
+
+  async detectChallengePage(): Promise<boolean> {
+    const url = this.page.url();
+    if (/\/cdn-cgi\//i.test(url)) {
+      return true;
+    }
+    return isCloudflareChallengePage(this.page);
   }
 
   private async captureScreenshot(options?: {

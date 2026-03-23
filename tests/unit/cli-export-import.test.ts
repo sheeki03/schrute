@@ -121,6 +121,7 @@ function makeBundle() {
       domainAllowlist: [],
       redactionRules: [],
       capabilities: [],
+      browserRequired: false,
     },
   };
 }
@@ -272,5 +273,15 @@ describe('Import bundle', () => {
     expect(restored.skills.length).toBe(bundle.skills.length);
     expect(restored.skills[0].name).toBe(bundle.skills[0].name);
     expect(restored.policy.siteId).toBe(bundle.policy.siteId);
+  });
+
+  it('roundtrips browserRequired in policy bundles', () => {
+    const bundle = makeBundle();
+    bundle.policy.browserRequired = true;
+
+    const restored = JSON.parse(JSON.stringify(bundle));
+
+    expect(restored.policy.browserRequired).toBe(true);
+    expect(restored.policy.siteId).toBe('example.com');
   });
 });

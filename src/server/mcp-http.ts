@@ -74,14 +74,14 @@ export async function startMcpHttpServer(
     registerPromptHandlers(server, depsWithRouter);
 
     server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
-      const listCallerId = (extra as { sessionId?: string })?.sessionId ?? 'mcp-http-unknown';
+      const listCallerId = `mcp-http:${(extra as { sessionId?: string })?.sessionId ?? 'unknown'}`;
       const tools = buildToolList(depsWithRouter, listCallerId);
       return { tools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: args } = request.params;
-      const toolCallerId = (extra as { sessionId?: string })?.sessionId ?? 'mcp-http-unknown';
+      const toolCallerId = `mcp-http:${(extra as { sessionId?: string })?.sessionId ?? 'unknown'}`;
       return dispatchToolCall(name, args as Record<string, unknown> | undefined, depsWithRouter, toolCallerId);
     });
   }

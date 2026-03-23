@@ -194,4 +194,21 @@ describe('searchAndProjectSkills', () => {
     expect(inactiveMatches).toBeDefined();
     expect(inactiveMatches!.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('renders humanized permanent lock reasons in promotionProgress', () => {
+    const skills = [
+      makeSkill({
+        id: 'locked.v1',
+        name: 'locked_api',
+        currentTier: 'tier_3',
+        tierLock: { type: 'permanent', reason: 'browser_required', evidence: 'cloudflare' },
+      }),
+    ];
+    const repo = makeSkillRepo(skills);
+    const bm = mockBrowserManager(true);
+
+    const { results } = searchAndProjectSkills(repo, bm, { limit: 10 });
+
+    expect(results[0].promotionProgress).toBe('Locked: Browser required');
+  });
 });

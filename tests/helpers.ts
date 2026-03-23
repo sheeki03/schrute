@@ -219,6 +219,7 @@ export function makeSitePolicy(overrides?: Partial<SitePolicy>): SitePolicy {
     allowedMethods: ['GET', 'HEAD'],
     maxQps: 10,
     maxConcurrent: 3,
+    minGapMs: 100,
     readOnlyDefault: true,
     requireConfirmation: [],
     domainAllowlist: ['example.com'],

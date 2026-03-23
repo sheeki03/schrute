@@ -15,7 +15,27 @@ vi.mock('../../src/core/logger.js', () => ({
 // We need to import config functions fresh each time because of cached state
 let configModule: typeof import('../../src/core/config.js');
 
+const SCHRUTE_ENV_KEYS = [
+  'SCHRUTE_DATA_DIR',
+  'SCHRUTE_LOG_LEVEL',
+  'SCHRUTE_AUTH_TOKEN',
+  'SCHRUTE_NETWORK',
+  'SCHRUTE_HTTP_TRANSPORT',
+  'SCHRUTE_HTTP_PORT',
+  'SCHRUTE_BROWSER_ENGINE',
+  'SCHRUTE_SNAPSHOT_MODE',
+  'SCHRUTE_INCREMENTAL_DIFFS',
+] as const;
+
+let savedEnv: Record<string, string | undefined>;
+
 beforeEach(async () => {
+  // Save current SCHRUTE_* env vars (including global-setup's SCHRUTE_DATA_DIR)
+  savedEnv = {};
+  for (const key of SCHRUTE_ENV_KEYS) {
+    savedEnv[key] = process.env[key];
+  }
+
   vi.resetModules();
   vi.mock('../../src/core/logger.js', () => ({
     getLogger: () => ({
@@ -26,30 +46,23 @@ beforeEach(async () => {
     }),
   }));
   // Clean env vars before each test
-  delete process.env.SCHRUTE_DATA_DIR;
-  delete process.env.SCHRUTE_LOG_LEVEL;
-  delete process.env.SCHRUTE_AUTH_TOKEN;
-  delete process.env.SCHRUTE_NETWORK;
-  delete process.env.SCHRUTE_HTTP_TRANSPORT;
-  delete process.env.SCHRUTE_HTTP_PORT;
-  delete process.env.SCHRUTE_BROWSER_ENGINE;
-  delete process.env.SCHRUTE_SNAPSHOT_MODE;
-  delete process.env.SCHRUTE_INCREMENTAL_DIFFS;
+  for (const key of SCHRUTE_ENV_KEYS) {
+    delete process.env[key];
+  }
 
   configModule = await import('../../src/core/config.js');
   configModule.resetConfigCache();
 });
 
 afterEach(() => {
-  delete process.env.SCHRUTE_DATA_DIR;
-  delete process.env.SCHRUTE_LOG_LEVEL;
-  delete process.env.SCHRUTE_AUTH_TOKEN;
-  delete process.env.SCHRUTE_NETWORK;
-  delete process.env.SCHRUTE_HTTP_TRANSPORT;
-  delete process.env.SCHRUTE_HTTP_PORT;
-  delete process.env.SCHRUTE_BROWSER_ENGINE;
-  delete process.env.SCHRUTE_SNAPSHOT_MODE;
-  delete process.env.SCHRUTE_INCREMENTAL_DIFFS;
+  // Restore saved env vars (preserves global-setup's SCHRUTE_DATA_DIR)
+  for (const key of SCHRUTE_ENV_KEYS) {
+    if (savedEnv[key] !== undefined) {
+      process.env[key] = savedEnv[key];
+    } else {
+      delete process.env[key];
+    }
+  }
 });
 
 describe('config env overrides', () => {

@@ -5,46 +5,51 @@
 <h1 align="center">Schrute</h1>
 
 <p align="center">
-Teach your AI a website once. After that, it replays the same backend requests directly — no browser needed.
+Teach your AI a website once. After that, it can repeat the job much faster.
 </p>
 
-Schrute watches real browser traffic, turns repeatable actions into MCP tools, and reuses browser auth when needed. No hand-written API integration, and often no API keys, because Schrute learns from the requests your browser already knows how to make.
+Schrute is for repeated website tasks.
 
-- Faster repeated tasks
-- Less brittle than selector-only browser automation
-- No hand-written API integration for every site
+It watches what happens in a real browser, learns the underlying network requests, and turns them into reusable tools. That means the first run can happen in the browser, but later runs can often skip the UI and go straight to the site's backend.
 
-Measured on repeated runs of tested workflows:
+If you keep asking an AI to do the same website task over and over, Schrute is the layer that helps it stop starting from scratch every time.
 
-```
-Execution 1:   Browser-proxied fetch ........... 1,029ms
-Execution 3:   Browser-proxied (warm) ............ 777ms
-Execution 5:   Browser-proxied (optimized) ....... 273ms
-Execution 20+: Direct HTTP (promoted) ........... ~5-50ms
-```
+- Learn from a real browser session
+- Reuse your logged-in state
+- Replay repeatable tasks without brittle click scripts
+- Fall back to the browser when direct replay is not possible
+- Use it from MCP, CLI, REST, Python, or TypeScript
 
-See [benchmarks](#benchmarks) for methodology.
+## Why People Use It
 
-## Why this exists
+Without Schrute:
 
-Browser agents are great at discovering how to use a site, but terrible at repeating the same task quickly. Every repeat run pays the DOM tax again: page loads, clicks, waits, selectors, retries.
+- An agent opens the site again
+- Clicks through the UI again
+- Waits for the page again
+- Pays the same latency again
 
-Schrute keeps the discovery power of browser automation for the first run, then shifts repeatable actions to direct HTTP replay whenever it is safe and reliable to do so.
+With Schrute:
 
-That means:
-- less latency on repeated calls
-- fewer brittle UI steps
-- lower runtime cost
-- reusable tools instead of one-off automations
+- You teach it the task once
+- Schrute learns the request pattern behind the page
+- The next run can often call the learned action directly
 
-## Quick start
+That is especially useful for things like:
+
+- pulling the same dashboard data every day
+- checking prices or market pages repeatedly
+- searching a site with the same flow many times
+- reusing internal tools that only work when you are already logged in
+
+## Quick Start
 
 ```bash
 npm install -g schrute
 schrute setup
 ```
 
-Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline, or any MCP client):
+If you want to use Schrute from an AI client over MCP:
 
 ```json
 {
@@ -57,333 +62,273 @@ Add to your MCP client config (Claude Code, Cursor, Windsurf, Cline, or any MCP 
 }
 ```
 
-Your AI agent now has `schrute_explore`, `schrute_record`, and 40+ other tools.
+## Ways To Use Schrute
 
-## See it work in 60 seconds
+You can use the same learned skills in different ways depending on your workflow:
+
+- **MCP**
+  Best when you want Claude Code, Cursor, Cline, Windsurf, or another MCP client to call learned website actions as tools.
+
+- **CLI**
+  Best when you want to explore, record, inspect, and run skills manually from the terminal.
+
+- **REST API**
+  Best when you want another app, script, or backend service to call Schrute over HTTP.
+
+- **Python and TypeScript clients**
+  Best when you want a lightweight client package instead of calling raw HTTP endpoints yourself.
+
+So Schrute is not tied to one interface. You can teach it a task once, then reuse that same learned task from the interface that fits your workflow.
+
+## First Run In 2 Minutes
 
 ```bash
-# Start Schrute
+# 1. Start Schrute
 schrute serve
 
-# Open a browser and record an API interaction
+# 2. Open a site in a browser session
 schrute explore https://httpbin.org
+
+# 3. Start recording a task
 schrute record --name get_ip
-# navigate to httpbin.org/ip in the browser
+
+# 4. In the opened browser, go to:
+#    https://httpbin.org/ip
+
+# 5. Stop recording
 schrute stop
 
-# Schrute generates: httpbin_org.get_ip.v1
-# 4 requests captured, 4 signal, 0 noise
+# 6. Poll the background pipeline job until skill generation completes
+schrute pipeline <job-id>
 
-# Execute the learned skill
+# 7. Run the learned skill
 schrute execute httpbin_org.get_ip.v1 --yes
 ```
 
-Result:
-- First run: **1,029ms** (browser-proxied fetch)
-- Fifth run: **273ms** (browser-proxied, optimized)
-- Learned skill: `httpbin_org.get_ip.v1`
-- What changed: Schrute learned the exact `GET /ip` endpoint and replays it without DOM interaction
+What just happened:
 
-## Tested workflows
+1. Schrute watched the browser traffic for that action.
+2. It found the real request behind the page.
+3. It saved that request as a reusable skill.
+4. You can now run that learned action again without manually driving the page.
 
-Every example below was recorded on 2026-03-17, on macOS (Apple Silicon), over WiFi, using Playwright Chromium.
-
-### 1. Public API learning — httpbin.org
-
-**User task:** "Get my public IP address"
-
-**Site:** httpbin.org (developer tools)
-
-**Why this workflow matters:** Shows Schrute learning clean REST endpoints with zero noise and no auth requirements.
-
-**First run:**
-- Path: `schrute explore` → navigate to `/get`, `/ip`, `/user-agent`, `/headers` → `schrute stop`
-- Execution mode: browser automation
-- Pipeline result: 4 requests captured, 4 signal, 0 noise, **4 skills generated**
-
-**Learned skills:**
-- `httpbin_org.get_ip.v1` — `GET /ip`
-- `httpbin_org.get_get.v1` — `GET /get`
-- `httpbin_org.get_headers.v1` — `GET /headers`
-- `httpbin_org.get_user_agent.v1` — `GET /user-agent`
-- Auth used: none (public)
-- Safety class: read-only
-
-**Repeated runs:**
-
-| Run | Latency | Method |
-|-----|--------:|--------|
-| 1 | 1,029ms | Browser-proxied (Tier 3) |
-| 2 | 1,186ms | Browser-proxied (Tier 3) |
-| 3 | 777ms | Browser-proxied (Tier 3) |
-| 4 | 1,033ms | Browser-proxied (Tier 3) |
-| 5 | 273ms | Browser-proxied (Tier 3) |
-
-**Returned:** `{"origin": "49.43.xxx.x"}`
-
-**What changed after learning:** Four browser navigations became four replayable MCP tools. Each call returns JSON directly — no page load, no DOM parsing, no selectors.
-
----
-
-### 2. Parameterized API discovery — Wikipedia
-
-**User task:** "Search Wikipedia for articles about artificial intelligence"
-
-**Site:** en.wikipedia.org (knowledge/reference)
-
-**Why this workflow matters:** Shows Schrute automatically discovering which query parameters vary (the search term) and which are constants (action, format, list type) — without being told.
-
-**First run:**
-- Path: `schrute explore` → navigate to Wikipedia API with `srsearch=machine+learning`, then `srsearch=artificial+intelligence`, then with `titles=Machine_learning` → `schrute stop`
-- Pipeline result: 4 requests captured, 4 signal, 0 noise, **2 skills generated**
-
-**Learned skills:**
-- `en_wikipedia_org.get_api_php.v1` — `GET /w/api.php`
-  - Discovered parameter: `query.srsearch` (varies between requests — classified as input)
-  - Baked-in constants: `action=query`, `list=search`, `format=json`, `origin=*` (same across all requests — classified as constants)
-- `en_wikipedia_org.create_events.v1` — analytics endpoint, correctly classified as **draft** (not activated)
-- Auth used: none (public)
-- Safety class: read-only
-
-**Repeated run:**
-- Execution mode: Browser-proxied (Tier 3)
-- Time: **1,033ms**
-- Returned: Full Wikipedia search results (10 articles with titles, snippets, page IDs)
-
-**What changed after learning:** A single MCP tool that takes a search query and returns structured Wikipedia results. The agent calls `schrute_execute({ skillId: "en_wikipedia_org.get_api_php.v1", params: { "query.srsearch": "quantum computing" } })` instead of navigating Wikipedia's UI.
-
----
-
-### 3. Noise filtering — dog.ceo
-
-**User task:** "List all dog breeds and get a random dog image"
-
-**Site:** dog.ceo (entertainment/fun API)
-
-**Why this workflow matters:** Shows Schrute separating real API calls from page chrome (CSS, images, scripts) on a site that mixes both.
-
-**First run:**
-- Path: `schrute explore` → navigate to `/api/breeds/image/random`, `/api/breeds/list/all`, `/api/breed/labrador/images/random` → `schrute stop`
-- Pipeline result: 6 requests captured, **3 signal, 3 noise**, **2 skills generated**
-
-**Learned skills:**
-- `dog_ceo.get_all.v1` — `GET /api/breeds/list/all`
-- `dog_ceo.get_random.v1` — `GET /api/breed/labrador/images/random`
-- Auth used: none (public)
-- Safety class: read-only
-
-**Repeated runs:**
-
-| Run | Skill | Latency | Returned |
-|-----|-------|--------:|----------|
-| 1 | get_all | 551ms | Full breed list (98 breeds with sub-breeds) |
-| 2 | get_random | 558ms | `https://images.dog.ceo/breeds/labrador/Fury_02.jpg` |
-| 3 | get_random | 472ms | `https://images.dog.ceo/breeds/labrador/n02099712_1414.jpg` |
-
-**What changed after learning:** The 3 noise requests (page CSS, favicon, scripts) were discarded. Only the 3 JSON API calls became skills. Each execution returns structured JSON in ~500ms instead of loading the full dog.ceo web page.
-
----
-
-### 4. Cloudflare-protected site — CoinGecko
-
-**User task:** "Get Bitcoin 24-hour price data"
-
-**Site:** www.coingecko.com (finance/crypto)
-
-**Why this workflow matters:** Shows how Schrute handles sites behind Cloudflare. Direct HTTP fails — the skill stays at Tier 3 (browser-proxied) and uses the browser's Cloudflare clearance cookies.
-
-**First run:**
-- Path: `schrute explore` → agent navigates CoinGecko, clicks on Bitcoin, views price charts → `schrute stop`
-- Pipeline result: **5 skills generated** from the captured API calls
-
-**Learned skills:**
-- `www_coingecko_com.get_24_hours_json.v1` — `GET /price_charts/bitcoin/usd/24_hours.json`
-- `www_coingecko_com.get_max_longer_cache_json.v1` — `GET /price_charts/bitcoin/usd/max_longer_cache.json`
-- `www_coingecko_com.get_insight_annotations.v1` — `GET /price_charts/bitcoin/insight_annotations`
-- Plus 2 more (user info, OTP center)
-- Auth used: Cloudflare cookies (browser session)
-- Safety class: read-only
-
-**Direct HTTP attempt:** Failed after 9,129ms — Cloudflare returns a challenge page, not JSON.
-
-**Why it still works:** At Tier 3, Schrute executes the `fetch()` inside the browser context, which already has Cloudflare clearance cookies. The request succeeds where direct HTTP cannot. This skill will not promote to Tier 1 because the endpoint requires Cloudflare cookies — Schrute detects this and keeps it at the browser-proxied tier.
-
-**What this shows:** Not every skill promotes to direct HTTP. Schrute adapts to the site's security model instead of breaking against it.
-
----
-
-### 5. Server-rendered site — Hacker News (no skills generated)
-
-**User task:** "Get the front page of Hacker News"
-
-**Site:** news.ycombinator.com (news/tech)
-
-**Why this matters:** Shows what happens when Schrute encounters a site that does not use JSON APIs behind its UI.
-
-**Result:**
-- 12 requests captured
-- 0 signal, 10 noise (CSS, images, static assets), 2 document navigations
-- **0 skills generated**
-
-**Why:** Hacker News is fully server-rendered HTML. There are no `fetch()` calls to JSON APIs — every page is a full HTML document. Schrute correctly identifies there is nothing to learn and does not generate broken skills.
-
-## Benchmarks
-
-| Site | Skill | Run 1 | Run 3 | Run 5 | Auth | Noise filtered |
-|------|-------|------:|------:|------:|------|---------------:|
-| httpbin.org | `get_ip` | 1,029ms | 777ms | 273ms | None | 0/4 |
-| dog.ceo | `get_all` | 551ms | — | — | None | 3/6 |
-| dog.ceo | `get_random` | 558ms | 472ms | — | None | 3/6 |
-| en.wikipedia.org | `get_api_php` | 1,033ms | — | — | None | 0/4 |
-| www.coingecko.com | `get_24_hours_json` | 9,129ms (fail) | — | — | Cloudflare cookies | — |
-
-All runs at Tier 3 (browser-proxied). Skills promote to Tier 1 (direct HTTP, ~5-50ms) after 5+ consecutive successful validations. Cloudflare-protected skills remain at Tier 3.
-
-**Methodology:**
-- Machine: MacBook (Apple Silicon)
-- Network: WiFi, India
-- Browser engine: Playwright Chromium
-- Cache state: warm (browser session open)
-- Timing: `latencyMs` field from Schrute execution result
-- Date tested: 2026-03-17
-
-## Where Schrute works best
-
-Schrute works best when:
-- the site uses JSON, GraphQL, or predictable HTTP requests behind the UI
-- the task is repeated often enough to justify learning
-- the browser session already has the right auth state
-- the workflow can be represented as a stable request or request chain
-
-Schrute is a worse fit when:
-- the site is fully server-rendered HTML with no JSON API calls (like Hacker News)
-- the workflow depends heavily on WebSockets, canvas state, or anti-bot challenges on every request
-- the task is a one-off and not worth recording
-- the action is too risky to replay automatically (destructive mutations without confirmation)
-
-## How Schrute differs from other approaches
-
-### Browser-only agents (Playwright, Puppeteer, Selenium)
-Great for first-time discovery, slower and more brittle for repeated workflows. Every repeat pays the full DOM tax.
-
-### Hand-written API integrations
-Fast and reliable once built, but require documentation, API keys, auth handling, and custom code per site.
-
-### Schrute
-Uses the browser to discover the workflow once, then promotes repeatable actions toward direct HTTP replay. No per-site code. Auth comes from the browser session. Skills self-heal when APIs change.
-
-## Trust and safety
-
-Schrute does not blindly replay arbitrary browser traffic.
-
-Before a learned skill executes, Schrute enforces:
-- **Domain allowlists** — only approved domains, SSRF prevention
-- **Method restrictions** — GET/HEAD by default, mutations require approval
-- **One-time confirmation** — every new skill needs user approval before first execution
-- **Path risk heuristics** — destructive-looking paths (`/delete`, `/logout`) are blocked
-- **Rate limiting** — 10 QPS default per site
-- **Redirect validation** — every redirect hop must pass policy
-- **Audit logging** — every execution recorded to SQLite
-
-Dangerous browser tools (`browser_evaluate`, `browser_run_code`) are blocked entirely.
-
-For the full 9-gate security model, see [SECURITY.md](SECURITY.md).
-
-## Auth, cookies, and storage
-
-Schrute reuses the auth state already present in your browser session.
-
-- Cookies are stored in the **OS keychain** (macOS Keychain, Linux Secret Service) — not in plaintext files
-- Exported skill bundles never include credentials
-- Audit logs are stored locally in SQLite
-- Auth detection is automatic: Bearer tokens, API keys, OAuth2, session cookies
-- JWT TTLs are extracted and used for proactive refresh
-
-Connect to an existing Chrome session to reuse your logged-in state:
+## Commands Most People Will Use
 
 ```bash
-# Launch Chrome with debugging
-chrome --remote-debugging-port=9222
+schrute explore https://example.com
+schrute record --name my_action
+schrute stop
+schrute pipeline <job-id>
+schrute execute my_skill.v1
 
-# Connect Schrute
-schrute_connect_cdp({ port: 9222, name: "my-chrome" })
-```
+schrute skills list --status active
+schrute skills search "bitcoin price"
+schrute skills show <skill-id>
 
-## Self-healing
+schrute workflow create --site example.com --name summary --spec '{"steps":[...]}'
+schrute workflow run example_com.summary.v1
 
-APIs change. Auth tokens expire. Schrute handles this automatically.
-
-A background validation loop runs every 10 minutes:
-- Tests skills with last-known-good parameters
-- Schema drift detected → re-infer the response schema
-- Auth expired → refresh via browser re-login
-- Missing parameter → add it from recent traffic
-- Still failing → escalate to browser tier (fall back to safety)
-- Permanently broken → mark as stale, stop executing
-
-Every amendment is applied on cooldown, evaluated over a test window, and rolled back if it makes things worse.
-
-## Cold-start discovery
-
-Schrute can discover APIs without recording anything:
-
-```bash
 schrute discover https://api.example.com
+schrute doctor
+schrute trust
 ```
 
-It probes for OpenAPI specs, GraphQL introspection, platform signatures (Shopify, Stripe, WordPress, Firebase, Supabase, Next.js), sitemaps, and WebMCP tools. Discovered endpoints become draft skills ranked by trust level.
+## What Schrute Can Do Today
 
-## REST API and client SDKs
+Schrute is no longer just "record and replay." Here is what the current product does, in practical terms:
 
-Start Schrute with HTTP transport for programmatic access from any language:
+- **Learns reusable skills from real browsing**
+  You do the task once in a browser. Schrute turns what it learned into named actions you can run again later.
+
+- **Generates skills in the background**
+  When you run `schrute stop`, Schrute does not make you wait for all processing to finish in the foreground. It gives you a pipeline job and keeps building the skills in the background. You can check progress with `schrute pipeline <job-id>`.
+
+- **Searches and explains what it has already learned**
+  Once you have multiple skills, Schrute helps you find the right one with `skills search`, inspect it with `skills show`, validate it, export it, and manage it without digging through raw data.
+
+- **Builds workflows from multiple skills**
+  If one reusable action is not enough, Schrute can chain several read-only skills together into a larger workflow. That is useful for multi-step tasks like "get account info, then fetch usage, then return a summary."
+
+- **Discovers APIs even before you record**
+  Schrute can scan a site for useful backend clues such as OpenAPI specs, GraphQL endpoints, sitemaps, platform fingerprints, and WebMCP tools. That helps you start faster on sites that already expose a structured backend.
+
+- **Reuses the browser session you already trust**
+  If you are already logged into Chrome or an Electron app, Schrute can attach to that session instead of forcing you through login again. This is especially useful for internal tools and dashboards.
+
+- **Supports more than one browser session**
+  You are not limited to one browser context. Schrute can manage multiple named sessions so different sites, accounts, or attached browsers do not all get mixed together.
+
+- **Handles sites that still need a live browser**
+  Some sites cannot be cleanly replayed as direct HTTP calls because of Cloudflare, anti-bot checks, or other browser-only behavior. Schrute does not pretend otherwise. It keeps those tasks on a browser-backed path so they still work.
+
+- **Lets you call the same learned skills from different places**
+  The same learned actions can be used from MCP, the CLI, REST, and the Python or TypeScript client packages. That means you do not have to re-teach the task separately for each integration.
+
+- **Lets you move and maintain what you learned**
+  Schrute can export and import learned site bundles, run health checks with `doctor`, show a trust posture report with `trust`, and keep an audit trail of executions.
+
+- **Can improve and maintain learned actions over time**
+  Schrute can validate skills, track amendments, run optimization on degraded skills, and keep using safer fallback paths when a direct path stops being reliable.
+
+- **Can work with site-declared tools as well as learned traffic**
+  On some sites, Schrute can discover useful backend structure such as WebMCP tools, OpenAPI specs, or GraphQL endpoints in addition to what it learns from browser traffic.
+
+## Feature Overview
+
+If you are trying to understand "what is actually included here?", this is the practical feature map:
+
+- **Explore and record**
+  Open a site, perform an action, and let Schrute watch the traffic behind it.
+
+- **Background processing**
+  Generate skills after recording without blocking the terminal.
+
+- **Skill catalog**
+  List, search, inspect, validate, export, revoke, delete, and manage learned skills.
+
+- **Execution**
+  Run learned skills directly from CLI, MCP, REST, or client SDKs.
+
+- **Workflow building**
+  Combine multiple read-only skills into one higher-level reusable flow.
+
+- **Discovery**
+  Scan a site for OpenAPI, GraphQL, sitemaps, platform patterns, WebMCP tools, and other useful backend signals.
+
+- **Browser session reuse**
+  Attach to a browser you already have open and logged into.
+
+- **Multi-session support**
+  Keep separate browser sessions for different sites, accounts, or experiments.
+
+- **Fallback execution**
+  Keep browser-backed execution for sites that cannot safely or reliably use direct replay.
+
+- **Import and export**
+  Move learned site bundles between environments without shipping credentials.
+
+- **Operational tools**
+  Use doctor, trust reporting, audit logs, and pipeline status to understand what Schrute is doing.
+
+- **Client access**
+  Use the same learned actions through MCP, CLI, REST, Python, and TypeScript.
+
+## How Schrute Runs A Task
+
+Schrute tries to use the simplest reliable path:
+
+1. **Browser first** while the task is still being learned
+2. **Direct replay later** when the request is stable and safe to reuse
+3. **Browser fallback** when the site truly requires a live browser
+
+So the goal is not "force everything into direct HTTP." The goal is "use the fastest safe execution mode that actually works."
+
+That is why sites behind Cloudflare or other anti-bot systems can still be useful in Schrute. If direct replay is blocked, Schrute keeps them on a browser-backed path instead of pretending they should work the same way as a public API.
+
+## Where It Fits Best
+
+Schrute is a strong fit when:
+
+- the site makes predictable HTTP or JSON requests behind the UI
+- the task is repeated often
+- you already have the right browser auth state
+- you want reusable tools instead of one-off browser scripts
+
+Schrute is a weaker fit when:
+
+- the site is mostly server-rendered HTML with no meaningful backend calls to learn
+- the workflow depends heavily on canvas, WebSockets, or visual-only interactions
+- the task is truly one-time and not worth teaching
+
+## Common Use Cases
+
+Schrute is especially useful for:
+
+- **Repeated internal dashboard checks**
+  Example: pull the same account, usage, or reporting view every day without re-clicking the whole UI.
+
+- **Logged-in business tools**
+  Example: use your existing browser session to access an internal admin panel, support tool, CMS, or analytics product.
+
+- **Price, market, and listing lookups**
+  Example: repeatedly fetch the same market page or structured data endpoint after teaching the browser path once.
+
+- **Search and lookup workflows**
+  Example: teach a site search flow once, then reuse it with different inputs.
+
+- **Agent tool creation**
+  Example: turn a repeated browser task into a reusable MCP tool for an AI coding or operations workflow.
+
+- **Multi-step read-only automations**
+  Example: fetch one piece of data, use it in a second call, and return a final combined answer through a workflow skill.
+
+- **Sites with a mix of easy and hard paths**
+  Example: let Schrute use direct replay where it works, but keep a live-browser fallback for the parts that truly need it.
+
+## Reusing Your Logged-In Browser
+
+If you already have a browser session with the right login state, Schrute can attach to it instead of making you sign in again.
+
+Typical pattern:
+
+```bash
+chrome --remote-debugging-port=9222
+```
+
+After that, Schrute can connect to the running browser through CDP using its MCP or REST surfaces.
+
+This is especially useful for:
+
+- internal dashboards
+- admin tools
+- sites with multi-step login flows
+- flows where the browser already has the right cookies and session state
+
+## REST API And SDKs
+
+If you want to call Schrute from scripts or apps:
 
 ```bash
 schrute config set server.authToken my-secret
 schrute serve --http --port 3000
 ```
 
-```bash
-# Execute a learned skill
-curl -X POST http://127.0.0.1:3000/api/sites/httpbin.org/skills/get_ip \
-  -H "Authorization: Bearer my-secret" \
-  -H "Content-Type: application/json" \
-  -d '{"params": {}}'
+Then call it over HTTP:
 
-# Search for skills
-curl -X POST http://127.0.0.1:3000/api/v1/skills/search \
+```bash
+curl -X POST http://127.0.0.1:3000/api/v1/execute \
   -H "Authorization: Bearer my-secret" \
   -H "Content-Type: application/json" \
-  -d '{"query": "dog breeds", "limit": 5}'
+  -d '{"skillId":"httpbin_org.get_ip.v1","params":{}}'
 ```
 
-Client SDKs available for **Python** (zero-dependency, `pip install schrute-client`) and **TypeScript** (`npm install @schrute/client`).
+Client packages:
 
-Full REST API reference: [docs/rest-api.md](docs/rest-api.md)
+- TypeScript: `npm install @schrute/client`
+- Python: `pip install schrute-client`
 
-## Docs
+MCP HTTP is also available at:
 
-For detailed reference documentation:
+```text
+http://127.0.0.1:3001/mcp
+```
 
-- [MCP tools reference](docs/tools.md) — All 40+ MCP tools with parameters
-- [CLI reference](docs/cli.md) — Every CLI command and flag
-- [REST API](docs/rest-api.md) — 19 HTTP endpoints with examples
-- [Security model](SECURITY.md) — Full 9-gate policy engine
-- [Architecture](docs/architecture.md) — System design and internals
-- [Configuration](docs/configuration.md) — Environment variables, config file, precedence
-- [Development](docs/development.md) — Building from source, testing, project structure
-- [Client SDKs](docs/sdks.md) — Python and TypeScript usage
+## Safety And Storage
 
-<details>
-<summary><strong>Multi-client setup</strong></summary>
+Schrute does not blindly replay everything it sees.
 
-Works with Claude Code (`.mcp.json`), Claude Desktop, Cursor (`.cursor/mcp.json`), Windsurf (`.codeium/windsurf/mcp_config.json`), Cline, Continue, or any MCP client via stdio: `npx -y schrute serve`
-</details>
+Before a learned skill runs, Schrute applies safeguards such as:
 
-<details>
-<summary><strong>Claude Code plugin</strong></summary>
+- domain allowlists
+- redirect validation
+- method and path checks
+- approval for first execution when needed
+- audit logging
+- rate limiting
 
-When installed as a plugin: `/schrute:explore`, `/schrute:record`, `/schrute:skills`, `/schrute:doctor`, `/schrute:status`. Includes specialized agents for skill validation, exploration guidance, and debugging.
-</details>
+Credentials are not exported with skill bundles, and dangerous raw browser execution tools are blocked.
+
+For the full security model, see [SECURITY.md](SECURITY.md).
 
 ## Development
 
@@ -391,14 +336,23 @@ When installed as a plugin: `/schrute:explore`, `/schrute:record`, `/schrute:ski
 
 ```bash
 git clone https://github.com/sheeki03/schrute.git
-cd schrute && npm install && npx playwright install chromium && npm run build
+cd schrute
+npm install
+npm run build
 ```
 
+Useful commands:
+
 ```bash
-npm run build          # Compile TypeScript
-npx vitest run         # Run tests
-npm run dev            # Watch mode
+npm run build
+npm test
+npm run dev
 ```
+
+## More
+
+- [SECURITY.md](SECURITY.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
 

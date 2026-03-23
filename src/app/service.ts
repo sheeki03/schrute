@@ -14,6 +14,7 @@ import { shouldAutoConfirm } from '../server/skill-helpers.js';
 
 type ExecuteSkillResult =
   | { status: 'executed'; result: SkillExecutionResult }
+  | { status: 'browser_handoff_required'; result: SkillExecutionResult }
   | {
       status: 'confirmation_required';
       skillId: string;
@@ -70,6 +71,8 @@ interface ExportedCookie {
 export interface PipelineJobResult {
   skillsGenerated: number;
   signalCount: number;
+  htmlDocumentCount?: number;
+  ambiguousCount?: number;
   noiseCount: number;
   totalCount: number;
   warning?: string;
@@ -185,6 +188,9 @@ export class SchruteService {
     }
 
     const result = await this.deps.engine.executeSkill(skillId, params, callerId);
+    if (result.status === 'browser_handoff_required') {
+      return { status: 'browser_handoff_required', result };
+    }
     return { status: 'executed', result };
   }
 
@@ -263,7 +269,7 @@ export class SchruteService {
   listSessions(): SessionInfo[] {
     const msm = this.deps.engine.getMultiSessionManager();
     const activeName = msm.getActive();
-    return msm.list().map(s => ({
+    return msm.list(undefined, this.deps.config, { includeInternal: false }).map(s => ({
       name: s.name,
       siteId: s.siteId,
       isCdp: s.isCdp,

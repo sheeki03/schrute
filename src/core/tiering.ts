@@ -34,6 +34,14 @@ interface SemanticResult {
   hasDynamicRequiredFields: boolean;
 }
 
+const PERMANENT_LOCK_REASON_LABELS: Record<PermanentTierLock['reason'], string> = {
+  js_computed_field: 'JS-computed field',
+  protocol_sensitivity: 'Protocol sensitivity',
+  signed_payload: 'Signed payload',
+  webmcp_requires_browser: 'WebMCP requires browser',
+  browser_required: 'Browser required',
+};
+
 // ─── Tier State Machine ─────────────────────────────────────────
 
 /**
@@ -82,7 +90,7 @@ export function checkPromotion(
     return {
       promote: false,
       lock: skill.tierLock,
-      reason: `Permanently locked: ${skill.tierLock.reason}`,
+      reason: `Permanently locked: ${formatPermanentTierLockReason(skill.tierLock.reason)}`,
     };
   }
 
@@ -169,12 +177,16 @@ export function handleFailure(
     FailureCause.JS_COMPUTED_FIELD,
     FailureCause.PROTOCOL_SENSITIVITY,
     FailureCause.SIGNED_PAYLOAD,
+    FailureCause.CLOUDFLARE_CHALLENGE,
   ];
 
   if (permanentCauses.includes(failureCause)) {
+    const reason: PermanentTierLock['reason'] = failureCause === FailureCause.CLOUDFLARE_CHALLENGE
+      ? 'browser_required'
+      : failureCause as Exclude<PermanentTierLock['reason'], 'browser_required' | 'webmcp_requires_browser'>;
     const lock: PermanentTierLock = {
       type: 'permanent',
-      reason: failureCause as PermanentTierLock['reason'],
+      reason,
       evidence: `Failure cause: ${failureCause}`,
     };
 
@@ -186,7 +198,7 @@ export function handleFailure(
     return {
       newTier: TierState.TIER_3_DEFAULT as TierStateName,
       tierLock: lock,
-      reason: `Permanent lock: ${failureCause}`,
+      reason: `Permanent lock: ${formatPermanentTierLockReason(lock.reason)}`,
     };
   }
 
@@ -225,4 +237,25 @@ export function getEffectiveTier(skill: SkillSpec): TierStateName {
   }
 
   return skill.currentTier;
+}
+
+export function formatPermanentTierLockReason(reason: PermanentTierLock['reason']): string {
+  return PERMANENT_LOCK_REASON_LABELS[reason] ?? reason;
+}
+
+export function sanitizeSiteRecommendedTier(
+  recommendedTier: ExecutionTierName,
+  browserRequired: boolean,
+): ExecutionTierName {
+  if (browserRequired) {
+    return recommendedTier === ExecutionTier.FULL_BROWSER
+      ? ExecutionTier.FULL_BROWSER
+      : ExecutionTier.BROWSER_PROXIED;
+  }
+
+  if (recommendedTier === ExecutionTier.COOKIE_REFRESH) {
+    return ExecutionTier.BROWSER_PROXIED;
+  }
+
+  return recommendedTier;
 }

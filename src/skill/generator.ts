@@ -1,6 +1,7 @@
 import { extractPathParams } from '../core/utils.js';
 import { sanitizeParamKey } from '../server/tool-registry.js';
 import { buildExecutionSchema } from '../replay/param-validator.js';
+import { buildRequest } from '../replay/request-builder.js';
 import type {
   SkillSpec,
   SkillParameter,
@@ -11,11 +12,14 @@ import type {
   TierStateName,
   CapabilityName,
   EvidenceReport,
+  WorkflowSpec,
 } from './types.js';
 import {
   SkillStatus,
   TierState,
   Capability,
+  ExecutionTier,
+  SideEffectClass,
 } from './types.js';
 import { classifySideEffect } from './side-effects.js';
 import { scanSkill } from './security-scanner.js';
@@ -31,6 +35,7 @@ export interface ClusterInfo {
   description?: string;
   inputSchema: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
+  responseContentType?: string;
   requiredHeaders?: Record<string, string>;
   dynamicHeaders?: Record<string, string>;
   sampleCount: number;
@@ -52,12 +57,14 @@ export function generateSkill(
   const version = 1;
   const id = buildSkillId(siteId, actionName, version, cluster.isGraphQL, cluster.graphqlOperationName);
 
-  const sideEffectClass = classifySideEffect(
-    cluster.method,
-    cluster.pathTemplate,
-    undefined,
-    cluster.requestBody,
-  );
+  const sideEffectClass = cluster.responseContentType?.toLowerCase().includes('text/html')
+    ? SideEffectClass.READ_ONLY
+    : classifySideEffect(
+        cluster.method,
+        cluster.pathTemplate,
+        undefined,
+        cluster.requestBody,
+      );
 
   const parameters = buildParameters(paramEvidence);
   const allowedDomains = cluster.canonicalHost && cluster.canonicalHost !== siteId
@@ -94,6 +101,7 @@ export function generateSkill(
     pathTemplate: cluster.pathTemplate,
     inputSchema: cluster.inputSchema,
     outputSchema: cluster.outputSchema,
+    responseContentType: cluster.responseContentType,
     authType: authRecipe?.type,
     requiredHeaders: cluster.requiredHeaders,
     dynamicHeaders: cluster.dynamicHeaders,
@@ -128,6 +136,60 @@ export function generateSkill(
   }
 
   return spec;
+}
+
+export function generateWorkflowSkill(
+  siteId: string,
+  name: string,
+  workflowSpec: WorkflowSpec,
+  options?: {
+    description?: string;
+    outputTransform?: SkillSpec['outputTransform'];
+  },
+): SkillSpec {
+  const version = 1;
+  const id = buildSkillId(siteId, name, version);
+  const now = Date.now();
+  const parameters = extractWorkflowInitialParameters(workflowSpec);
+
+  return {
+    id,
+    version,
+    status: SkillStatus.ACTIVE as SkillStatusName,
+    currentTier: TierState.TIER_3_DEFAULT as TierStateName,
+    tierLock: null,
+    allowedDomains: [siteId],
+    requiredCapabilities: [],
+    parameters,
+    validation: {
+      semanticChecks: [],
+      customInvariants: [],
+    },
+    redaction: {
+      piiClassesFound: [],
+      fieldsRedacted: 0,
+    },
+    replayStrategy: 'prefer_tier_3',
+    sideEffectClass: SideEffectClass.READ_ONLY,
+    sampleCount: 0,
+    consecutiveValidations: 0,
+    confidence: 0.5,
+    method: 'GET',
+    pathTemplate: `/__workflow/${sanitizeWorkflowName(name)}`,
+    inputSchema: {},
+    outputTransform: options?.outputTransform,
+    isComposite: true,
+    workflowSpec,
+    siteId,
+    name,
+    description: options?.description,
+    successRate: 0,
+    directCanaryEligible: false,
+    directCanaryAttempts: 0,
+    validationsSinceLastCanary: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 // ─── SKILL.md Generation ────────────────────────────────────────
@@ -528,48 +590,335 @@ export function generateSkillTemplates(spec: SkillSpec): Map<string, string> {
   const templates = new Map<string, string>();
 
   // request.json
-  const requestTemplate: Record<string, unknown> = {};
-  if (spec.inputSchema) {
-    const props = (spec.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>> | undefined;
-    if (props) {
-      for (const [name, schema] of Object.entries(props)) {
-        const type = schema.type as string;
-        switch (type) {
-          case 'string': requestTemplate[name] = ''; break;
-          case 'number': requestTemplate[name] = 0; break;
-          case 'boolean': requestTemplate[name] = false; break;
-          case 'array': requestTemplate[name] = []; break;
-          case 'object': requestTemplate[name] = {}; break;
-          default: requestTemplate[name] = null;
-        }
-      }
-    }
-  }
+  const requestTemplate = buildRequestTemplate(spec);
+  const exportTemplateParams = buildExportTemplateParams(spec, requestTemplate);
   templates.set('request.json', JSON.stringify(requestTemplate, null, 2));
-
-  // curl.sh
-  const curlLines: string[] = ['#!/bin/bash'];
-  const method = spec.method.toUpperCase();
-  curlLines.push(`curl -X ${method} \\`);
-
-  if (spec.requiredHeaders) {
-    for (const [key, value] of Object.entries(spec.requiredHeaders)) {
-      curlLines.push(`  -H '${key}: ${value}' \\`);
-    }
-  }
-  if (spec.authType === 'bearer') {
-    curlLines.push(`  -H 'Authorization: Bearer YOUR_TOKEN' \\`);
-  }
-
-  if (['POST', 'PUT', 'PATCH'].includes(method)) {
-    curlLines.push(`  -H 'Content-Type: application/json' \\`);
-    curlLines.push(`  -d '${JSON.stringify(requestTemplate)}' \\`);
-  }
-
-  curlLines.push(`  'https://${spec.siteId}${spec.pathTemplate}'`);
-  templates.set('curl.sh', curlLines.join('\n'));
+  templates.set('curl.sh', generateExport(spec, 'curl', exportTemplateParams));
+  templates.set('fetch.ts', generateExport(spec, 'fetch.ts', exportTemplateParams));
+  templates.set('requests.py', generateExport(spec, 'requests.py', exportTemplateParams));
+  templates.set('playwright.ts', generateExport(spec, 'playwright.ts', exportTemplateParams));
 
   return templates;
+}
+
+export type SkillExportFormat = 'curl' | 'fetch.ts' | 'requests.py' | 'playwright.ts';
+
+export function generateExport(
+  skill: SkillSpec,
+  format: SkillExportFormat,
+  params?: Record<string, unknown>,
+): string {
+  const request = buildRequest(
+    skill,
+    params ?? buildRequestTemplate(skill),
+    resolveExportTier(skill),
+  );
+  const headers = augmentHeadersForExport(skill, request.headers);
+
+  switch (format) {
+    case 'curl':
+      return renderCurlExport(skill, request.method, request.url, headers, request.body);
+    case 'fetch.ts':
+      return renderFetchExport(skill, request.method, request.url, headers, request.body);
+    case 'requests.py':
+      return renderPythonExport(skill, request.method, request.url, headers, request.body);
+    case 'playwright.ts':
+      return renderPlaywrightExport(skill, request.method, request.url, headers, request.body);
+  }
+}
+
+function buildRequestTemplate(spec: SkillSpec): Record<string, unknown> {
+  const requestTemplate: Record<string, unknown> = {};
+  if (!spec.inputSchema) {
+    return requestTemplate;
+  }
+
+  const props = (spec.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>> | undefined;
+  if (!props) {
+    return requestTemplate;
+  }
+
+  for (const [name, schema] of Object.entries(props)) {
+    const type = schema.type as string;
+    switch (type) {
+      case 'string':
+        requestTemplate[name] = '';
+        break;
+      case 'number':
+      case 'integer':
+        requestTemplate[name] = 0;
+        break;
+      case 'boolean':
+        requestTemplate[name] = false;
+        break;
+      case 'array':
+        requestTemplate[name] = [];
+        break;
+      case 'object':
+        requestTemplate[name] = {};
+        break;
+      default:
+        requestTemplate[name] = null;
+    }
+  }
+
+  return requestTemplate;
+}
+
+function buildExportTemplateParams(
+  spec: SkillSpec,
+  requestTemplate: Record<string, unknown>,
+): Record<string, unknown> {
+  const upperMethod = spec.method.toUpperCase();
+  return upperMethod === 'GET' || upperMethod === 'HEAD'
+    ? {}
+    : requestTemplate;
+}
+
+function resolveExportTier(skill: SkillSpec) {
+  return skill.currentTier === TierState.TIER_1_PROMOTED
+    ? ExecutionTier.DIRECT
+    : ExecutionTier.BROWSER_PROXIED;
+}
+
+function augmentHeadersForExport(skill: SkillSpec, headers: Record<string, string>): Record<string, string> {
+  const merged = { ...headers };
+  for (const key of Object.keys(merged)) {
+    const placeholder = getExportHeaderPlaceholder(key, skill.authType);
+    if (placeholder) {
+      merged[key] = placeholder;
+    }
+  }
+  if ((skill.authType === 'bearer' || skill.authType === 'oauth2') && !hasHeader(merged, 'authorization')) {
+    merged.authorization = 'Bearer YOUR_TOKEN';
+  }
+  if (skill.authType === 'cookie' && !hasHeader(merged, 'cookie')) {
+    merged.cookie = 'SESSION=YOUR_COOKIE';
+  }
+  if (skill.authType === 'api_key' && !hasHeader(merged, 'x-api-key')) {
+    merged['x-api-key'] = 'YOUR_API_KEY';
+  }
+  return merged;
+}
+
+function hasHeader(headers: Record<string, string>, headerName: string): boolean {
+  const target = headerName.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === target);
+}
+
+function getExportHeaderPlaceholder(headerName: string, authType?: SkillSpec['authType']): string | undefined {
+  const normalized = headerName.toLowerCase();
+  if (normalized === 'authorization') {
+    return authType === 'bearer' || authType === 'oauth2'
+      ? 'Bearer YOUR_TOKEN'
+      : '<REDACTED>';
+  }
+  if (normalized === 'cookie' || normalized === 'set-cookie') {
+    return 'SESSION=YOUR_COOKIE';
+  }
+  if (normalized === 'x-api-key' || normalized === 'x-apikey' || normalized === 'api-key' || normalized === 'apikey') {
+    return 'YOUR_API_KEY';
+  }
+  if (
+    normalized.startsWith('x-auth') ||
+    normalized.startsWith('x-session') ||
+    normalized.startsWith('x-csrf') ||
+    normalized.includes('token') ||
+    normalized.includes('secret') ||
+    normalized.includes('credential')
+  ) {
+    return '<REDACTED>';
+  }
+  return undefined;
+}
+
+function renderCurlExport(
+  skill: SkillSpec,
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: string,
+): string {
+  const lines = ['#!/bin/bash', ...buildTransformComments(skill, '#')];
+  lines.push(`curl -X ${method.toUpperCase()} \\`);
+  for (const [key, value] of Object.entries(toDisplayHeaders(headers))) {
+    lines.push(`  -H ${quoteForShell(`${key}: ${value}`)} \\`);
+  }
+  if (body !== undefined) {
+    lines.push(`  -d ${quoteForShell(body)} \\`);
+  }
+  lines.push(`  ${quoteForShell(url)}`);
+  return lines.join('\n');
+}
+
+function renderFetchExport(
+  skill: SkillSpec,
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: string,
+): string {
+  const headerLiteral = JSON.stringify(toDisplayHeaders(headers), null, 2);
+  const lines = [
+    ...buildTransformComments(skill, '//'),
+    'const response = await fetch(',
+    `  ${JSON.stringify(url)},`,
+    '  {',
+    `    method: ${JSON.stringify(method.toUpperCase())},`,
+    `    headers: ${indentMultiline(headerLiteral, 4)},`,
+    ...(body !== undefined ? [`    body: ${JSON.stringify(body)},`] : []),
+    '  },',
+    ');',
+    '',
+    "const data = await response.text();",
+    'console.log(data);',
+  ];
+  return lines.join('\n');
+}
+
+function renderPythonExport(
+  skill: SkillSpec,
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: string,
+): string {
+  const lines = [
+    ...buildTransformComments(skill, '#'),
+    'import requests',
+    '',
+    `url = ${JSON.stringify(url)}`,
+    `headers = ${toPythonLiteral(toDisplayHeaders(headers))}`,
+    ...(body !== undefined ? [`data = ${JSON.stringify(body)}`] : []),
+    '',
+    `response = requests.request(${JSON.stringify(method.toUpperCase())}, url, headers=headers${body !== undefined ? ', data=data' : ''})`,
+    'print(response.text)',
+  ];
+  return lines.join('\n');
+}
+
+function renderPlaywrightExport(
+  skill: SkillSpec,
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: string,
+): string {
+  const displayHeaders = toDisplayHeaders(headers);
+  const lines: string[] = [];
+  if (needsPlaywrightWarning(skill)) {
+    lines.push('// Warning: this skill is marked browser_required; exported code uses Playwright request context.');
+  }
+  lines.push(...buildTransformComments(skill, '//'));
+  lines.push("import { chromium } from 'playwright';");
+  lines.push('');
+  lines.push('const browser = await chromium.launch();');
+  lines.push('const page = await browser.newPage();');
+  lines.push('try {');
+  lines.push(`  const response = await page.request.fetch(${JSON.stringify(url)}, {`);
+  lines.push(`    method: ${JSON.stringify(method.toUpperCase())},`);
+  lines.push(`    headers: ${indentMultiline(JSON.stringify(displayHeaders, null, 2), 4)},`);
+  if (body !== undefined) {
+    lines.push(`    data: ${JSON.stringify(body)},`);
+  }
+  lines.push('  });');
+  lines.push('  console.log(await response.text());');
+  lines.push('} finally {');
+  lines.push('  await browser.close();');
+  lines.push('}');
+  return lines.join('\n');
+}
+
+function buildTransformComments(skill: SkillSpec, prefix: string): string[] {
+  if (!skill.outputTransform) {
+    return [];
+  }
+  return [`${prefix} Transform: ${describeTransform(skill.outputTransform)}`, ''];
+}
+
+function describeTransform(transform: NonNullable<SkillSpec['outputTransform']>): string {
+  switch (transform.type) {
+    case 'jsonpath':
+      return `jsonpath ${transform.expression}${transform.label ? ` -> ${transform.label}` : ''}`;
+    case 'regex':
+      return `regex /${transform.expression}/${transform.flags ?? ''}${transform.label ? ` -> ${transform.label}` : ''}`;
+    case 'css':
+      return `css ${transform.selector}${transform.label ? ` -> ${transform.label}` : ''}`;
+  }
+}
+
+function needsPlaywrightWarning(skill: SkillSpec): boolean {
+  return skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'browser_required';
+}
+
+function quoteForShell(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function toDisplayHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [formatHeaderName(key), value]),
+  );
+}
+
+function formatHeaderName(headerName: string): string {
+  return headerName
+    .split('-')
+    .map((segment) => {
+      const lowerSegment = segment.toLowerCase();
+      switch (lowerSegment) {
+        case 'dnt':
+        case 'etag':
+        case 'te':
+        case 'www':
+          return lowerSegment.toUpperCase();
+        default:
+          return lowerSegment.charAt(0).toUpperCase() + lowerSegment.slice(1);
+      }
+    })
+    .join('-');
+}
+
+function indentMultiline(value: string, indent: number): string {
+  const padding = ' '.repeat(indent);
+  return value.split('\n').join(`\n${padding}`);
+}
+
+function toPythonLiteral(value: unknown): string {
+  return serializePythonLiteral(value, 0);
+}
+
+function serializePythonLiteral(value: unknown, indent: number): string {
+  if (value === null || value === undefined) {
+    return 'None';
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'True' : 'False';
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : 'None';
+  }
+  if (typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return '[]';
+    }
+    const innerIndent = ' '.repeat(indent + 2);
+    const closingIndent = ' '.repeat(indent);
+    return `[\n${value.map((item) => `${innerIndent}${serializePythonLiteral(item, indent + 2)}`).join(',\n')}\n${closingIndent}]`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (entries.length === 0) {
+      return '{}';
+    }
+    const innerIndent = ' '.repeat(indent + 2);
+    const closingIndent = ' '.repeat(indent);
+    return `{\n${entries.map(([key, entryValue]) => `${innerIndent}${JSON.stringify(key)}: ${serializePythonLiteral(entryValue, indent + 2)}`).join(',\n')}\n${closingIndent}}`;
+  }
+  return JSON.stringify(String(value));
 }
 
 function generateEvidenceReport(
@@ -607,4 +956,33 @@ function generateEvidenceReport(
     piiRedactionCounts,
     validationHistory,
   };
+}
+
+function extractWorkflowInitialParameters(workflowSpec: WorkflowSpec): SkillSpec['parameters'] {
+  const names = new Set<string>();
+
+  for (const step of workflowSpec.steps) {
+    for (const ref of Object.values(step.paramMapping ?? {})) {
+      const match = ref.match(/^\$initial\.([A-Za-z0-9_.-]+)/);
+      if (match) {
+        names.add(match[1]);
+      }
+    }
+  }
+
+  return [...names].sort().map((name) => ({
+    name,
+    type: 'any',
+    source: 'user_input' as const,
+    evidence: ['workflow.initial'],
+    required: true,
+  }));
+}
+
+function sanitizeWorkflowName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'workflow';
 }

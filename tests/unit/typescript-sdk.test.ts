@@ -144,6 +144,31 @@ describe('SchruteClient', () => {
         }),
       );
     });
+
+    it('returns the browser handoff union when execution needs interactive recovery', async () => {
+      const response = {
+        status: 'browser_handoff_required',
+        success: false,
+        reason: 'cloudflare_challenge',
+        recoveryMode: 'real_browser_cdp',
+        siteId: 'example.com',
+        url: 'https://example.com/cdn-cgi/challenge-platform',
+        hint: 'Cloudflare challenge detected.',
+        resumeToken: 'recover-token',
+        latencyMs: 250,
+      };
+      mockFetch.mockResolvedValueOnce(mockResponse(response, 202));
+
+      const result = await client.executeSkill('example.com', 'getUser', {
+        userId: '123',
+      });
+
+      expect(result.status).toBe('browser_handoff_required');
+      if (result.status === 'browser_handoff_required') {
+        expect(result.resumeToken).toBe('recover-token');
+        expect(result.reason).toBe('cloudflare_challenge');
+      }
+    });
   });
 
   describe('dryRun', () => {

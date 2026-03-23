@@ -36,6 +36,8 @@ export interface PipelineWorkerOutput {
   auditData: {
     totalCount: number;
     signalCount: number;
+    htmlDocumentCount: number;
+    ambiguousCount?: number;
     noiseCount: number;
     dedupedCount: number;
   };
@@ -83,6 +85,8 @@ export async function runPipelineTask(
     auditData: {
       totalCount: auditEntries.length,
       signalCount: filtered.signalCount,
+      htmlDocumentCount: filtered.htmlDocumentCount,
+      ...(filtered.ambiguousCount > 0 ? { ambiguousCount: filtered.ambiguousCount } : {}),
       noiseCount: filtered.noiseCount,
       dedupedCount: filtered.signalCount - dedupedSignalRecords.length,
     },
@@ -123,10 +127,16 @@ function filterEntriesWithRecords(
 ): {
   signalRecords: StructuredRecord[];
   signalCount: number;
+  htmlDocumentCount: number;
+  ambiguousCount: number;
   noiseCount: number;
 } {
-  const { signal, noise } = filterRequests(auditEntries as unknown as HarEntry[], [], siteId);
-  const signalSet = new Set(signal);
+  const filtered = filterRequests(auditEntries as unknown as HarEntry[], [], siteId);
+  const signal = filtered.signal ?? [];
+  const htmlDocument = filtered.htmlDocument ?? [];
+  const ambiguous = filtered.ambiguous ?? [];
+  const noise = filtered.noise ?? [];
+  const signalSet = new Set([...signal, ...htmlDocument]);
   const signalRecords: StructuredRecord[] = [];
 
   for (let index = 0; index < auditEntries.length; index++) {
@@ -137,7 +147,9 @@ function filterEntriesWithRecords(
 
   return {
     signalRecords,
-    signalCount: signal.length,
+    signalCount: signal.length + htmlDocument.length,
+    htmlDocumentCount: htmlDocument.length,
+    ambiguousCount: ambiguous.length,
     noiseCount: noise.length,
   };
 }

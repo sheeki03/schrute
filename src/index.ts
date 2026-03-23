@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs';
+import * as readline from 'node:readline';
 import { Command } from 'commander';
 import { getConfig, setConfigValue, ensureDirectories } from './core/config.js';
 import { createLogger } from './core/logger.js';
@@ -18,6 +19,7 @@ import { validateSkill } from './skill/validator.js';
 import { validateImportableSkill, validateImportableSite } from './storage/import-validator.js';
 import type { SkillSpec, SiteManifest, SitePolicy } from './skill/types.js';
 import { getSitePolicy } from './core/policy.js';
+import { formatPermanentTierLockReason } from './core/tiering.js';
 import { VERSION } from './version.js';
 import { ConfigError } from './core/config.js';
 
@@ -33,10 +35,12 @@ program
 
 // ─── Helper: get remote client from global opts ─────────────────
 
-function getRemoteClient(): RemoteClient | null {
-  const opts = program.opts<{ url?: string; token?: string; json?: boolean }>();
-  if (!opts.url) return null;
-  return new RemoteClient(opts.url, opts.token);
+function getRemoteClient(cmdOpts?: { url?: string; token?: string }): RemoteClient | null {
+  const globalOpts = program.opts<{ url?: string; token?: string; json?: boolean }>();
+  const url = cmdOpts?.url ?? globalOpts.url;
+  const token = cmdOpts?.token ?? globalOpts.token;
+  if (!url) return null;
+  return new RemoteClient(url, token);
 }
 
 function outputResult(data: unknown): void {
@@ -50,21 +54,86 @@ function outputResult(data: unknown): void {
   }
 }
 
+function parseJsonInput<T>(label: string, value: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch (err) {
+    throw new Error(`Invalid ${label} JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ─── Helper: progress indicator ─────────────────────────────────
+
+function startProgress(msg: string): () => void {
+  if (!process.stderr.isTTY) return () => {};
+  process.stderr.write(msg);
+  const id = setInterval(() => process.stderr.write('.'), 1000);
+  return () => { clearInterval(id); process.stderr.write('\n'); };
+}
+
+// ─── Helper: retry on 429 ───────────────────────────────────────
+
+async function executeWithRetry(
+  fn: () => Promise<unknown>,
+  retries = 2,
+  delayMs = 2000,
+): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    const result = await fn();
+    const data = result as Record<string, unknown>;
+    // Daemon returns { status: 'executed', result: { failureCause: 'rate_limited', failureDetail: '...NNNms...' } }
+    const inner = (data?.result ?? data) as Record<string, unknown> | undefined;
+    if (inner?.failureCause === 'rate_limited' && attempt < retries) {
+      const detail = typeof inner.failureDetail === 'string' ? inner.failureDetail : '';
+      const wait = parseInt(detail.match(/(\d+)ms/)?.[1] ?? String(delayMs));
+      console.error(`Rate limited — retrying in ${wait}ms...`);
+      await new Promise(r => setTimeout(r, wait + 100));
+      continue;
+    }
+    return result;
+  }
+}
+
+async function executeWithRetryRemote(
+  fn: () => Promise<unknown>,
+  retries = 2,
+  delayMs = 2000,
+): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/429|rate.limit/i.test(msg) && attempt < retries) {
+        console.error(`Rate limited — retrying in ${delayMs}ms...`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ─── explore ────────────────────────────────────────────────────
 
 program
   .command('explore <url>')
   .description('Open a browser session to explore a website')
   .addHelpText('after', '\n(requires local daemon or --url)')
-  .action(async (url: string) => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (url: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
+      const stop = startProgress('Exploring');
       try {
         const result = await remote.explore(url);
         outputResult(result);
       } catch (err) {
         console.error('Error:', err instanceof Error ? err.message : String(err));
         process.exit(1);
+      } finally {
+        stop();
       }
       return;
     }
@@ -74,6 +143,7 @@ program
     ensureDirectories(config);
 
     const client = createDaemonClient(config);
+    const stop = startProgress('Exploring');
     try {
       const result = await client.request('POST', '/ctl/explore', { url });
       console.log('Explore session started:');
@@ -81,6 +151,8 @@ program
     } catch (err) {
       console.error('Error:', err instanceof Error ? err.message : String(err));
       process.exit(1);
+    } finally {
+      stop();
     }
   });
 
@@ -90,8 +162,10 @@ program
   .command('status')
   .description('Show server status')
   .addHelpText('after', '\n(requires local daemon or --url)')
-  .action(async () => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.getStatus();
@@ -122,8 +196,10 @@ program
   .command('sessions')
   .description('List active sessions')
   .addHelpText('after', '\n(requires local daemon or --url)')
-  .action(async () => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.listSessions();
@@ -156,7 +232,9 @@ program
   .addHelpText('after', '\n(requires local daemon or --url)')
   .requiredOption('--name <name>', 'Name for the action frame')
   .option('--input <pairs...>', 'Input key=value pairs')
-  .action(async (options: { name: string; input?: string[] }) => {
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (options: { name: string; input?: string[]; url?: string; token?: string }) => {
     // Parse input pairs
     let inputs: Record<string, string> | undefined;
     if (options.input) {
@@ -169,7 +247,7 @@ program
       }
     }
 
-    const remote = getRemoteClient();
+    const remote = getRemoteClient(options);
     if (remote) {
       try {
         const result = await remote.startRecording(options.name, inputs);
@@ -202,11 +280,54 @@ program
   .command('stop')
   .description('Stop recording and process the action frame')
   .addHelpText('after', '\n(requires local daemon or --url)')
-  .action(async () => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
+      const stop = startProgress('Stopping');
       try {
         const result = await remote.stopRecording();
+        outputResult(result);
+      } catch (err) {
+        console.error('Error:', err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      } finally {
+        stop();
+      }
+      return;
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+
+    const client = createDaemonClient(config);
+    const stop = startProgress('Stopping');
+    try {
+      const result = await client.request('POST', '/ctl/stop');
+      console.log('Recording stopped:');
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error('Error:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    } finally {
+      stop();
+    }
+  });
+
+// ─── pipeline ───────────────────────────────────────────────────
+
+program
+  .command('pipeline <jobId>')
+  .description('Show background pipeline job status')
+  .addHelpText('after', '\n(requires local daemon or --url)')
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (jobId: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
+    if (remote) {
+      try {
+        const result = await remote.getPipelineStatus(jobId);
         outputResult(result);
       } catch (err) {
         console.error('Error:', err instanceof Error ? err.message : String(err));
@@ -220,9 +341,8 @@ program
 
     const client = createDaemonClient(config);
     try {
-      const result = await client.request('POST', '/ctl/stop');
-      console.log('Recording stopped:');
-      console.log(JSON.stringify(result, null, 2));
+      const result = await client.request('GET', `/ctl/pipeline/${encodeURIComponent(jobId)}`);
+      outputResult(result);
     } catch (err) {
       console.error('Error:', err instanceof Error ? err.message : String(err));
       process.exit(1);
@@ -242,11 +362,21 @@ const skillsCmd = program
 skillsCmd
   .command('list [site]')
   .description('List skills, optionally filtered by site')
-  .action(async (site?: string) => {
-    const remote = getRemoteClient();
+  .option('--status <status>', 'Filter by status (draft, active, stale, broken)')
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (site: string | undefined, cmdOpts: { status?: string; url?: string; token?: string }) => {
+    const { SkillStatus } = await import('./skill/types.js');
+    const validStatuses = Object.values(SkillStatus) as string[];
+    if (cmdOpts.status && !validStatuses.includes(cmdOpts.status)) {
+      console.error(`Invalid status '${cmdOpts.status}'. Valid: ${validStatuses.join(', ')}`);
+      process.exit(1);
+    }
+
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
-        const result = await remote.listSkills(site ?? undefined);
+        const result = await remote.listSkills(site ?? undefined, cmdOpts.status);
         outputResult(result);
       } catch (err) {
         console.error('Error:', err instanceof Error ? err.message : String(err));
@@ -267,6 +397,10 @@ skillsCmd
       skills = skillRepo.getBySiteId(site);
     } else {
       skills = skillRepo.getAll();
+    }
+
+    if (cmdOpts.status) {
+      skills = skills.filter(s => s.status === cmdOpts.status);
     }
 
     if (program.opts().json) {
@@ -297,8 +431,10 @@ skillsCmd
   .description('Search skills by query')
   .option('--limit <n>', 'Max results', '20')
   .option('--site <siteId>', 'Filter to a specific site')
-  .action(async (query?: string, options?: { limit?: string; site?: string }) => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (query?: string, options?: { limit?: string; site?: string; url?: string; token?: string }) => {
+    const remote = getRemoteClient(options);
     if (remote) {
       try {
         const limit = options?.limit ? parseInt(options.limit, 10) : undefined;
@@ -410,7 +546,7 @@ skillsCmd
     if (skill.currentTier === 'tier_1') {
       // skip — already direct
     } else if (skill.tierLock?.type === 'permanent') {
-      whyNotDirect = `Permanently locked: ${skill.tierLock.reason}`;
+      whyNotDirect = `Permanently locked: ${formatPermanentTierLockReason(skill.tierLock.reason)}`;
     } else if ((skill.directCanaryAttempts ?? 0) > 0 && !skill.directCanaryEligible) {
       whyNotDirect = `Direct canary failed (${skill.lastCanaryErrorType ?? 'unknown'}). ${skill.directCanaryAttempts} attempts.`;
     } else if (skill.directCanaryEligible) {
@@ -427,6 +563,121 @@ skillsCmd
     }
 
     console.log(JSON.stringify(output, null, 2));
+    closeDatabase();
+  });
+
+skillsCmd
+  .command('set-transform <skill_id>')
+  .description('Set or clear a skill output transform')
+  .option('--transform <json>', 'Transform JSON definition')
+  .option('--response-content-type <type>', 'Override response content type, e.g. text/html')
+  .option('--clear', 'Clear the current transform')
+  .action((skillId: string, options: { transform?: string; responseContentType?: string; clear?: boolean }) => {
+    if (options.clear && options.transform) {
+      console.error('Error: --clear cannot be combined with --transform.');
+      process.exit(1);
+    }
+    if (!options.clear && !options.transform && !options.responseContentType) {
+      console.error('Error: provide --transform, --response-content-type, or --clear.');
+      process.exit(1);
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    let transform = undefined;
+    if (options.transform) {
+      try {
+        transform = parseJsonInput<SkillSpec['outputTransform']>('transform', options.transform);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        closeDatabase();
+        process.exit(1);
+      }
+    }
+
+    const nextSkill: SkillSpec = {
+      ...skill,
+      ...(options.clear ? { outputTransform: undefined } : {}),
+      ...(transform !== undefined ? { outputTransform: transform } : {}),
+      ...(options.responseContentType !== undefined ? { responseContentType: options.responseContentType } : {}),
+    };
+    const validation = validateImportableSkill(nextSkill);
+    if (!validation.valid) {
+      console.error(`Error: ${validation.errors.join('; ')}`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    skillRepo.update(skill.id, {
+      ...(options.clear ? { outputTransform: null as unknown as SkillSpec['outputTransform'] } : {}),
+      ...(transform !== undefined ? { outputTransform: transform } : {}),
+      ...(options.responseContentType !== undefined ? { responseContentType: options.responseContentType } : {}),
+    });
+
+    const updated = skillRepo.getById(skill.id);
+    console.log(JSON.stringify({
+      updated: true,
+      skillId: skill.id,
+      outputTransform: updated?.outputTransform,
+      responseContentType: updated?.responseContentType,
+    }, null, 2));
+    closeDatabase();
+  });
+
+skillsCmd
+  .command('export <skill_id>')
+  .description('Export a skill as standalone code')
+  .requiredOption('--format <format>', 'Export format: curl, fetch.ts, requests.py, playwright.ts')
+  .option('--params <json>', 'Parameter JSON used to resolve the request')
+  .action(async (skillId: string, options: { format: string; params?: string }) => {
+    const format = options.format as 'curl' | 'fetch.ts' | 'requests.py' | 'playwright.ts';
+    if (!['curl', 'fetch.ts', 'requests.py', 'playwright.ts'].includes(format)) {
+      console.error(`Invalid format '${options.format}'. Valid: curl, fetch.ts, requests.py, playwright.ts`);
+      process.exit(1);
+    }
+
+    let params: Record<string, unknown> | undefined;
+    if (options.params) {
+      try {
+        params = parseJsonInput<Record<string, unknown>>('params', options.params);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const { generateExport } = await import('./skill/generator.js');
+    const code = generateExport(skill, format, params);
+
+    if (program.opts<{ json?: boolean }>().json) {
+      outputResult({ skillId, format, code });
+    } else {
+      console.log(code);
+    }
     closeDatabase();
   });
 
@@ -505,7 +756,8 @@ skillsCmd
 skillsCmd
   .command('delete <skill_id>')
   .description('Permanently delete a skill')
-  .action(async (skillId: string) => {
+  .option('--yes', 'Skip confirmation')
+  .action(async (skillId: string, options: { yes?: boolean }) => {
     const config = getConfig();
     createLogger(config.logLevel);
     ensureDirectories(config);
@@ -518,6 +770,27 @@ skillsCmd
       closeDatabase();
       process.exit(1);
     }
+
+    if (!options.yes) {
+      console.log(`About to delete skill '${skillId}':`);
+      console.log(`  Name:   ${skill.name}`);
+      console.log(`  Method: ${skill.method} ${skill.pathTemplate}`);
+      console.log(`  Status: ${skill.status}`);
+      if (!process.stdin.isTTY) {
+        console.error('Non-interactive terminal: use --yes to confirm deletion.');
+        closeDatabase();
+        process.exit(1);
+      }
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>(resolve => rl.question('Delete this skill? [y/N] ', resolve));
+      rl.close();
+      if (answer.toLowerCase() !== 'y') {
+        console.log('Aborted.');
+        closeDatabase();
+        return;
+      }
+    }
+
     skillRepo.delete(skillId);
     console.log(`Deleted skill '${skillId}' (${skill.name}).`);
     closeDatabase();
@@ -526,8 +799,10 @@ skillsCmd
 skillsCmd
   .command('revoke <skill_id>')
   .description('Revoke permanent approval for a skill')
-  .action(async (skillId: string) => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (skillId: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.revokeApproval(skillId);
@@ -576,8 +851,10 @@ skillsCmd
 skillsCmd
   .command('amendments <skillId>')
   .description('List amendments for a skill')
-  .action(async (skillId: string) => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (skillId: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.request('GET', `/skills/${encodeURIComponent(skillId)}/amendments`);
@@ -603,8 +880,10 @@ skillsCmd
 skillsCmd
   .command('optimize <skillId>')
   .description('Run GEPA offline optimization on a skill')
-  .action(async (skillId: string) => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (skillId: string, cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.request('POST', `/skills/${encodeURIComponent(skillId)}/optimize`);
@@ -745,6 +1024,116 @@ skillsCmd
     closeDatabase();
   });
 
+const workflowCmd = program
+  .command('workflow')
+  .description('Manage linear workflow skills');
+
+workflowCmd
+  .command('create')
+  .description('Create a workflow skill from existing active read-only skills')
+  .requiredOption('--site <siteId>', 'Site ID that owns the workflow')
+  .requiredOption('--name <name>', 'Workflow name')
+  .requiredOption('--spec <json>', 'WorkflowSpec JSON')
+  .option('--description <text>', 'Workflow description')
+  .option('--output-transform <json>', 'Optional final output transform JSON')
+  .action(async (options: { site: string; name: string; spec: string; description?: string; outputTransform?: string }) => {
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const siteRepo = new SiteRepository(db);
+    if (!siteRepo.getById(options.site)) {
+      console.error(`Site '${options.site}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    let workflowSpec: SkillSpec['workflowSpec'];
+    let outputTransform: SkillSpec['outputTransform'];
+    try {
+      workflowSpec = parseJsonInput<SkillSpec['workflowSpec']>('workflow spec', options.spec);
+      outputTransform = options.outputTransform
+        ? parseJsonInput<SkillSpec['outputTransform']>('output transform', options.outputTransform)
+        : undefined;
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const { generateWorkflowSkill } = await import('./skill/generator.js');
+    const workflowSkill = generateWorkflowSkill(options.site, options.name, workflowSpec!, {
+      description: options.description,
+      outputTransform,
+    });
+
+    const skillRepo = new SkillRepository(db);
+    if (skillRepo.getById(workflowSkill.id)) {
+      console.error(`Skill '${workflowSkill.id}' already exists.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const validation = validateImportableSkill(workflowSkill);
+    if (!validation.valid) {
+      console.error(`Error: ${validation.errors.join('; ')}`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    skillRepo.create(workflowSkill);
+    outputResult({
+      created: true,
+      skillId: workflowSkill.id,
+      workflowSpec: workflowSkill.workflowSpec,
+    });
+    closeDatabase();
+  });
+
+workflowCmd
+  .command('run <skill_id>')
+  .description('Run a workflow skill locally')
+  .option('--params <json>', 'Initial params as JSON')
+  .action(async (skillId: string, options: { params?: string }) => {
+    let params: Record<string, unknown> = {};
+    if (options.params) {
+      try {
+        params = parseJsonInput<Record<string, unknown>>('params', options.params);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const db = getDatabase(config);
+    const skillRepo = new SkillRepository(db);
+    const skill = skillRepo.getById(skillId);
+    if (!skill) {
+      console.error(`Skill '${skillId}' not found.`);
+      closeDatabase();
+      process.exit(1);
+    }
+    if (!skill.workflowSpec) {
+      console.error(`Skill '${skillId}' is not a workflow.`);
+      closeDatabase();
+      process.exit(1);
+    }
+
+    const engine = new Engine(config);
+    try {
+      const result = await engine.executeSkill(skill.id, params);
+      outputResult(result);
+    } finally {
+      await engine.close();
+      closeDatabase();
+    }
+  });
+
 // ─── execute ────────────────────────────────────────────────────
 
 program
@@ -753,7 +1142,9 @@ program
   .addHelpText('after', '\n(requires local daemon or --url)')
   .option('--yes', 'Auto-confirm and permanently approve the skill')
   .option('--json', 'Output as JSON')
-  .action(async (skillId: string, paramPairs: string[], options: { yes?: boolean; json?: boolean }) => {
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (skillId: string, paramPairs: string[], options: { yes?: boolean; json?: boolean; url?: string; token?: string }) => {
     // Parse key=value params
     const params: Record<string, unknown> = {};
     for (const pair of paramPairs) {
@@ -769,11 +1160,12 @@ program
       params[key] = value;
     }
 
-    const remote = getRemoteClient();
+    const remote = getRemoteClient(options);
     if (remote) {
       // Remote mode
+      const stop = startProgress('Executing');
       try {
-        let result = await remote.executeSkill(skillId, params);
+        let result = await executeWithRetryRemote(() => remote.executeSkill(skillId, params));
         // Handle confirmation flow
         const data = result as Record<string, unknown>;
         if (data.status === 'confirmation_required') {
@@ -787,20 +1179,23 @@ program
           // Auto-confirm
           await remote.confirm(data.confirmationToken as string, true);
           console.log(`Skill '${skillId}' permanently approved for execution.`);
-          result = await remote.executeSkill(skillId, params);
+          result = await executeWithRetryRemote(() => remote.executeSkill(skillId, params));
         }
         outputResult(result);
       } catch (err) {
         console.error('Error:', err instanceof Error ? err.message : String(err));
         process.exit(1);
+      } finally {
+        stop();
       }
       return;
     }
 
     // Local mode — go through daemon
+    const stop = startProgress('Executing');
     try {
       const daemonClient = createDaemonClient(getConfig());
-      let result = await daemonClient.request('POST', '/ctl/execute', { skillId, params });
+      let result = await executeWithRetry(() => daemonClient.request('POST', '/ctl/execute', { skillId, params }));
       const data = result as Record<string, unknown>;
       if (data.status === 'confirmation_required') {
         if (!options.yes) {
@@ -812,12 +1207,14 @@ program
         }
         await daemonClient.request('POST', '/ctl/confirm', { token: data.confirmationToken, approve: true });
         console.log(`Skill '${skillId}' permanently approved for execution.`);
-        result = await daemonClient.request('POST', '/ctl/execute', { skillId, params });
+        result = await executeWithRetry(() => daemonClient.request('POST', '/ctl/execute', { skillId, params }));
       }
       outputResult(result);
     } catch (err) {
       console.error('Error:', err instanceof Error ? err.message : String(err));
       process.exit(1);
+    } finally {
+      stop();
     }
   });
 
@@ -834,8 +1231,10 @@ const sitesCmd = program
 sitesCmd
   .command('list')
   .description('List all known sites')
-  .action(async () => {
-    const remote = getRemoteClient();
+  .option('--url <url>', 'Remote Schrute server URL')
+  .option('--token <token>', 'Auth token for remote server')
+  .action(async (cmdOpts: { url?: string; token?: string }) => {
+    const remote = getRemoteClient(cmdOpts);
     if (remote) {
       try {
         const result = await remote.listSites();
@@ -1098,7 +1497,8 @@ configCmd
 configCmd
   .command('get <key>')
   .description('Get a configuration value')
-  .action((key: string) => {
+  .option('--reveal', 'Show sensitive values without masking')
+  .action((key: string, options: { reveal?: boolean }) => {
     const config = getConfig();
     const keys = key.split('.');
     let current: unknown = config;
@@ -1112,9 +1512,11 @@ configCmd
       }
     }
 
-    // Mask sensitive leaf values
-    const lastKey = keys[keys.length - 1];
-    current = maskConfigValue(lastKey, current);
+    // Mask sensitive leaf values unless --reveal
+    if (!options.reveal) {
+      const lastKey = keys[keys.length - 1];
+      current = maskConfigValue(lastKey, current);
+    }
     console.log(JSON.stringify(current, null, 2));
   });
 
@@ -1139,6 +1541,7 @@ program
   .option('--http', 'Enable HTTP transport (REST + MCP HTTP)')
   .option('--port <port>', 'Port number for HTTP server', '3000')
   .option('--no-daemon', 'Skip starting the daemon control socket')
+  .addHelpText('after', '\nTo run multiple instances, set SCHRUTE_DATA_DIR to different directories.')
   .action(async (options: { http?: boolean; port?: string; daemon?: boolean }) => {
     const config = getConfig();
     createLogger(config.logLevel);
@@ -1205,6 +1608,14 @@ program
       const mcpHttpDeps = { ...deps, config: { ...config, server: { ...config.server, network: true } } };
       const mcpHttp = await startMcpHttpServer(mcpHttpDeps, { host, port: port + 1 });
       console.log(`  MCP HTTP:     http://${host}:${port + 1}/mcp`);
+      const masked = config.server.authToken
+        ? `${config.server.authToken.slice(0, 4)}***`
+        : '(not set)';
+      console.log(`  Auth token:   ${masked}  (full value: schrute config get server.authToken --reveal)`);
+      if (!config.server.network) {
+        console.log(`  REST API:     no auth (local mode)`);
+        console.log(`  MCP HTTP:     requires Bearer token`);
+      }
       if (daemon) {
         const transport = daemon.transport;
         if (transport.mode === 'uds') {
@@ -1321,164 +1732,41 @@ program
 program
   .command('import <file>')
   .description('Import skills + manifest + policy from JSON bundle')
-  .action((file: string) => {
+  .option('--yes', 'Skip confirmation')
+  .action(async (file: string, options: { yes?: boolean }) => {
     const config = getConfig();
     createLogger(config.logLevel);
     ensureDirectories(config);
 
-    if (!fs.existsSync(file)) {
-      console.error(`File '${file}' not found.`);
-      process.exit(1);
-    }
-
-    let bundle: {
-      version: string;
-      site: SiteManifest;
-      skills: SkillSpec[];
-      policy?: SitePolicy;
-    };
-
-    try {
-      const raw = fs.readFileSync(file, 'utf-8');
-      bundle = JSON.parse(raw);
-    } catch (err) {
-      console.error('Failed to parse bundle:', err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-
-    // Validate basic structure
-    if (!bundle.site || !bundle.skills || !Array.isArray(bundle.skills)) {
-      console.error('Invalid bundle format: missing site or skills.');
-      process.exit(1);
-    }
-
-    // ── Validate site before touching DB ──────────────────────────
-    const siteResult = validateImportableSite(bundle.site);
-    if (!siteResult.valid) {
-      console.error(`Site validation failed:\n  ${siteResult.errors.join('\n  ')}`);
-      process.exit(1);
-    }
-
-    // ── Validate each skill; warn + skip invalid ones ─────────────
-    const validSkills: typeof bundle.skills = [];
-    const expectedSiteId = bundle.site.id;
-
-    for (const skill of bundle.skills) {
-      const skillResult = validateImportableSkill(skill);
-      if (!skillResult.valid) {
-        const label = (skill as unknown as Record<string, unknown>).id ?? '(unknown)';
-        console.warn(
-          `Warning: skill '${label}' failed validation — skipping.\n  ${skillResult.errors.join('\n  ')}`,
-        );
-        continue;
-      }
-
-      // Preflight: empty allowedDomains
-      if (Array.isArray(skill.allowedDomains) && skill.allowedDomains.length === 0) {
-        console.warn(
-          `Warning: skill '${skill.id}' has no allowedDomains — may not execute without a domain policy.`,
-        );
-      }
-
-      // Preflight: siteId consistency
-      if (skill.siteId !== expectedSiteId) {
-        console.warn(
-          `Warning: skill '${skill.id}' has siteId '${skill.siteId}', expected '${expectedSiteId}'. Skipping.`,
-        );
-        continue;
-      }
-
-      validSkills.push(skill);
-    }
-
-    // ── Open DB ───────────────────────────────────────────────────
     const db = getDatabase(config);
     const skillRepo = new SkillRepository(db);
     const siteRepo = new SiteRepository(db);
 
-    // Import site manifest (wrap getById in try-catch for corrupt rows)
-    let existingSite: SiteManifest | undefined;
     try {
-      existingSite = siteRepo.getById(bundle.site.id);
+      const { performImport } = await import('./app/import-service.js');
+      const result = await performImport(file, { db, skillRepo, siteRepo, config }, options);
+
+      if (result.cancelled) {
+        console.log('Cancelled.');
+        return;
+      }
+
+      if (result.siteAction) {
+        console.log(`${result.siteAction === 'created' ? 'Created' : 'Updated'} site.`);
+      }
+      if (result.updated > 0) {
+        console.log(`Will overwrite ${result.updated} existing skill(s).`);
+      }
+      console.log(`Imported ${result.created} new skill(s), updated ${result.updated} existing skill(s).`);
+      if (result.hasAuthSkills) {
+        console.log('NOTE: Re-authentication may be required -- credentials are never exported.');
+      }
     } catch (err) {
-      console.warn(
-        `Warning: existing site '${bundle.site.id}' has corrupt data — will overwrite.`,
-      );
-      existingSite = undefined;
+      console.error('Error:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    } finally {
+      closeDatabase();
     }
-
-    if (existingSite) {
-      siteRepo.update(bundle.site.id, bundle.site);
-      console.log(`Updated existing site '${bundle.site.id}'.`);
-    } else {
-      // If the row exists but was corrupt, delete it first to avoid INSERT OR IGNORE keeping the old row
-      try { siteRepo.delete(bundle.site.id); } catch (_err) { /* row may not exist */ }
-      siteRepo.create(bundle.site);
-      console.log(`Created site '${bundle.site.id}'.`);
-    }
-
-    // Import valid skills — ensure required NOT NULL DB fields are populated with defaults.
-    // SkillRepository.create() passes all fields explicitly (no DB DEFAULT fallback),
-    // so every NOT NULL column needs a value.
-    const now = Date.now();
-    for (const skill of validSkills) {
-      // name is NOT NULL — derive from id (format: "site_id.skill_name.vN")
-      if (!skill.name) {
-        const parts = skill.id.split('.');
-        skill.name = parts.length >= 2 ? parts[parts.length - 2] : skill.id;
-      }
-      if (skill.inputSchema === undefined) skill.inputSchema = {};
-      if (skill.sideEffectClass === undefined) skill.sideEffectClass = 'read-only';
-      if (skill.currentTier === undefined) skill.currentTier = 'tier_3';
-      if (skill.status === undefined) skill.status = 'draft';
-      if (skill.confidence === undefined) skill.confidence = 0;
-      if (skill.consecutiveValidations === undefined) skill.consecutiveValidations = 0;
-      if (skill.sampleCount === undefined) skill.sampleCount = 0;
-      if (skill.successRate === undefined) skill.successRate = 0;
-      if (skill.version === undefined) skill.version = 1;
-      if (skill.allowedDomains === undefined) skill.allowedDomains = [];
-      if (skill.isComposite === undefined) skill.isComposite = false;
-      if (skill.directCanaryEligible === undefined) skill.directCanaryEligible = false;
-      if (skill.directCanaryAttempts === undefined) skill.directCanaryAttempts = 0;
-      if (skill.validationsSinceLastCanary === undefined) skill.validationsSinceLastCanary = 0;
-      if (skill.createdAt === undefined) skill.createdAt = now;
-      if (skill.updatedAt === undefined) skill.updatedAt = now;
-    }
-    let created = 0;
-    let updated = 0;
-    for (const skill of validSkills) {
-      let existingSkill: SkillSpec | undefined;
-      try {
-        existingSkill = skillRepo.getById(skill.id);
-      } catch (err) {
-        console.warn(
-          `Warning: existing skill '${skill.id}' has corrupt data — will overwrite.`,
-        );
-        existingSkill = undefined;
-      }
-
-      if (existingSkill) {
-        skillRepo.update(skill.id, skill);
-        updated++;
-      } else {
-        // If the row exists but was corrupt, delete it first
-        try { skillRepo.delete(skill.id); } catch (_err) { /* row may not exist */ }
-        skillRepo.create(skill);
-        created++;
-      }
-    }
-
-    if (updated > 0) {
-      console.log(`Will overwrite ${updated} existing skill(s).`);
-    }
-
-    console.log(`Imported ${created} new skill(s), updated ${updated} existing skill(s).`);
-    const hasAuthSkills = validSkills.some((s: SkillSpec) => s.authType != null);
-    if (hasAuthSkills) {
-      console.log('NOTE: Re-authentication may be required — credentials are never exported.');
-    }
-
-    closeDatabase();
   });
 
 // ─── discover ───────────────────────────────────────────────────
@@ -1491,8 +1779,7 @@ program
     createLogger(config.logLevel);
     ensureDirectories(config);
 
-    console.log(`Discovering APIs at ${url}...`);
-
+    const stop = startProgress('Discovering');
     try {
       const { discoverSite } = await import('./discovery/cold-start.js');
       const result = await discoverSite(url, config);
@@ -1520,6 +1807,8 @@ program
     } catch (err) {
       console.error('Discovery failed:', err instanceof Error ? err.message : String(err));
       process.exit(1);
+    } finally {
+      stop();
     }
   });
 

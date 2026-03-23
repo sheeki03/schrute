@@ -147,6 +147,7 @@ vi.mock('../../src/replay/tool-budget.js', () => ({
 vi.mock('../../src/automation/rate-limiter.js', () => ({
   RateLimiter: vi.fn().mockImplementation(() => ({
     checkRate: vi.fn().mockReturnValue({ allowed: true }),
+    waitForPermit: vi.fn().mockResolvedValue({ allowed: true }),
     recordResponse: vi.fn(),
     setQps: vi.fn(),
     attachDatabase: vi.fn(),

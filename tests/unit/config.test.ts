@@ -86,6 +86,23 @@ describe('config', () => {
         fs.unlinkSync(tmpPath);
       }
     });
+
+    it('throws when server.mcpHttpAdmin is a non-boolean (e.g. string "false")', () => {
+      const tmpPath = path.join('/tmp', `schrute-test-config-${Date.now()}.json`);
+      fs.writeFileSync(
+        tmpPath,
+        JSON.stringify({ server: { mcpHttpAdmin: 'false' } }),
+        'utf-8',
+      );
+
+      try {
+        expect(() => configModule.loadConfig(tmpPath)).toThrow(
+          'Invalid config: server.mcpHttpAdmin must be a boolean',
+        );
+      } finally {
+        fs.unlinkSync(tmpPath);
+      }
+    });
   });
 
   describe('deepMerge (tested via loadConfig)', () => {

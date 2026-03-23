@@ -111,12 +111,12 @@ describe('classifier', () => {
       expect(result.recommendedTier).toBe(ExecutionTier.DIRECT);
     });
 
-    it('recommends COOKIE_REFRESH for auth-required traffic', () => {
+    it('recommends BROWSER_PROXIED for auth-required traffic', () => {
       const traffic = [
         makeEntry({ requestHeaders: { Authorization: 'Bearer abc' } }),
       ];
       const result = classifySite('test.com', traffic);
-      expect(result.recommendedTier).toBe(ExecutionTier.COOKIE_REFRESH);
+      expect(result.recommendedTier).toBe(ExecutionTier.BROWSER_PROXIED);
     });
 
     it('recommends FULL_BROWSER for JS-computed fields (signatures)', () => {
@@ -127,7 +127,7 @@ describe('classifier', () => {
       expect(result.recommendedTier).toBe(ExecutionTier.FULL_BROWSER);
     });
 
-    it('recommends COOKIE_REFRESH for dynamic fields + auth', () => {
+    it('recommends BROWSER_PROXIED for dynamic fields + auth', () => {
       const traffic = [
         makeEntry({
           url: 'https://api.example.com/api?_ts=12345',
@@ -135,7 +135,7 @@ describe('classifier', () => {
         }),
       ];
       const result = classifySite('test.com', traffic);
-      expect(result.recommendedTier).toBe(ExecutionTier.COOKIE_REFRESH);
+      expect(result.recommendedTier).toBe(ExecutionTier.BROWSER_PROXIED);
     });
   });
 

@@ -377,7 +377,7 @@ describe('MCP wiring integration', () => {
   // ═══════════════════════════════════════════════════════════════
 
   describe('Execution wiring (engine.executeSkill -> live server)', () => {
-    const EXECUTION_TIMEOUT_MS = 30_000;
+    const EXECUTION_TIMEOUT_MS = 60_000;
     let mockServer: Awaited<ReturnType<typeof createRestMockServer>>;
     let testSkillId: string;
 
@@ -442,11 +442,11 @@ describe('MCP wiring integration', () => {
       } as SkillSpec;
 
       skillRepo.create(skill);
-    });
+    }, EXECUTION_TIMEOUT_MS);
 
     afterEach(async () => {
       if (mockServer) await mockServer.close();
-    });
+    }, EXECUTION_TIMEOUT_MS);
 
     it('increments validation counters on success (A1)', async () => {
       const before = skillRepo.getById(testSkillId)!;

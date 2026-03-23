@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS policies (
   allowed_methods     TEXT NOT NULL DEFAULT '["GET","HEAD","POST:read-only"]',
   max_qps             REAL NOT NULL DEFAULT 1.0,
   max_concurrent      INTEGER NOT NULL DEFAULT 1,
+  min_gap_ms          INTEGER NOT NULL DEFAULT 100,
   read_only_default   INTEGER NOT NULL DEFAULT 1,
   require_confirmation TEXT NOT NULL DEFAULT '[]',
   domain_allowlist    TEXT,       -- JSON

@@ -30,6 +30,11 @@ vi.mock('../../src/browser/cdp-connector.js', () => ({
   connectViaCDP: vi.fn(),
 }));
 
+vi.mock('../../src/browser/real-browser-handoff.js', () => ({
+  writeOwnedBrowserLaunchMetadata: vi.fn(),
+  removeOwnedBrowserLaunchMetadata: vi.fn(),
+}));
+
 vi.mock('node:fs', () => ({
   default: {
     mkdirSync: vi.fn(),
@@ -49,16 +54,21 @@ vi.mock('node:fs', () => ({
 
 import { BrowserManager } from '../../src/browser/manager.js';
 import { launchBrowserEngine } from '../../src/browser/engine.js';
+import {
+  writeOwnedBrowserLaunchMetadata,
+  removeOwnedBrowserLaunchMetadata,
+} from '../../src/browser/real-browser-handoff.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-function createMockBrowser(connected = true): Browser {
+function createMockBrowser(connected = true, pid = 4321): Browser {
   const disconnectHandlers: Array<() => void> = [];
   return {
     isConnected: vi.fn().mockReturnValue(connected),
     newContext: vi.fn().mockResolvedValue(createMockContext()),
     contexts: vi.fn().mockReturnValue([]),
     close: vi.fn().mockResolvedValue(undefined),
+    process: vi.fn().mockReturnValue({ pid, spawnfile: '/usr/bin/chrome-headless-shell' }),
     on: vi.fn((event: string, handler: () => void) => {
       if (event === 'disconnected') disconnectHandlers.push(handler);
     }),
@@ -227,6 +237,64 @@ describe('BrowserManager Lifecycle', () => {
 
       // Browser should NOT have been closed — CDP sessions skip idle
       expect(mockBrowser.close).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('owned launch tracking', () => {
+    it('writes owned launch metadata for local launches', async () => {
+      const manager = new BrowserManager({
+        dataDir: '/tmp/test',
+        browser: { idleTimeoutMs: 1000 },
+        daemon: { port: 19420, autoStart: false },
+      } as any);
+
+      const mockBrowser = setupLaunchMock(createMockBrowser(true, 9876));
+      await manager.launchBrowser();
+
+      expect(writeOwnedBrowserLaunchMetadata).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          pid: 9876,
+          engine: 'patchright',
+        }),
+      );
+      expect(mockBrowser.close).not.toHaveBeenCalled();
+    });
+
+    it('removes owned launch metadata on closeAll', async () => {
+      const manager = new BrowserManager({
+        dataDir: '/tmp/test',
+        browser: { idleTimeoutMs: 1000 },
+        daemon: { port: 19420, autoStart: false },
+      } as any);
+
+      setupLaunchMock(createMockBrowser(true, 6543));
+      await manager.launchBrowser();
+      await manager.closeAll();
+
+      expect(removeOwnedBrowserLaunchMetadata).toHaveBeenCalledWith(
+        expect.anything(),
+        6543,
+      );
+    });
+
+    it('removes owned launch metadata when the browser disconnects', async () => {
+      const manager = new BrowserManager({
+        dataDir: '/tmp/test',
+        browser: { idleTimeoutMs: 1000 },
+        daemon: { port: 19420, autoStart: false },
+      } as any);
+
+      const mockBrowser = setupLaunchMock(createMockBrowser(true, 2468)) as Browser & {
+        _triggerDisconnect: () => void;
+      };
+      await manager.launchBrowser();
+      mockBrowser._triggerDisconnect();
+
+      expect(removeOwnedBrowserLaunchMetadata).toHaveBeenCalledWith(
+        expect.anything(),
+        2468,
+      );
     });
   });
 

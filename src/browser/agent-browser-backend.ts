@@ -6,7 +6,12 @@ import type { BrowserProvider, SchruteConfig } from '../skill/types.js';
 import type { BrowserAuthStore } from './auth-store.js';
 import type { AuthCoordinator } from './auth-coordinator.js';
 import type { AgentBrowserProvider } from './agent-browser-provider.js';
-import { AgentBrowserIpcClient, resolveSocketDir } from './agent-browser-ipc.js';
+import { AgentBrowserIpcClient } from './agent-browser-ipc.js';
+import {
+  closeAgentBrowserSession,
+  removeAgentBrowserSessionMetadata,
+  writeAgentBrowserSessionMetadata,
+} from './agent-browser-cleanup.js';
 
 const log = getLogger();
 
@@ -17,7 +22,12 @@ const PROBE_COOLDOWN_MS = 60_000;
  * Uses once-promise probe to detect availability.
  */
 export class AgentBrowserBackend implements BrowserBackend {
-  private sessions = new Map<string, { provider: AgentBrowserProvider; ipc: AgentBrowserIpcClient }>();
+  private sessions = new Map<string, {
+    provider: AgentBrowserProvider;
+    ipc: AgentBrowserIpcClient;
+    sessionName: string;
+    lastUsedAt: number;
+  }>();
   private daemonAvailable: boolean | null = null;
   private probePromise: Promise<boolean> | null = null;
   private lastFailTime = 0;
@@ -57,6 +67,7 @@ export class AgentBrowserBackend implements BrowserBackend {
 
     const existingEntry = this.sessions.get(siteId);
     if (existingEntry) {
+      existingEntry.lastUsedAt = Date.now();
       // Stale-auth safety net: check if our cached session has outdated auth
       if (this.authCoordinator && this.authStore) {
         const participantId = `exec-ab:${siteId}`;
@@ -76,15 +87,22 @@ export class AgentBrowserBackend implements BrowserBackend {
       }
     }
 
+    const sessionName = `exec-${siteId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    let ipc: AgentBrowserIpcClient | undefined;
     try {
       const { AgentBrowserProvider: ABProvider } = await import('./agent-browser-provider.js');
-      const sessionName = `exec-${siteId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-      const ipc = new AgentBrowserIpcClient();
+      ipc = new AgentBrowserIpcClient();
+      writeAgentBrowserSessionMetadata(this.config, {
+        sessionName,
+        siteId,
+        createdAt: Date.now(),
+        purpose: 'exec',
+      });
       await ipc.bootstrapDaemon(sessionName);
       await ipc.connect(sessionName);
 
-      const provider = new ABProvider(ipc, domains);
+      const provider = new ABProvider(ipc, domains, () => this.touchSession(siteId));
 
       // Hydrate with auth state if available (cookies only for agent-browser)
       if (this.authStore) {
@@ -94,7 +112,7 @@ export class AgentBrowserBackend implements BrowserBackend {
         }
       }
 
-      this.sessions.set(siteId, { provider, ipc });
+      this.sessions.set(siteId, { provider, ipc, sessionName, lastUsedAt: Date.now() });
 
       // Register as auth coordinator participant
       if (this.authCoordinator) {
@@ -114,6 +132,7 @@ export class AgentBrowserBackend implements BrowserBackend {
 
       return provider;
     } catch (err) {
+      await this.bestEffortCloseBootstrapSession(sessionName, ipc);
       log.warn({ err, siteId }, 'AgentBrowserBackend.createProvider failed');
       return undefined;
     }
@@ -122,12 +141,14 @@ export class AgentBrowserBackend implements BrowserBackend {
   async getCookies(siteId: string): Promise<CookieEntry[]> {
     const entry = this.sessions.get(siteId);
     if (!entry) return [];
+    entry.lastUsedAt = Date.now();
     return entry.provider.getCookies();
   }
 
   async setCookies(siteId: string, cookies: CookieEntry[]): Promise<void> {
     const entry = this.sessions.get(siteId);
     if (entry) {
+      entry.lastUsedAt = Date.now();
       await entry.provider.hydrateCookies(cookies);
     }
   }
@@ -189,8 +210,7 @@ export class AgentBrowserBackend implements BrowserBackend {
 
     // Unregister from coordinator before closing
     this.authCoordinator?.unregister(`exec-ab:${siteId}`);
-    await entry.provider.close();
-    entry.ipc.close();
+    await this.closeTrackedSession(entry);
     this.sessions.delete(siteId);
   }
 
@@ -198,8 +218,7 @@ export class AgentBrowserBackend implements BrowserBackend {
     const entry = this.sessions.get(siteId);
     if (entry) {
       this.authCoordinator?.unregister(`exec-ab:${siteId}`);
-      await entry.provider.close();
-      entry.ipc.close();
+      await this.closeTrackedSession(entry);
       this.sessions.delete(siteId);
     }
   }
@@ -215,12 +234,26 @@ export class AgentBrowserBackend implements BrowserBackend {
     }
     const closePromises = [...this.sessions.values()].map(async (entry) => {
       try {
-        await entry.provider.close();
-        entry.ipc.close();
+        await this.closeTrackedSession(entry);
       } catch (err) { log.debug({ err }, 'Session close failed during shutdown'); }
     });
     await Promise.allSettled(closePromises);
     this.sessions.clear();
+  }
+
+  async sweepIdleSessions(idleTimeoutMs: number): Promise<void> {
+    if (idleTimeoutMs <= 0) return;
+
+    const now = Date.now();
+    const idleEntries = [...this.sessions.entries()]
+      .filter(([, entry]) => now - entry.lastUsedAt > idleTimeoutMs);
+
+    await Promise.allSettled(idleEntries.map(async ([siteId, entry]) => {
+      this.authCoordinator?.unregister(`exec-ab:${siteId}`);
+      await this.closeTrackedSession(entry);
+      this.sessions.delete(siteId);
+      log.debug({ siteId, sessionName: entry.sessionName, idleForMs: now - entry.lastUsedAt }, 'Swept idle agent-browser session');
+    }));
   }
 
   /**
@@ -243,6 +276,12 @@ export class AgentBrowserBackend implements BrowserBackend {
 
     const sessionName = `__prefetch_${siteId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}`;
     const ipc = new AgentBrowserIpcClient();
+    writeAgentBrowserSessionMetadata(this.config, {
+      sessionName,
+      siteId,
+      createdAt: Date.now(),
+      purpose: 'prefetch',
+    });
 
     try {
       await ipc.bootstrapDaemon(sessionName);
@@ -271,15 +310,14 @@ export class AgentBrowserBackend implements BrowserBackend {
       const cookies: CookieEntry[] = Array.isArray(result) ? result : [];
 
       // Tear down ephemeral session
-      try { await ipc.send({ action: 'close' }); } catch (err) { log.debug({ err }, 'IPC close send failed'); }
-      ipc.close();
+      await this.closeEphemeralSession(sessionName, ipc);
 
       return cookies;
     } catch (err) {
       // Clean up IPC client but re-throw — callers (Promise.allSettled in
       // prefetchStaleAuth) must distinguish failure from empty cookie jar
       // to avoid wiping canonical auth state.
-      try { ipc.close(); } catch (err2) { log.debug({ err: err2 }, 'IPC cleanup failed'); }
+      await this.closeEphemeralSession(sessionName, ipc);
       throw err;
     }
   }
@@ -360,6 +398,11 @@ export class AgentBrowserBackend implements BrowserBackend {
       // Step 2: Bootstrap probe session
       const probeName = `__probe_${process.pid}_${Date.now()}__`;
       const ipc = new AgentBrowserIpcClient();
+      writeAgentBrowserSessionMetadata(this.config, {
+        sessionName: probeName,
+        createdAt: Date.now(),
+        purpose: 'probe',
+      });
       try {
         await ipc.bootstrapDaemon(probeName);
         await ipc.connect(probeName);
@@ -368,10 +411,9 @@ export class AgentBrowserBackend implements BrowserBackend {
         await ipc.send({ action: 'url' });
 
         // Step 4: Tear down probe
-        await ipc.send({ action: 'close' });
-        ipc.close();
+        await this.closeEphemeralSession(probeName, ipc);
       } catch (err) {
-        ipc.close();
+        await this.closeEphemeralSession(probeName, ipc);
         throw err;
       }
 
@@ -383,5 +425,82 @@ export class AgentBrowserBackend implements BrowserBackend {
       this.lastFailTime = Date.now();
       return false;
     }
+  }
+
+  private async closeTrackedSession(
+    entry: { provider: AgentBrowserProvider; ipc: AgentBrowserIpcClient; sessionName: string; lastUsedAt: number },
+  ): Promise<void> {
+    let closedRemotely = false;
+    try {
+      await entry.provider.close();
+      closedRemotely = true;
+    } catch (err) {
+      log.debug({ err, sessionName: entry.sessionName }, 'Tracked agent-browser provider close failed');
+    }
+
+    try {
+      entry.ipc.close();
+    } catch (err) {
+      log.debug({ err, sessionName: entry.sessionName }, 'Tracked agent-browser IPC cleanup failed');
+    }
+
+    if (!closedRemotely) {
+      try {
+        await closeAgentBrowserSession(entry.sessionName);
+      } catch (err) {
+        log.debug({ err, sessionName: entry.sessionName }, 'Fallback agent-browser close failed');
+      }
+    }
+
+    removeAgentBrowserSessionMetadata(this.config, entry.sessionName);
+  }
+
+  private touchSession(siteId: string): void {
+    const entry = this.sessions.get(siteId);
+    if (entry) {
+      entry.lastUsedAt = Date.now();
+    }
+  }
+
+  private async closeEphemeralSession(sessionName: string, ipc: AgentBrowserIpcClient): Promise<void> {
+    let closedRemotely = false;
+    if (ipc.isConnected()) {
+      try {
+        await ipc.send({ action: 'close' });
+        closedRemotely = true;
+      } catch (err) {
+        log.debug({ err, sessionName }, 'Ephemeral agent-browser close over IPC failed');
+      }
+    }
+
+    try {
+      ipc.close();
+    } catch (err) {
+      log.debug({ err, sessionName }, 'Ephemeral agent-browser IPC cleanup failed');
+    }
+
+    if (!closedRemotely) {
+      try {
+        await closeAgentBrowserSession(sessionName);
+      } catch (err) {
+        log.debug({ err, sessionName }, 'Fallback agent-browser close failed');
+      }
+    }
+
+    removeAgentBrowserSessionMetadata(this.config, sessionName);
+  }
+
+  private async bestEffortCloseBootstrapSession(sessionName: string, ipc?: AgentBrowserIpcClient): Promise<void> {
+    try {
+      ipc?.close();
+    } catch (err) {
+      log.debug({ err, sessionName }, 'Bootstrap IPC cleanup failed');
+    }
+    try {
+      await closeAgentBrowserSession(sessionName);
+    } catch (err) {
+      log.debug({ err, sessionName }, 'Bootstrap cleanup close failed');
+    }
+    removeAgentBrowserSessionMetadata(this.config, sessionName);
   }
 }

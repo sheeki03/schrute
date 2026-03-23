@@ -17,6 +17,10 @@ import type { AuthCoordinator } from './auth-coordinator.js';
 import { ParallelismGovernor } from './parallelism-governor.js';
 import { NetworkRingBuffer } from '../capture/network-ring-buffer.js';
 import { withTimeout } from '../core/utils.js';
+import {
+  writeOwnedBrowserLaunchMetadata,
+  removeOwnedBrowserLaunchMetadata,
+} from './real-browser-handoff.js';
 
 const log = getLogger();
 
@@ -145,6 +149,7 @@ export class BrowserManager {
   private reconnectAborted: boolean = false;
   private lastCdpSiteId: string | null = null; // preserved across disconnect for reconnect
   private networkRingBuffer?: NetworkRingBuffer;
+  private ownedLaunchPid: number | null = null;
 
   constructor(config?: SchruteConfig, pool?: BrowserPool) {
     this.config = config;
@@ -220,6 +225,30 @@ export class BrowserManager {
 
   private getResolvedConfig(): SchruteConfig {
     return this.config ?? getConfig();
+  }
+
+  private trackOwnedBrowserLaunch(browser: Browser): void {
+    if (this.pool || this.cdpConnected) return;
+    const launched = (browser as Browser & {
+      process?: () => { pid?: number; spawnfile?: string } | null;
+    }).process?.();
+    const pid = launched?.pid;
+    if (!pid || !Number.isInteger(pid)) return;
+
+    this.ownedLaunchPid = pid;
+    writeOwnedBrowserLaunchMetadata(this.getResolvedConfig(), {
+      pid,
+      createdAt: Date.now(),
+      engine: this.engine,
+      sessionName: this.sessionName,
+      commandHint: launched?.spawnfile,
+    });
+  }
+
+  private clearOwnedBrowserLaunch(): void {
+    if (!this.ownedLaunchPid) return;
+    removeOwnedBrowserLaunchMetadata(this.getResolvedConfig(), this.ownedLaunchPid);
+    this.ownedLaunchPid = null;
   }
 
   /**
@@ -396,8 +425,12 @@ export class BrowserManager {
         this.releaseToPool();
         this.releaseToPool = null;
         this.disconnectHandler = null;
+        this.ownedLaunchPid = null;
       } else {
-        try { await browser?.close(); } catch { /* already closed */ }
+        try {
+          await browser?.close();
+          this.clearOwnedBrowserLaunch();
+        } catch { /* already closed */ }
       }
     });
   }
@@ -422,6 +455,7 @@ export class BrowserManager {
       this.disconnectHandler = () => {
         log.warn('Pool browser disconnected');
         this.browser = null;
+        this.ownedLaunchPid = null;
         this.unregisterAllAuthParticipants();
         this.contexts.clear();
         if (this.idleTimer) {
@@ -445,6 +479,7 @@ export class BrowserManager {
     }
     this.browser = result.browser;
     this.capabilities = result.capabilities;
+    this.trackOwnedBrowserLaunch(this.browser);
     if (result.capabilities.configuredEngine !== result.capabilities.effectiveEngine) {
       log.warn(
         { configured: result.capabilities.configuredEngine, effective: result.capabilities.effectiveEngine },
@@ -455,6 +490,7 @@ export class BrowserManager {
     this.browser.on('disconnected', () => {
       log.warn('Browser disconnected');
       this.browser = null;
+      this.clearOwnedBrowserLaunch();
       this.governor.release();
       this.unregisterAllAuthParticipants();
       this.contexts.clear();
@@ -905,9 +941,11 @@ export class BrowserManager {
         this.releaseToPool();
         this.releaseToPool = null;
         this.disconnectHandler = null;
+        this.ownedLaunchPid = null;
       } else if (browser) {
         try {
           await browser.close();
+          this.clearOwnedBrowserLaunch();
         } catch (err) {
           log.warn({ err }, 'Error closing browser instance');
         }
@@ -920,6 +958,7 @@ export class BrowserManager {
       this.reconnecting = false;
       this.reconnectPromise = null;
       this.lastCdpSiteId = null;
+      this.ownedLaunchPid = null;
 
       log.info('Closed all browser contexts and browser');
     });

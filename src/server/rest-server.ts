@@ -174,6 +174,28 @@ export async function createRestServer(options?: {
     logger: false,
   });
 
+  // ─── Empty Body Parser ──────────────────────────────────
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    if (!body || (typeof body === 'string' && body.trim() === '')) {
+      done(null, {});
+    } else {
+      try { done(null, JSON.parse(body as string)); }
+      catch (e) { done(e as Error, undefined); }
+    }
+  });
+
+  // ─── v0 Deprecation Header ─────────────────────────────
+  const DEPRECATION_EXEMPT = new Set(['/api/health', '/api/docs', '/api/openapi.json']);
+
+  app.addHook('onSend', async (request, reply) => {
+    const url = request.url.split('?')[0];
+    if (url.startsWith('/api/') && !url.startsWith('/api/v1/') && !DEPRECATION_EXEMPT.has(url)) {
+      reply.header('Deprecation', 'true');
+      reply.header('Link', '</api/v1/>; rel="successor-version"');
+    }
+  });
+
   // ─── Bearer Token Auth ────────────────────────────────────
   if (config.server.network && config.server.authToken) {
     app.addHook('onRequest', async (request, reply) => {
@@ -365,7 +387,7 @@ export async function createRestServer(options?: {
   app.get('/api/sessions', async (_request, reply) => {
     if (!requireAdmin(config, reply)) return;
     const multiSession = engine.getMultiSessionManager();
-    const sessions = multiSession.list().map(s => ({
+    const sessions = multiSession.list(undefined, config, { includeInternal: false }).map(s => ({
       name: s.name,
       siteId: s.siteId,
       isCdp: s.isCdp,
@@ -606,6 +628,10 @@ export async function createRestServer(options?: {
           reply.code(202).send(outcome);
           return;
         }
+        if (outcome.status === 'browser_handoff_required') {
+          reply.code(202).send(outcome.result);
+          return;
+        }
         if (outcome.result.success) {
           reply.code(200).send(outcome.result);
         } else {
@@ -793,6 +819,10 @@ export async function createRestServer(options?: {
             ...outcome,
             message: 'This skill has not been validated yet. Please confirm execution.',
           }, reqId));
+          return;
+        }
+        if (outcome.status === 'browser_handoff_required') {
+          reply.code(202).send(apiResponse(outcome.result, reqId));
           return;
         }
         // outcome.status === 'executed'

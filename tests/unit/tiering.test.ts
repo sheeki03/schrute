@@ -3,6 +3,7 @@ import {
   checkPromotion,
   handleFailure,
   getEffectiveTier,
+  sanitizeSiteRecommendedTier,
 } from '../../src/core/tiering.js';
 import { TierState, FailureCause, ExecutionTier } from '../../src/skill/types.js';
 import type {
@@ -260,6 +261,13 @@ describe('tiering', () => {
       expect((result.tierLock as PermanentTierLock).reason).toBe('signed_payload');
     });
 
+    it('maps cloudflare_challenge to browser_required', () => {
+      const skill = makeSkill();
+      const result = handleFailure(skill, FailureCause.CLOUDFLARE_CHALLENGE);
+      expect(result.tierLock.type).toBe('permanent');
+      expect((result.tierLock as PermanentTierLock).reason).toBe('browser_required');
+    });
+
     it('no transition out of permanent lock', () => {
       const lock: PermanentTierLock = {
         type: 'permanent',
@@ -301,6 +309,20 @@ describe('tiering', () => {
     it('returns current tier when no lock', () => {
       const skill = makeSkill({ currentTier: TierState.TIER_1_PROMOTED, tierLock: null });
       expect(getEffectiveTier(skill)).toBe(TierState.TIER_1_PROMOTED);
+    });
+  });
+
+  describe('sanitizeSiteRecommendedTier', () => {
+    it('keeps full_browser when browserRequired is true', () => {
+      expect(sanitizeSiteRecommendedTier(ExecutionTier.FULL_BROWSER, true)).toBe(ExecutionTier.FULL_BROWSER);
+    });
+
+    it('downgrades direct to browser_proxied when browserRequired is true', () => {
+      expect(sanitizeSiteRecommendedTier(ExecutionTier.DIRECT, true)).toBe(ExecutionTier.BROWSER_PROXIED);
+    });
+
+    it('normalizes cookie_refresh to browser_proxied when browserRequired is false', () => {
+      expect(sanitizeSiteRecommendedTier(ExecutionTier.COOKIE_REFRESH, false)).toBe(ExecutionTier.BROWSER_PROXIED);
     });
   });
 });

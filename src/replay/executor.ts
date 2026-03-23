@@ -27,6 +27,7 @@ import { parseResponse } from './response-parser.js';
 import { checkSemanticNative as checkSemantic } from '../native/semantic-diff.js';
 import { AuditLog } from './audit-log.js';
 import { ToolBudgetTracker } from './tool-budget.js';
+import { isCloudflareChallengeSignal } from '../shared/cloudflare-challenge.js';
 import {
   checkCapability,
   enforceDomainAllowlist,
@@ -333,6 +334,7 @@ async function executeTier(
       schemaMatch: false,
       semanticPass: false,
       failureCause: FailureCause.FETCH_ERROR,
+      failureDetail: err instanceof Error ? err.message : String(err),
     };
   }
 
@@ -507,6 +509,10 @@ async function classifyFailure(
     // Without metrics data or insufficient history, fall through to UNKNOWN
   }
 
+  if (isCloudflareChallengeResponse(response)) {
+    return FailureCause.CLOUDFLARE_CHALLENGE;
+  }
+
   // 2.5: Server errors (5xx) — map to UNKNOWN with better logging
   if (response.status >= 500 && response.status < 600) {
     log.info({ skillId: skill.id, status: response.status }, 'Server error (5xx) — classified as UNKNOWN');
@@ -572,6 +578,13 @@ async function classifyFailure(
 
   // 9. unknown: none matched
   return FailureCause.UNKNOWN;
+}
+
+function isCloudflareChallengeResponse(response: SealedFetchResponse): boolean {
+  return isCloudflareChallengeSignal({
+    headers: response.headers,
+    content: response.body,
+  });
 }
 
 // ─── Fetch Implementations ──────────────────────────────────────
@@ -808,6 +821,9 @@ async function fullBrowserExecution(
 // ─── Helpers ────────────────────────────────────────────────────
 
 function determineTier(skill: SkillSpec): ExecutionTierName {
+  if (skill.tierLock?.type === 'permanent' && skill.tierLock.reason === 'browser_required') {
+    return ExecutionTier.BROWSER_PROXIED;
+  }
   const tierState = getEffectiveTier(skill);
   return tierState === 'tier_1' ? ExecutionTier.DIRECT : ExecutionTier.BROWSER_PROXIED;
 }
@@ -866,4 +882,3 @@ async function redactPathTemplate(pathTemplate: string): Promise<string> {
   const nativeResult = salt ? redactNative(pathTemplate, salt) : null;
   return nativeResult != null ? String(nativeResult) : redactString(pathTemplate);
 }
-

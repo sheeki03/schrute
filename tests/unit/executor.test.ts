@@ -110,6 +110,31 @@ describe('executor', () => {
     });
   });
 
+  describe('tier routing', () => {
+    it('starts browser_required-locked skills at browser_proxied', async () => {
+      const skill = makeSkill({
+        currentTier: TierState.TIER_3_DEFAULT,
+        tierLock: { type: 'permanent', reason: 'browser_required', evidence: 'challenge detected' },
+      });
+      const browserProvider = {
+        navigate: vi.fn().mockResolvedValue(undefined),
+        networkRequests: vi.fn().mockResolvedValue([]),
+        evaluateFetch: vi.fn().mockResolvedValue({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: '{"data":"ok"}',
+        }),
+      } as any;
+
+      const result = await executeSkill(skill, {}, { browserProvider });
+
+      expect(result.success).toBe(true);
+      expect(result.tier).toBe(ExecutionTier.BROWSER_PROXIED);
+      expect(browserProvider.evaluateFetch).toHaveBeenCalledTimes(1);
+      expect(browserProvider.navigate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('failure classification', () => {
     it('classifies 429 as rate_limited', async () => {
       const skill = makeSkill();
@@ -155,6 +180,70 @@ describe('executor', () => {
       });
       expect(result.success).toBe(false);
       expect(result.failureCause).toBe(FailureCause.UNKNOWN);
+    });
+
+    it('classifies cloudflare_challenge from cf-mitigated header before auth handling', async () => {
+      const skill = makeSkill({ authType: 'bearer' });
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({
+          status: 403,
+          headers: {
+            'cf-mitigated': 'challenge',
+            'content-type': 'text/html',
+          },
+          body: '<html>Verifying you are human</html>',
+        }),
+      });
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.CLOUDFLARE_CHALLENGE);
+    });
+
+    it('classifies cloudflare_challenge from challenge body before 5xx handling', async () => {
+      const skill = makeSkill();
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({
+          status: 503,
+          headers: {
+            'server': 'cloudflare',
+            'content-type': 'text/html',
+          },
+          body: '<html><title>Just a moment</title><body>Checking your browser</body></html>',
+        }),
+      });
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.CLOUDFLARE_CHALLENGE);
+    });
+
+    it('does not classify server-cloudflare alone as cloudflare_challenge', async () => {
+      const skill = makeSkill();
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({
+          status: 403,
+          headers: {
+            'server': 'cloudflare',
+            'cf-ray': 'abc123',
+            'content-type': 'text/plain',
+          },
+          body: 'Forbidden',
+        }),
+      });
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.COOKIE_REFRESH);
+    });
+
+    it('does not classify generic interstitial text without Cloudflare corroboration', async () => {
+      const skill = makeSkill();
+      const result = await executeSkill(skill, {}, {
+        fetchFn: mockFetch({
+          status: 403,
+          headers: {
+            'content-type': 'text/html',
+          },
+          body: '<html><title>Just a moment</title><body>Checking your browser</body></html>',
+        }),
+      });
+      expect(result.success).toBe(false);
+      expect(result.failureCause).toBe(FailureCause.COOKIE_REFRESH);
     });
 
     it('classifies js_computed_field with permanent lock', async () => {

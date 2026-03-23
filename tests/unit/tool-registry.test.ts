@@ -205,7 +205,8 @@ describe('tool-registry', () => {
   describe('rankToolsByIntent', () => {
     it('returns all skills when count <= k', () => {
       const skills = [makeSkill(), makeSkill({ id: 'x' })];
-      const result = rankToolsByIntent(skills, 'anything', 10);
+      // query must lexically match so skills aren't filtered out
+      const result = rankToolsByIntent(skills, 'users', 10);
       expect(result).toHaveLength(2);
     });
 
@@ -294,18 +295,28 @@ describe('tool-registry', () => {
     it('boosts recently used skills', () => {
       const recentSkill = makeSkill({
         id: 'recent',
-        name: 'a',
+        name: 'fetch_users',
         successRate: 0.5,
         lastUsed: Date.now() - 1000,
       });
       const oldSkill = makeSkill({
         id: 'old',
-        name: 'b',
+        name: 'fetch_users_old',
         successRate: 0.5,
         lastUsed: Date.now() - 48 * 60 * 60 * 1000,
       });
-      const result = rankToolsByIntent([oldSkill, recentSkill], 'something', 1);
+      // query lexically matches both skills; recency should break the tie
+      const result = rankToolsByIntent([oldSkill, recentSkill], 'fetch', 1);
       expect(result[0].id).toBe('recent');
+    });
+
+    it('returns empty array when no skills lexically match the intent', () => {
+      const skills = [
+        makeSkill({ id: 'a', name: 'login', description: 'Login to site', successRate: 0.9 }),
+        makeSkill({ id: 'b', name: 'settings', description: 'Site settings', successRate: 0.9 }),
+      ];
+      const result = rankToolsByIntent(skills, 'zzzznotfound', 10);
+      expect(result).toHaveLength(0);
     });
   });
 

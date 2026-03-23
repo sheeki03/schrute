@@ -28,6 +28,7 @@ import { sanitizeSiteId } from '../core/utils.js';
 import { setupCdpSitePolicy, validateProxyConfig, validateGeoConfig } from './shared-validation.js';
 import { isAdminCaller } from '../shared/admin-auth.js';
 import { getShapedStatus } from './status-response.js';
+import { validateImportableSkill } from '../storage/import-validator.js';
 
 const log = getLogger();
 
@@ -36,7 +37,7 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   'schrute_explore', 'schrute_record', 'schrute_stop', 'schrute_pipeline_status',
   'schrute_import_cookies', 'schrute_export_cookies',
   'schrute_connect_cdp', 'schrute_recover_explore', 'schrute_webmcp_call',
-  'schrute_delete_skill',
+  'schrute_delete_skill', 'schrute_set_transform', 'schrute_export_skill', 'schrute_create_workflow',
 ]);
 
 // ─── Shared Dependencies ────────────────────────────────────────
@@ -73,12 +74,11 @@ export interface ToolDefinition {
 // ─── Build Tool List ────────────────────────────────────────────
 
 /**
- * Build the list of available MCP tools, including meta tools, browser tools,
- * and active skill tools (ranked and shortlisted).
+ * Build the list of available MCP tools, including active learned skills.
  *
- * In multi-user mode (server.network=true), non-admin callers see only
- * non-admin meta tools. They discover skills via schrute_search_skills
- * and execute via schrute_execute.
+ * In multi-user mode, dynamic skill tools are still admin-scoped so non-admin
+ * callers discover skills via schrute_search_skills and invoke them via
+ * schrute_execute.
  */
 export function buildToolList(deps: ToolDispatchDeps, callerId?: string): ToolDefinition[] {
   const { engine, skillRepo, config } = deps;
@@ -104,9 +104,6 @@ export function buildToolList(deps: ToolDispatchDeps, callerId?: string): ToolDe
   }
 
   // 3. Dynamic skill tools — admin only in multi-user mode.
-  //    Non-admin callers use schrute_search_skills (explicit siteId)
-  //    + schrute_execute (skillId). Including dynamic skill tools for
-  //    non-admin would couple their tool list to the admin's active session.
   if (isAdmin) {
     const multiSession = engine.getMultiSessionManager();
     const activeName = multiSession.getActive();
@@ -189,7 +186,7 @@ async function executeSkillWithGating(
       type: 'text',
       text: JSON.stringify(result, null, 2),
     }],
-    ...(result.success === false ? { isError: true } : {}),
+    ...(result.success === false && result.status !== 'browser_handoff_required' ? { isError: true } : {}),
   };
 }
 
@@ -367,6 +364,124 @@ export async function dispatchToolCall(
             text: JSON.stringify({
               ...preview,
               note: 'This is a preview only. No request was sent.',
+            }, null, 2),
+          }],
+        };
+      }
+
+      case 'schrute_set_transform': {
+        const skillId = args?.skillId as string;
+        if (!skillId) {
+          return { content: [{ type: 'text', text: 'Error: skillId is required' }], isError: true };
+        }
+        const skill = skillRepo.getById(skillId);
+        if (!skill) {
+          return { content: [{ type: 'text', text: `Error: skill '${skillId}' not found` }], isError: true };
+        }
+
+        const clear = args?.clear === true;
+        const transform = args?.transform;
+        const responseContentType = args?.responseContentType as string | undefined;
+
+        if (clear && transform !== undefined) {
+          return { content: [{ type: 'text', text: 'Error: clear cannot be combined with transform' }], isError: true };
+        }
+        if (!clear && transform === undefined && responseContentType === undefined) {
+          return { content: [{ type: 'text', text: 'Error: provide transform, responseContentType, or clear=true' }], isError: true };
+        }
+
+        const candidate: SkillSpec = {
+          ...skill,
+          ...(clear ? { outputTransform: undefined } : {}),
+          ...(transform !== undefined ? { outputTransform: transform as SkillSpec['outputTransform'] } : {}),
+          ...(responseContentType !== undefined ? { responseContentType } : {}),
+        };
+        const validation = validateImportableSkill(candidate);
+        if (!validation.valid) {
+          return { content: [{ type: 'text', text: `Error: ${validation.errors.join('; ')}` }], isError: true };
+        }
+
+        skillRepo.update(skill.id, {
+          ...(clear ? { outputTransform: null as unknown as SkillSpec['outputTransform'] } : {}),
+          ...(transform !== undefined ? { outputTransform: transform as SkillSpec['outputTransform'] } : {}),
+          ...(responseContentType !== undefined ? { responseContentType } : {}),
+        });
+
+        const updated = skillRepo.getById(skill.id);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              updated: true,
+              skillId: skill.id,
+              outputTransform: updated?.outputTransform,
+              responseContentType: updated?.responseContentType,
+            }, null, 2),
+          }],
+        };
+      }
+
+      case 'schrute_export_skill': {
+        const skillId = args?.skillId as string;
+        const format = args?.format as 'curl' | 'fetch.ts' | 'requests.py' | 'playwright.ts';
+        if (!skillId) {
+          return { content: [{ type: 'text', text: 'Error: skillId is required' }], isError: true };
+        }
+        if (!format || !['curl', 'fetch.ts', 'requests.py', 'playwright.ts'].includes(format)) {
+          return { content: [{ type: 'text', text: 'Error: format must be one of curl, fetch.ts, requests.py, playwright.ts' }], isError: true };
+        }
+        const skill = skillRepo.getById(skillId);
+        if (!skill) {
+          return { content: [{ type: 'text', text: `Error: skill '${skillId}' not found` }], isError: true };
+        }
+        const { generateExport } = await import('../skill/generator.js');
+        const code = generateExport(skill, format, (args?.params ?? undefined) as Record<string, unknown> | undefined);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ skillId, format, code }, null, 2),
+          }],
+        };
+      }
+
+      case 'schrute_create_workflow': {
+        const siteId = args?.siteId as string;
+        const name = args?.name as string;
+        const workflowSpec = args?.workflowSpec as SkillSpec['workflowSpec'];
+        const description = args?.description as string | undefined;
+        const outputTransform = args?.outputTransform as SkillSpec['outputTransform'];
+
+        if (!siteId || !name || !workflowSpec) {
+          return { content: [{ type: 'text', text: 'Error: siteId, name, and workflowSpec are required' }], isError: true };
+        }
+        if (!siteRepo.getById(siteId)) {
+          return { content: [{ type: 'text', text: `Error: site '${siteId}' not found` }], isError: true };
+        }
+
+        const { generateWorkflowSkill } = await import('../skill/generator.js');
+        const workflowSkill = generateWorkflowSkill(siteId, name, workflowSpec, {
+          description,
+          outputTransform,
+        });
+
+        if (skillRepo.getById(workflowSkill.id)) {
+          return { content: [{ type: 'text', text: `Error: skill '${workflowSkill.id}' already exists` }], isError: true };
+        }
+
+        const validation = validateImportableSkill(workflowSkill);
+        if (!validation.valid) {
+          return { content: [{ type: 'text', text: `Error: ${validation.errors.join('; ')}` }], isError: true };
+        }
+
+        skillRepo.create(workflowSkill);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              created: true,
+              skillId: workflowSkill.id,
+              status: workflowSkill.status,
+              workflowSpec: workflowSkill.workflowSpec,
             }, null, 2),
           }],
         };
@@ -759,7 +874,7 @@ export async function dispatchToolCall(
 
       case 'schrute_sessions': {
         const multiSession = engine.getMultiSessionManager();
-        const sessions = multiSession.list(callerId, config).map(s => ({
+        const sessions = multiSession.list(callerId, config, { includeInternal: false }).map(s => ({
           name: s.name,
           siteId: s.siteId,
           isCdp: s.isCdp,
@@ -1064,20 +1179,7 @@ export async function dispatchToolCall(
         if (actions.length > 50) {
           return { content: [{ type: 'text', text: 'Error: max 50 actions per batch' }], isError: true };
         }
-        const results: Array<{ skillId: string; success: boolean; data?: unknown; error?: string }> = [];
-        for (const action of actions) {
-          const skill = skillRepo.getById(action.skillId);
-          if (!skill) {
-            results.push({ skillId: action.skillId, success: false, error: 'Skill not found' });
-            continue;
-          }
-          try {
-            const r = await engine.executeSkill(skill.id, action.params ?? {}, callerId);
-            results.push({ skillId: action.skillId, success: r.success, data: r.data, error: r.error });
-          } catch (err) {
-            results.push({ skillId: action.skillId, success: false, error: err instanceof Error ? err.message : String(err) });
-          }
-        }
+        const results = await engine.executeBatch(actions, callerId);
         return { content: [{ type: 'text', text: JSON.stringify({ batch: true, count: results.length, results }, null, 2) }] };
       }
     }

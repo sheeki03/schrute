@@ -301,6 +301,31 @@ ALTER TABLE sites ADD COLUMN lighthouse_accessibility REAL;
 ALTER TABLE skills ADD COLUMN sample_params TEXT;
 `,
   },
+  {
+    filename: '013_browser_required_policy.sql',
+    sql: `
+ALTER TABLE policies ADD COLUMN browser_required INTEGER NOT NULL DEFAULT 0;
+`,
+  },
+  {
+    filename: '014_output_transforms.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN output_transform TEXT;
+ALTER TABLE skills ADD COLUMN response_content_type TEXT;
+`,
+  },
+  {
+    filename: '015_workflow_spec.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN workflow_spec TEXT;
+`,
+  },
+  {
+    filename: '016_site_policy_min_gap.sql',
+    sql: `
+ALTER TABLE policies ADD COLUMN min_gap_ms INTEGER NOT NULL DEFAULT 100;
+`,
+  },
 ];
 
 export class AgentDatabase {
