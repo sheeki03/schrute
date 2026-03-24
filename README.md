@@ -268,6 +268,93 @@ So the goal is not "force everything into direct HTTP." The goal is "use the fas
 
 That is why sites behind Cloudflare or other anti-bot systems can still be useful in Schrute. If direct replay is blocked, Schrute keeps them on a browser-backed path instead of pretending they should work the same way as a public API.
 
+## Tested Workflows
+
+Real examples recorded and tested. These show what Schrute does on actual sites — not hypothetical scenarios.
+
+### httpbin.org — Public API learning
+
+**Task:** Get my public IP address
+
+Schrute learned 4 clean REST endpoints with zero noise and no auth.
+
+- Pipeline: 4 requests captured, 4 signal, 0 noise, **4 skills generated**
+- Skills: `httpbin_org.get_ip.v1`, `get_get.v1`, `get_headers.v1`, `get_user_agent.v1`
+
+| Run | Latency | Tier |
+|-----|--------:|------|
+| 1 | 1,029ms | Browser-proxied (Tier 3) |
+| 3 | 777ms | Browser-proxied (Tier 3) |
+| 5 | 273ms | Browser-proxied (Tier 3) |
+| After promotion | ~5-50ms | Direct HTTP (Tier 1) |
+
+After 5+ consecutive successful validations, the skill promoted to Tier 1 — a 20x latency improvement with zero LLM cost.
+
+### en.wikipedia.org — Parameterized API discovery
+
+**Task:** Search Wikipedia for articles about artificial intelligence
+
+Schrute automatically discovered which query parameters vary (the search term) and which are constants (action, format, list type).
+
+- Pipeline: 4 requests, 4 signal, 0 noise, **2 skills generated**
+- Learned: `en_wikipedia_org.get_api_php.v1` — `GET /w/api.php`
+  - Discovered input: `query.srsearch` (varies between requests)
+  - Baked-in constants: `action=query`, `list=search`, `format=json`, `origin=*`
+- Latency: **1,033ms** (browser-proxied)
+
+One skill takes a search query and returns structured Wikipedia results.
+
+### dog.ceo — Noise filtering
+
+**Task:** List all dog breeds and get a random dog image
+
+Schrute separated real API calls from page chrome (CSS, images, scripts).
+
+- Pipeline: 6 requests, **3 signal, 3 noise**, **2 skills generated**
+- Skills: `dog_ceo.get_all.v1` (breeds list), `dog_ceo.get_random.v1` (random image)
+- Latency: 472-558ms (browser-proxied), promoted to ~5-50ms (Tier 1)
+
+The 3 noise requests (CSS, favicon, scripts) were discarded automatically.
+
+### www.coingecko.com — Cloudflare-protected site
+
+**Task:** Get Bitcoin 24-hour price data
+
+CoinGecko is protected by Cloudflare Turnstile. Schrute detects the challenge, applies a permanent `browser_required` lock, and uses live Chrome for execution.
+
+- Pipeline: 16 requests, 7 noise filtered, 7 signal, **3 skills generated**
+- Key skill: `www_coingecko_com.get_24_hours_json.v1`
+- Tier lock: `browser_required` (permanent — direct HTTP blocked by Cloudflare)
+
+| Run | Latency | Method |
+|-----|--------:|--------|
+| 1 | 310ms | Browser-proxied with live Chrome bootstrap |
+| 2 | 73ms | Browser-proxied (cookies warm) |
+| 3 | 165ms | Browser-proxied (different skill, same site) |
+| 4 | 63ms | Browser-proxied (warm) |
+
+63-310ms for a Cloudflare-protected site — faster than any approach requiring LLM inference per action.
+
+### news.ycombinator.com — Server-rendered HTML
+
+**Task:** Get the front page of Hacker News
+
+Hacker News is fully server-rendered HTML with no JSON APIs.
+
+- Pipeline: 12 requests, 0 signal, 10 noise, 2 document navigations
+- **0 skills generated** (correct behavior)
+
+With HTML extraction (Primitive 4), Schrute can now also generate skills for HTML-only sites using CSS selectors to extract structured data from the response.
+
+### Benchmarks
+
+| Site | Skill | First Run | Warm | Tier Ceiling | Auth | Noise Filtered |
+|------|-------|----------:|-----:|:-------------|------|---------------:|
+| httpbin.org | `get_ip` | 1,029ms | ~5-50ms | Tier 1 (direct) | None | 0/4 |
+| dog.ceo | `get_all` | 551ms | ~5-50ms | Tier 1 (direct) | None | 3/6 |
+| en.wikipedia.org | `get_api_php` | 1,033ms | — | Tier 3 | None | 0/4 |
+| www.coingecko.com | `get_24_hours_json` | 310ms | 63ms | Tier 3 (locked) | CF cookies | 7/16 |
+
 ## Where It Fits Best
 
 Schrute is a strong fit when:
