@@ -305,6 +305,7 @@ vi.mock('../../src/healing/diff-engine.js', () => ({
 // Mock monitor
 vi.mock('../../src/healing/monitor.js', () => ({
   monitorSkills: vi.fn().mockReturnValue([{ skillId: 'test', status: 'healthy', successRate: 1.0, trend: 0, windowSize: 0 }]),
+  shouldAmend: vi.fn().mockReturnValue('skip'),
 }));
 
 // Mock notification
@@ -371,7 +372,7 @@ import { discoverSite } from '../../src/discovery/cold-start.js';
 import { canPromote, promoteSkill } from '../../src/core/promotion.js';
 import { handleFailure, checkPromotion } from '../../src/core/tiering.js';
 import { detectDrift } from '../../src/healing/diff-engine.js';
-import { monitorSkills } from '../../src/healing/monitor.js';
+import { monitorSkills, shouldAmend } from '../../src/healing/monitor.js';
 import { notify, createEvent } from '../../src/healing/notification.js';
 import { inferSchema, mergeSchemas } from '../../src/capture/schema-inferrer.js';
 import type { SkillSpec } from '../../src/skill/types.js';
@@ -2746,6 +2747,65 @@ describe('Engine', () => {
       const status = engine.getStatus({ drainWarnings: true });
       expect(status.warnings).toEqual(['cleared']);
       expect(engine.peekWarnings().length).toBe(0);
+    });
+  });
+
+  describe('relearn surfacing', () => {
+    it('shouldAmend returning relearn marks skill stale with relearnRequested', async () => {
+      const mockSkill = {
+        id: 'example.com.relearn_test.v1',
+        siteId: 'example.com',
+        name: 'relearn_test',
+        method: 'GET',
+        pathTemplate: '/api/relearn',
+        sideEffectClass: 'read-only',
+        allowedDomains: ['example.com'],
+        currentTier: 'tier_1',
+        tierLock: null,
+        authType: undefined,
+        status: 'active',
+        confidence: 0.2,
+        consecutiveValidations: 0,
+        successRate: 0.2,
+      };
+      const repoInstance = (SkillRepository as unknown as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+      if (repoInstance) {
+        repoInstance.getById.mockReturnValueOnce(mockSkill);
+      }
+
+      // Mock monitor to return 'broken' so amendment path triggers
+      (monitorSkills as ReturnType<typeof vi.fn>).mockReturnValueOnce([
+        { skillId: mockSkill.id, status: 'broken', successRate: 0.2, trend: -0.5, windowSize: 20 },
+      ]);
+      // Mock shouldAmend to return 'relearn'
+      (shouldAmend as ReturnType<typeof vi.fn>).mockReturnValueOnce('relearn');
+
+      (checkMethodAllowed as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+      (checkPathRisk as ReturnType<typeof vi.fn>).mockReturnValueOnce({ blocked: false });
+      (retryWithEscalation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        success: false,
+        tier: 'direct',
+        status: 500,
+        data: null,
+        rawBody: '',
+        headers: {},
+        latencyMs: 10,
+        schemaMatch: false,
+        semanticPass: false,
+        failureCause: 'unknown',
+        retryDecisions: [],
+      });
+
+      await engine.executeSkill(mockSkill.id, {});
+
+      // Verify skill was updated with relearnRequested
+      if (repoInstance) {
+        const updateCalls = repoInstance.update.mock.calls;
+        const relearnUpdate = updateCalls.find((call: unknown[]) =>
+          call[0] === mockSkill.id && (call[1] as Record<string, unknown>).relearnRequested === true
+        );
+        expect(relearnUpdate).toBeDefined();
+      }
     });
   });
 });

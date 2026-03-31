@@ -92,6 +92,8 @@ import {
   shouldCaptureResponseBody,
 } from '../capture/noise-filter.js';
 import { extractChainCandidates } from '../capture/chain-detector.js';
+import { normalizeChainRefs } from '../capture/chain-normalizer.js';
+import { suggestWorkflows } from '../capture/workflow-suggester.js';
 import { inferSchema, mergeSchemas } from '../capture/schema-inferrer.js';
 import { PipelinePool } from '../capture/pipeline-pool.js';
 import { runPipelineTask, type PipelineWorkerInput, type PipelineWorkerOutput } from '../capture/pipeline-worker.js';
@@ -243,6 +245,7 @@ export interface SkillExecutionResult {
   hint?: string;
   resumeToken?: string;
   advisoryHint?: string;
+  headers?: Record<string, string>;
   session?: string;
   managedBrowser?: boolean;
   latencyMs: number;
@@ -512,6 +515,27 @@ export class Engine {
     // blocking constructor and leaking promises when no skills are executed.
 
     this.startSessionSweep();
+
+    // Backfill: normalize any existing unresolved chain refs (refs containing spaces)
+    try {
+      const allSkills = this.skillRepo.getAll();
+      const hasUnresolved = allSkills.some(s =>
+        s.chainSpec?.steps.some(step => step.skillRef?.includes(' ')),
+      );
+      if (hasUnresolved) {
+        const count = normalizeChainRefs(allSkills);
+        if (count > 0) {
+          for (const s of allSkills) {
+            if (s.chainSpec) {
+              this.skillRepo.update(s.id, { chainSpec: s.chainSpec });
+            }
+          }
+          this.log.info({ backfilled: count }, 'Backfilled unresolved chain refs at startup');
+        }
+      }
+    } catch (err) {
+      this.log.warn({ err }, 'Chain ref backfill failed (non-blocking)');
+    }
 
     // WS-10: Background sweep for stale/broken skills (every 6 hours)
     this.sweepInterval = setInterval(() => {
@@ -2304,6 +2328,22 @@ export class Engine {
       : 15;
     const clusters = scoreAndRankClusters(clusterEndpoints(restRecords, this.pathTrie), maxSkills);
 
+    // Build in-memory ClusterMetadata map for ranking (not persisted)
+    const clusterMetadataMap = new Map<string, import('../capture/skill-ranker.js').ClusterMetadata>();
+    for (const cluster of clusters) {
+      const segments = cluster.pathTemplate.split('/').filter(Boolean);
+      const hasAuth = cluster.commonHeaders
+        ? Object.keys(cluster.commonHeaders).some(h => /^(authorization|cookie)$/i.test(h))
+        : false;
+      clusterMetadataMap.set(cluster.pathTemplate, {
+        pathSegments: segments,
+        responseContentType: cluster.responseContentType,
+        sampleCount: cluster.requests.length,
+        hasAuthHeaders: hasAuth,
+        canonicalHost: cluster.canonicalHost,
+      });
+    }
+
     this.log.info({
       recordingId: recording.id,
       clusterScores: clusters.slice(0, 5).map(cluster => ({
@@ -2325,8 +2365,18 @@ export class Engine {
         continue;
       }
 
+      const clusterHost = cluster.canonicalHost ?? recording.siteId;
       const chainForCluster = chains.find(c =>
-        c.steps.some(s => s.skillRef.includes(cluster.pathTemplate)),
+        c.steps.some(s => {
+          if (!s.skillRef) return false;
+          // Match new format "METHOD host /path"
+          const parts = s.skillRef.split(' ');
+          if (parts.length === 3) {
+            return parts[0] === cluster.method && parts[1] === clusterHost && parts[2] === cluster.pathTemplate;
+          }
+          // Legacy fallback: "METHOD /path"
+          return s.skillRef.includes(cluster.pathTemplate);
+        }),
       );
 
       const skill = generateSkill(
@@ -2445,8 +2495,31 @@ export class Engine {
       : undefined;
 
     const newSiteSkills = this.skillRepo.getBySiteId(recording.siteId);
+
+    // Dedup pre-pass: deduplicate new candidates against all site skills
+    const newCandidates = newSiteSkills.filter(s => !preExistingSkillIds.has(s.id));
+    const existingSkills = newSiteSkills.filter(s => preExistingSkillIds.has(s.id));
+    const { shouldSuppressSkill, deduplicateByPathTemplate } = await import('../capture/skill-ranker.js');
+    const { suppressed: dedupSuppressed } = deduplicateByPathTemplate(newCandidates, existingSkills);
+    const dedupSuppressedIds = new Set(dedupSuppressed.map(d => d.skill.id));
+    for (const { skill: suppSkill, reason } of dedupSuppressed) {
+      this.skillRepo.update(suppSkill.id, { reviewRequired: true, suppressionReason: reason });
+      this.log.info({ skillId: suppSkill.id, reason }, 'Skill suppressed by dedup');
+    }
+
     for (const skill of newSiteSkills) {
-      if (!preExistingSkillIds.has(skill.id) && skill.sideEffectClass === SideEffectClass.READ_ONLY && (skill.method === 'GET' || skill.method === 'HEAD')) {
+      if (!preExistingSkillIds.has(skill.id) && !dedupSuppressedIds.has(skill.id) && skill.sideEffectClass === SideEffectClass.READ_ONLY && (skill.method === 'GET' || skill.method === 'HEAD')) {
+        // Skill ranking: suppress auth/session endpoints (GraphQL skills skip ranking)
+        const metadata = clusterMetadataMap.get(skill.pathTemplate);
+        if (metadata) {
+          const suppressResult = shouldSuppressSkill(skill, metadata);
+          if (suppressResult.suppress) {
+            this.skillRepo.update(skill.id, { reviewRequired: true, suppressionReason: suppressResult.reason });
+            this.log.info({ skillId: skill.id, reason: suppressResult.reason }, 'Skill suppressed by ranking');
+            continue;
+          }
+        }
+
         const scanResult = scanSkill(skill);
         if (!scanResult.safe) {
           this.skillRepo.update(skill.id, { reviewRequired: true });
@@ -2455,6 +2528,36 @@ export class Engine {
         }
         this.skillRepo.update(skill.id, { status: SkillStatus.ACTIVE, confidence: 0.5, lastVerified: Date.now() });
         this.log.info({ skillId: skill.id }, 'Auto-activated read-only skill from recording session');
+      }
+    }
+
+    // Normalize chain refs to skill IDs after generation + auto-activation
+    {
+      const allSkillsForNorm = this.skillRepo.getBySiteId(recording.siteId);
+      const normCount = normalizeChainRefs(allSkillsForNorm);
+      if (normCount > 0) {
+        for (const s of allSkillsForNorm) {
+          if (s.chainSpec) {
+            this.skillRepo.update(s.id, { chainSpec: s.chainSpec });
+          }
+        }
+      }
+    }
+
+    // Suggest workflows from detected chains
+    {
+      const allSkillsForWf = this.skillRepo.getBySiteId(recording.siteId);
+      const suggestions = suggestWorkflows(allSkillsForWf);
+      if (suggestions.length > 0) {
+        for (const suggestion of suggestions) {
+          const dedupKey = suggestion.dedupKey ?? suggestion.id;
+          db.run(
+            'INSERT OR IGNORE INTO workflow_suggestions (id, site_id, workflow_spec, dedup_key, source_chain_skill_id, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            suggestion.id, recording.siteId, JSON.stringify(suggestion.workflowSpec),
+            dedupKey, suggestion.sourceChainSkillId ?? null, Date.now(), 'pending',
+          );
+        }
+        this.log.info({ count: suggestions.length, siteId: recording.siteId }, 'Workflow suggestions generated');
       }
     }
 
@@ -3263,6 +3366,9 @@ export class Engine {
               this.log.debug({ err: amendErr, skillId: skill.id }, 'Amendment proposal failed (non-blocking)');
             }
           }
+        } else if (amendAction === 'relearn') {
+          this.skillRepo.update(skill.id, { status: SkillStatus.STALE, relearnRequested: true });
+          this.log.info({ skillId: skill.id }, 'Skill marked for relearning');
         }
       }
 
