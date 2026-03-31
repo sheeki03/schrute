@@ -418,8 +418,9 @@ skillsCmd
     console.log(`Found ${skills.length} skill(s):\n`);
     for (const s of skills) {
       const status = s.status.toUpperCase().padEnd(8);
+      const relearnTag = s.relearnRequested ? ' [relearn needed]' : '';
       console.log(
-        `  [${status}] ${s.id} — ${s.method} ${s.pathTemplate} (${(s.successRate * 100).toFixed(0)}% success, ${s.currentTier}${s.avgLatencyMs ? `, ${s.avgLatencyMs}ms` : ''})`,
+        `  [${status}] ${s.id} — ${s.method} ${s.pathTemplate} (${(s.successRate * 100).toFixed(0)}% success, ${s.currentTier}${s.avgLatencyMs ? `, ${s.avgLatencyMs}ms` : ''})${relearnTag}`,
       );
     }
 
@@ -1300,6 +1301,50 @@ sitesCmd
     siteRepo.delete(siteId);
     console.log(`Deleted site '${siteId}' and ${skills.length} associated skill(s).`);
     closeDatabase();
+  });
+
+sitesCmd
+  .command('coverage <url>')
+  .description('Show API surface coverage for a site')
+  .action(async (url: string) => {
+    const config = getConfig();
+    createLogger(config.logLevel);
+    ensureDirectories(config);
+
+    const stop = startProgress('Discovering');
+    try {
+      const { discoverSite } = await import('./discovery/cold-start.js');
+      const { computeCoverage } = await import('./discovery/coverage.js');
+      const result = await discoverSite(url, config);
+
+      const db = getDatabase(config);
+      const skillRepo = new SkillRepository(db);
+      const skills = skillRepo.getBySiteId(result.siteId);
+      const report = computeCoverage(result, skills, result.siteId);
+
+      if (program.opts().json) {
+        outputResult(report);
+      } else {
+        console.log(`\nSite: ${result.siteId}`);
+        console.log(`Discovered: ${report.discovered} endpoint(s)`);
+        console.log(`Active: ${report.active}  Stale: ${report.stale}  Broken: ${report.broken}`);
+        console.log(`Coverage: ${report.coveragePercent}%`);
+        if (report.uncovered.length > 0) {
+          console.log(`\nUncovered (${report.uncovered.length}):`);
+          for (const ep of report.uncovered) {
+            console.log(`  ${ep}`);
+          }
+        }
+      }
+
+      closeDatabase();
+    } catch (err) {
+      closeDatabase();
+      console.error('Coverage failed:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    } finally {
+      stop();
+    }
   });
 
 // ─── dry-run ────────────────────────────────────────────────────
