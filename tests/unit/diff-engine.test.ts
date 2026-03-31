@@ -171,5 +171,179 @@ describe('diff-engine', () => {
       expect(result.changes[0].previous).toBe('object');
       expect(result.changes[0].current).toBe('array');
     });
+
+    it('detects primitive-vs-object root mismatch as type_changed', () => {
+      const schema = {
+        type: 'string',
+      };
+
+      const live = { value: 'unexpected-object' };
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      expect(result.breaking).toBe(true);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].path).toBe('$');
+      expect(result.changes[0].type).toBe('type_changed');
+      expect(result.changes[0].previous).toBe('string');
+      expect(result.changes[0].current).toBe('object');
+    });
+
+    // ─── Recursive depth tests ──────────────────────────────────
+
+    it('detects nested field removed at depth 2 as breaking', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          user: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              age: { type: 'number' },
+            },
+            required: ['name', 'age'],
+          },
+        },
+        required: ['user'],
+      };
+
+      const live = { user: { name: 'Alice' } }; // age missing at depth 2
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      expect(result.breaking).toBe(true);
+      expect(result.changes.some((c) => c.type === 'field_removed' && c.path === '$.user.age')).toBe(true);
+    });
+
+    it('detects nested field type changed at depth 3 as breaking', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'object',
+            properties: {
+              user: {
+                type: 'object',
+                properties: {
+                  score: { type: 'number' },
+                },
+                required: ['score'],
+              },
+            },
+            required: ['user'],
+          },
+        },
+        required: ['data'],
+      };
+
+      const live = { data: { user: { score: 'high' } } }; // score changed type at depth 3
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      expect(result.breaking).toBe(true);
+      const change = result.changes.find((c) => c.type === 'type_changed' && c.path === '$.data.user.score');
+      expect(change).toBeDefined();
+      expect(change!.previous).toBe('number');
+      expect(change!.current).toBe('string');
+    });
+
+    it('detects nested field added as non-breaking', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          user: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+            },
+            required: ['name'],
+          },
+        },
+        required: ['user'],
+      };
+
+      const live = { user: { name: 'Alice', email: 'a@b.com' } };
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      expect(result.breaking).toBe(false);
+      expect(result.changes.some((c) => c.type === 'field_added' && c.path === '$.user.email')).toBe(true);
+    });
+
+    it('detects array item nested drift (first item only)', () => {
+      const schema = {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            meta: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+              },
+              required: ['id'],
+            },
+          },
+          required: ['meta'],
+        },
+      };
+
+      const live = [
+        { meta: { id: 'wrong' } }, // type mismatch in nested array item
+        { meta: { id: 42 } },      // second item OK — should not be checked
+      ];
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      expect(result.breaking).toBe(true);
+      const change = result.changes.find((c) => c.type === 'type_changed' && c.path === '$[0].meta.id');
+      expect(change).toBeDefined();
+      expect(change!.previous).toBe('number');
+      expect(change!.current).toBe('string');
+    });
+
+    it('samples only the first array item for drift', () => {
+      const schema = {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+          },
+          required: ['name'],
+        },
+      };
+
+      // First item matches, second has wrong type — should report no drift
+      const live = [
+        { name: 'Alice' },
+        { name: 123 },
+      ];
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(false);
+      expect(result.breaking).toBe(false);
+      expect(result.changes).toHaveLength(0);
+    });
+
+    it('field removed (optional) is non-breaking', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          bio: { type: 'string' },
+        },
+        required: ['name'], // bio is optional
+      };
+
+      const live = { name: 'Alice' }; // bio missing but optional
+      const result = detectDrift(schema, live);
+
+      expect(result.drifted).toBe(true);
+      const change = result.changes.find((c) => c.path === '$.bio');
+      expect(change).toBeDefined();
+      expect(change!.type).toBe('field_removed');
+      expect(change!.breaking).toBe(false);
+    });
   });
 });

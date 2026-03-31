@@ -32,8 +32,8 @@ interface DriftResult {
  * Detect schema drift between a stored JSON schema and a live response.
  *
  * Classifies changes as:
- * - **Breaking**: field removed, type changed — triggers version increment
- * - **Non-breaking**: field added — schema updated in place
+ * - **Breaking**: field removed (required), type changed — triggers version increment
+ * - **Non-breaking**: field added, field removed (optional) — schema updated in place
  *
  * @param stored - Stored JSON Schema (from skill.outputSchema)
  * @param live - Live response data to check against the schema
@@ -49,34 +49,33 @@ export function detectDrift(
     return { drifted: false, breaking: false, changes: [] };
   }
 
+  const storedType = (stored.type as string) ?? 'object';
+
   if (live === null || live === undefined) {
-    return { drifted: true, breaking: true, changes: [{ path: '$', type: 'type_changed', breaking: true, previous: 'object', current: 'null' }] };
+    return {
+      drifted: true,
+      breaking: true,
+      changes: [{ path: '$', type: 'type_changed', breaking: true, previous: storedType, current: 'null' }],
+    };
   }
 
-  // Extract expected properties from JSON Schema
-  const storedProperties = extractSchemaProperties(stored);
-
-  if (typeof live === 'object' && !Array.isArray(live)) {
-    compareObject(storedProperties, live as Record<string, unknown>, '$', changes);
-  } else if (Array.isArray(live) && stored.type === 'array') {
-    // For arrays, check the first item against items schema
+  if (storedType === 'array' && Array.isArray(live)) {
+    // For arrays, sample only the first item against items schema
     const itemsSchema = stored.items as Record<string, unknown> | undefined;
     if (itemsSchema && live.length > 0) {
-      const itemProperties = extractSchemaProperties(itemsSchema);
-      if (typeof live[0] === 'object' && live[0] !== null) {
-        compareObject(itemProperties, live[0] as Record<string, unknown>, '$[0]', changes);
-      }
+      diffSchemaVsData(itemsSchema, live[0], '$[0]', changes);
     }
+  } else if (storedType === 'object' && typeof live === 'object' && !Array.isArray(live)) {
+    diffSchemaVsData(stored, live as Record<string, unknown>, '$', changes);
   } else {
-    // Type mismatch at root
-    const expectedType = (stored.type as string) ?? 'object';
+    // Root type mismatch
     const actualType = Array.isArray(live) ? 'array' : typeof live;
-    if (expectedType !== actualType) {
+    if (storedType !== actualType) {
       changes.push({
         path: '$',
         type: 'type_changed',
         breaking: true,
-        previous: expectedType,
+        previous: storedType,
         current: actualType,
       });
     }
@@ -93,109 +92,92 @@ export function detectDrift(
 
 // ─── Internal ───────────────────────────────────────────────────
 
-interface SchemaProperty {
-  path: string;
-  type: string;
-  required: boolean;
-}
-
-function extractSchemaProperties(
+function diffSchemaVsData(
   schema: Record<string, unknown>,
-  prefix = '',
-): SchemaProperty[] {
-  const properties: SchemaProperty[] = [];
+  data: unknown,
+  path: string,
+  changes: DriftChange[],
+): void {
   const props = schema.properties as Record<string, Record<string, unknown>> | undefined;
   const required = new Set((schema.required as string[]) ?? []);
 
-  if (!props) return properties;
-
-  for (const [key, propSchema] of Object.entries(props)) {
-    const fullPath = prefix ? `${prefix}.${key}` : key;
-    const type = (propSchema.type as string) ?? 'unknown';
-
-    properties.push({
-      path: fullPath,
-      type,
-      required: required.has(key),
-    });
-
-    // Recurse into nested objects
-    if (type === 'object' && propSchema.properties) {
-      properties.push(
-        ...extractSchemaProperties(propSchema as Record<string, unknown>, fullPath),
-      );
+  if (!props) {
+    // No properties defined — any data keys are "added"
+    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+      for (const key of Object.keys(data as Record<string, unknown>)) {
+        changes.push({
+          path: `${path}.${key}`,
+          type: 'field_added',
+          breaking: false,
+        });
+      }
     }
+    return;
   }
 
-  return properties;
-}
+  const dataObj = (typeof data === 'object' && data !== null && !Array.isArray(data))
+    ? data as Record<string, unknown>
+    : null;
+  const liveKeys = dataObj ? new Set(Object.keys(dataObj)) : new Set<string>();
 
-function compareObject(
-  schemaProperties: SchemaProperty[],
-  liveObj: Record<string, unknown>,
-  prefix: string,
-  changes: DriftChange[],
-): void {
-  const liveKeys = new Set(Object.keys(liveObj));
+  // Walk schema properties
+  for (const [key, propSchema] of Object.entries(props)) {
+    const fullPath = `${path}.${key}`;
+    const expectedType = (propSchema.type as string) ?? 'unknown';
+    const isRequired = required.has(key);
 
-  // Check each expected property
-  for (const prop of schemaProperties) {
-    // Get the leaf key name
-    const parts = prop.path.split('.');
-    const leafKey = parts[parts.length - 1];
-
-    // Only check top-level properties against liveObj (nested handled recursively)
-    if (parts.length > 1) continue;
-
-    const fullPath = prefix === '$' ? `$.${leafKey}` : `${prefix}.${leafKey}`;
-
-    if (!liveKeys.has(leafKey)) {
-      // Field removed — breaking
+    if (!dataObj || !liveKeys.has(key)) {
+      // Field removed
       changes.push({
         path: fullPath,
         type: 'field_removed',
-        breaking: true,
+        breaking: isRequired,
       });
       continue;
     }
 
-    // Check type match
-    const liveValue = liveObj[leafKey];
+    const liveValue = dataObj[key];
     const liveType = getJsonType(liveValue);
-    if (prop.type !== 'unknown' && liveType !== prop.type) {
-      // Allow null for optional fields
-      if (liveType === 'null' && !prop.required) {
-        continue;
-      }
+
+    // Allow null for optional fields
+    if (liveType === 'null' && !isRequired) {
+      liveKeys.delete(key);
+      continue;
+    }
+
+    // Type check at this node
+    if (expectedType !== 'unknown' && liveType !== expectedType) {
       changes.push({
         path: fullPath,
         type: 'type_changed',
         breaking: true,
-        previous: prop.type,
+        previous: expectedType,
         current: liveType,
       });
+      liveKeys.delete(key);
+      continue;
     }
 
-    liveKeys.delete(leafKey);
+    // Recurse into nested objects
+    if (expectedType === 'object' && propSchema.properties) {
+      diffSchemaVsData(propSchema as Record<string, unknown>, liveValue, fullPath, changes);
+    }
+
+    // Recurse into nested arrays — sample first item only
+    if (expectedType === 'array' && propSchema.items && Array.isArray(liveValue) && liveValue.length > 0) {
+      diffSchemaVsData(propSchema.items as Record<string, unknown>, liveValue[0], `${fullPath}[0]`, changes);
+    }
+
+    liveKeys.delete(key);
   }
 
-  // Check for new fields not in schema
-  // Only consider fields at the top level of schemaProperties
-  const topLevelExpected = new Set(
-    schemaProperties
-      .filter((p) => !p.path.includes('.'))
-      .map((p) => p.path),
-  );
-
+  // Fields in live data but not in schema → field_added (non-breaking)
   for (const key of liveKeys) {
-    if (!topLevelExpected.has(key)) {
-      const fullPath = prefix === '$' ? `$.${key}` : `${prefix}.${key}`;
-      changes.push({
-        path: fullPath,
-        type: 'field_added',
-        breaking: false,
-      });
-    }
+    changes.push({
+      path: `${path}.${key}`,
+      type: 'field_added',
+      breaking: false,
+    });
   }
 }
 
