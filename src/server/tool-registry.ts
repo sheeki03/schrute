@@ -680,6 +680,39 @@ export const META_TOOLS = [
       },
     },
   },
+  {
+    name: 'schrute_api_coverage',
+    description: 'Run discovery on a URL and report API surface coverage against learned skills',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        url: { type: 'string', description: 'URL to discover and compute coverage for' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'schrute_workflow_suggestions',
+    description: 'List pending workflow suggestions for a site',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        siteId: { type: 'string', description: 'Site ID to list suggestions for' },
+      },
+      required: ['siteId'],
+    },
+  },
+  {
+    name: 'schrute_accept_suggestion',
+    description: 'Accept a workflow suggestion and create the workflow skill',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        suggestionId: { type: 'string', description: 'Suggestion ID to accept' },
+      },
+      required: ['suggestionId'],
+    },
+  },
 ] as const;
 
 // ─── Browser Tool Proxy Definition ───────────────────────────────

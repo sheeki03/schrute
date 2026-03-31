@@ -20,6 +20,11 @@ vi.mock('../../src/core/config.js', () => ({
   ensureDirectories: vi.fn(),
 }));
 
+const mockGetDatabase = vi.fn();
+vi.mock('../../src/storage/database.js', () => ({
+  getDatabase: (...args: unknown[]) => mockGetDatabase(...args),
+}));
+
 // Mock router
 const mockRouter = {
   explore: vi.fn(),
@@ -270,6 +275,7 @@ function makeDeps(overrides: Partial<ToolDispatchDeps> = {}): ToolDispatchDeps {
 describe('tool-dispatch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetDatabase.mockReset();
     // Reset router mocks to default success
     mockRouter.explore.mockResolvedValue({ success: true, data: { siteId: 'example.com', sessionId: 'sess-1' } });
     mockRouter.startRecording.mockResolvedValue({ success: true, data: { name: 'test' } });
@@ -1340,6 +1346,54 @@ describe('tool-dispatch', () => {
       expect(data).toHaveLength(1);
       expect(data[0].snapshotFields).toEqual({ key: 'value' });
       expect(typeof data[0].snapshotFields).toBe('object');
+    });
+  });
+
+  describe('workflow suggestion tools', () => {
+    it('skips malformed workflow_spec rows when listing suggestions', async () => {
+      mockGetDatabase.mockReturnValue({
+        all: vi.fn().mockReturnValue([
+          {
+            id: 'bad-row',
+            workflow_spec: '{bad json',
+            source_chain_skill_id: null,
+            created_at: 1,
+            status: 'pending',
+          },
+          {
+            id: 'good-row',
+            workflow_spec: JSON.stringify({ steps: [{ skillId: 'example.com.get_users.v1', name: 'good' }] }),
+            source_chain_skill_id: 'example.com.get_users.v1',
+            created_at: 2,
+            status: 'pending',
+          },
+        ]),
+      } as any);
+
+      const deps = makeDeps();
+      const result = await dispatchToolCall('schrute_workflow_suggestions', { siteId: 'example.com' }, deps);
+
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.suggestions).toHaveLength(1);
+      expect(data.suggestions[0].id).toBe('good-row');
+    });
+
+    it('returns an error when accepting a suggestion with invalid workflow_spec', async () => {
+      mockGetDatabase.mockReturnValue({
+        get: vi.fn().mockReturnValue({
+          id: 'bad-row',
+          site_id: 'example.com',
+          workflow_spec: '{bad json',
+          status: 'pending',
+        }),
+      } as any);
+
+      const deps = makeDeps();
+      const result = await dispatchToolCall('schrute_accept_suggestion', { suggestionId: 'bad-row' }, deps);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('invalid workflow_spec');
     });
   });
 

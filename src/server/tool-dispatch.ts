@@ -32,12 +32,43 @@ import { validateImportableSkill } from '../storage/import-validator.js';
 
 const log = getLogger();
 
+function tryParseStoredWorkflowSpec(
+  raw: string,
+  context: string,
+): SkillSpec['workflowSpec'] | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { steps?: unknown }).steps)) {
+      log.warn({ context }, 'Stored workflow_spec is not a valid workflow shape');
+      return undefined;
+    }
+    return parsed as SkillSpec['workflowSpec'];
+  } catch (err) {
+    log.warn({ err, context }, 'Failed to parse stored workflow_spec');
+    return undefined;
+  }
+}
+
+function buildSuggestedWorkflowName(workflowSpec: NonNullable<SkillSpec['workflowSpec']>): string {
+  const rawParts = workflowSpec.steps.map((step, index) =>
+    typeof step?.name === 'string' && step.name.trim() ? step.name : `step_${index + 1}`,
+  );
+  const safeParts = rawParts
+    .map(part => part.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''))
+    .filter(Boolean)
+    .slice(0, 4);
+  const base = safeParts.join('_') || 'workflow';
+  const prefixed = `workflow_${base}`;
+  return prefixed.length <= 80 ? prefixed : prefixed.slice(0, 80).replace(/_+$/g, '');
+}
+
 // Admin-only tool names — used in both buildToolList() and dispatchToolCall()
 const ADMIN_ONLY_TOOL_NAMES = new Set([
   'schrute_explore', 'schrute_record', 'schrute_stop', 'schrute_pipeline_status',
   'schrute_import_cookies', 'schrute_export_cookies',
   'schrute_connect_cdp', 'schrute_recover_explore', 'schrute_webmcp_call',
   'schrute_delete_skill', 'schrute_set_transform', 'schrute_export_skill', 'schrute_create_workflow',
+  'schrute_api_coverage', 'schrute_workflow_suggestions', 'schrute_accept_suggestion',
 ]);
 
 // ─── Shared Dependencies ────────────────────────────────────────
@@ -323,6 +354,7 @@ export async function dispatchToolCall(
             currentTier: s.currentTier,
             executable: execInfo.executable,
             ...(execInfo.blockedReason ? { blockedReason: execInfo.blockedReason } : {}),
+            ...(s.relearnRequested ? { relearnRequested: true } : {}),
           };
           // Include lastFailureReason for broken skills
           if (s.status === SkillStatus.BROKEN) {
@@ -654,6 +686,23 @@ export async function dispatchToolCall(
         };
 
         return { content: [{ type: 'text', text: JSON.stringify({ diagnostics }, null, 2) }] };
+      }
+
+      case 'schrute_api_coverage': {
+        const coverageUrl = args?.url as string;
+        if (!coverageUrl) {
+          return { content: [{ type: 'text', text: 'Error: url is required' }], isError: true };
+        }
+        try {
+          const { discoverSite } = await import('../discovery/cold-start.js');
+          const { computeCoverage } = await import('../discovery/coverage.js');
+          const discoveryResult = await discoverSite(coverageUrl, config);
+          const skills = skillRepo.getBySiteId(discoveryResult.siteId);
+          const report = computeCoverage(discoveryResult, skills, discoveryResult.siteId);
+          return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
+        } catch (err) {
+          return { content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+        }
       }
 
       case 'schrute_export_cookies': {
@@ -1169,6 +1218,60 @@ export async function dispatchToolCall(
         if (!testToolName) return { content: [{ type: 'text', text: 'Error: toolName required' }], isError: true };
         const testArgs = (args?.testArgs ?? {}) as Record<string, unknown>;
         return dispatchToolCall('schrute_webmcp_call', { toolName: testToolName, args: testArgs }, deps, callerId);
+      }
+
+      case 'schrute_workflow_suggestions': {
+        const wfSiteId = args?.siteId as string;
+        if (!wfSiteId) return { content: [{ type: 'text', text: 'Error: siteId required' }], isError: true };
+        const { getDatabase } = await import('../storage/database.js');
+        const db = getDatabase(config);
+        const rows = db.all<{ id: string; workflow_spec: string; source_chain_skill_id: string | null; created_at: number; status: string }>(
+          'SELECT id, workflow_spec, source_chain_skill_id, created_at, status FROM workflow_suggestions WHERE site_id = ? AND status = ?',
+          wfSiteId, 'pending',
+        );
+        const suggestions = rows.flatMap((r) => {
+          const workflowSpec = tryParseStoredWorkflowSpec(r.workflow_spec, `workflow_suggestions:${r.id}`);
+          if (!workflowSpec) return [];
+          return [{
+            id: r.id,
+            workflowSpec,
+            sourceChainSkillId: r.source_chain_skill_id,
+            createdAt: r.created_at,
+            status: r.status,
+          }];
+        });
+        return { content: [{ type: 'text', text: JSON.stringify({ siteId: wfSiteId, suggestions }, null, 2) }] };
+      }
+
+      case 'schrute_accept_suggestion': {
+        const suggestionId = args?.suggestionId as string;
+        if (!suggestionId) return { content: [{ type: 'text', text: 'Error: suggestionId required' }], isError: true };
+        const { getDatabase } = await import('../storage/database.js');
+        const db = getDatabase(config);
+        const row = db.get<{ id: string; site_id: string; workflow_spec: string; status: string }>(
+          'SELECT id, site_id, workflow_spec, status FROM workflow_suggestions WHERE id = ?',
+          suggestionId,
+        );
+        if (!row) return { content: [{ type: 'text', text: `Error: suggestion '${suggestionId}' not found` }], isError: true };
+        if (row.status !== 'pending') return { content: [{ type: 'text', text: `Error: suggestion already ${row.status}` }], isError: true };
+
+        const workflowSpec = tryParseStoredWorkflowSpec(row.workflow_spec, `workflow_suggestions:${suggestionId}`);
+        if (!workflowSpec) {
+          return { content: [{ type: 'text', text: `Error: suggestion '${suggestionId}' has invalid workflow_spec` }], isError: true };
+        }
+        const wfName = buildSuggestedWorkflowName(workflowSpec);
+
+        // Create workflow via existing tool
+        const result = await dispatchToolCall('schrute_create_workflow', {
+          siteId: row.site_id,
+          name: wfName,
+          workflowSpec,
+        }, deps, callerId);
+
+        if (!result.isError) {
+          db.run('UPDATE workflow_suggestions SET status = ? WHERE id = ?', 'accepted', suggestionId);
+        }
+        return result;
       }
 
       case 'schrute_batch_execute': {
