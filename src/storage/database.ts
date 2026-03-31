@@ -326,6 +326,29 @@ ALTER TABLE skills ADD COLUMN workflow_spec TEXT;
 ALTER TABLE policies ADD COLUMN min_gap_ms INTEGER NOT NULL DEFAULT 100;
 `,
   },
+  {
+    filename: '017_skill_ranking_relearn.sql',
+    sql: `
+ALTER TABLE skills ADD COLUMN suppression_reason TEXT;
+ALTER TABLE skills ADD COLUMN relearn_requested INTEGER NOT NULL DEFAULT 0;
+`,
+  },
+  {
+    filename: '018_workflow_suggestions.sql',
+    sql: `
+CREATE TABLE IF NOT EXISTS workflow_suggestions (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  workflow_spec TEXT NOT NULL,
+  dedup_key TEXT NOT NULL,
+  source_chain_skill_id TEXT,
+  created_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_suggestions_dedup
+  ON workflow_suggestions(site_id, dedup_key);
+`,
+  },
 ];
 
 export class AgentDatabase {

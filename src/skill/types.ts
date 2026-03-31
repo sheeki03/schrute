@@ -319,11 +319,13 @@ export interface ChainStepExtraction {
     location: 'header' | 'query' | 'body';
     path: string;
   };
+  sourceStepIndex?: number;
 }
 
 export interface ChainStep {
   skillRef: string;
   extractsFrom: ChainStepExtraction[];
+  captureIndex?: number;
 }
 
 export interface RequestChain {
@@ -460,6 +462,8 @@ export interface SkillSpec {
   sampleParams?: Record<string, string>;  // path-param sample for auto-validation
 
   reviewRequired?: boolean;
+  suppressionReason?: string;
+  relearnRequested?: boolean;
 
   createdAt: number;
   updatedAt: number;

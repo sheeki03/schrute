@@ -230,6 +230,8 @@ interface SkillRow {
   last_canary_error_type: string | null;
   review_required: number;
   sample_params: string | null;
+  suppression_reason: string | null;
+  relearn_requested: number;
 }
 
 const log = getLogger();
@@ -305,6 +307,8 @@ function rowToSkill(row: SkillRow): SkillSpec {
     lastCanaryErrorType: row.last_canary_error_type ?? undefined,
     sampleParams: row.sample_params ? parseJson<Record<string, string>>(row.sample_params, {}) : undefined,
     reviewRequired: row.review_required === 1,
+    suppressionReason: row.suppression_reason ?? undefined,
+    relearnRequested: row.relearn_requested === 1,
   };
 }
 
@@ -324,8 +328,9 @@ export class SkillRepository {
         allowed_domains, required_capabilities, parameters, validation, redaction, replay_strategy,
         avg_latency_ms, last_successful_tier,
         direct_canary_eligible, direct_canary_attempts, validations_since_last_canary, last_canary_error_type,
-        review_required, sample_params
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        review_required, sample_params,
+        suppression_reason, relearn_requested
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       skill.id,
       skill.siteId,
       skill.name,
@@ -372,6 +377,8 @@ export class SkillRepository {
       skill.lastCanaryErrorType ?? null,
       skill.reviewRequired ? 1 : 0,
       skill.sampleParams ? JSON.stringify(skill.sampleParams) : null,
+      skill.suppressionReason ?? null,
+      skill.relearnRequested ? 1 : 0,
     );
   }
 
@@ -431,6 +438,7 @@ export class SkillRepository {
       ['avgLatencyMs', 'avg_latency_ms'],
       ['lastSuccessfulTier', 'last_successful_tier'],
       ['lastCanaryErrorType', 'last_canary_error_type'],
+      ['suppressionReason', 'suppression_reason'],
     ];
 
     // JSON-serialized columns
@@ -466,6 +474,10 @@ export class SkillRepository {
     if (updates.reviewRequired !== undefined) {
       fields.push('review_required = ?');
       values.push(updates.reviewRequired ? 1 : 0);
+    }
+    if (updates.relearnRequested !== undefined) {
+      fields.push('relearn_requested = ?');
+      values.push(updates.relearnRequested ? 1 : 0);
     }
     if (updates.tierLock !== undefined) {
       fields.push('tier_lock = ?');

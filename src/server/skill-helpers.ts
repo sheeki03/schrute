@@ -24,6 +24,7 @@ export interface SkillSearchResult {
   lastSuccessfulTier?: string;
   promotionProgress?: string;
   provenance?: 'learned' | 'webmcp' | 'both';
+  relearnHint?: string;
 }
 
 // ─── Executability Check ─────────────────────────────────────────
@@ -168,9 +169,14 @@ export function searchAndProjectSkills(
     };
   });
 
-  // Annotate provenance
-  for (const r of results) {
+  // Annotate provenance and relearn hints
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const s = ranked[i];
     r.provenance = r.method === 'WEBMCP' ? 'webmcp' : 'learned';
+    if (s.relearnRequested) {
+      r.relearnHint = 'Skill needs relearning; re-explore the site to refresh.';
+    }
   }
 
   const response: { results: SkillSearchResult[]; matchType?: 'fts' | 'like'; inactiveMatches?: Array<{ id: string; status: string }>; inactiveHint?: string } = {

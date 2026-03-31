@@ -32,8 +32,13 @@ export function detectChains(requests: StructuredRecord[]): RequestChain[] {
 // ─── Value Propagation Detection ─────────────────────────────────────
 
 function detectValuePropagation(requests: StructuredRecord[]): RequestChain | null {
-  const steps: ChainStep[] = [];
-  const usedIndices = new Set<number>();
+  // Pass 1: Build raw dependency pairs (source → target with extractions)
+  interface RawPair {
+    sourceIndex: number;
+    targetIndex: number;
+    extractions: ChainStepExtraction[];
+  }
+  const pairs: RawPair[] = [];
 
   for (let i = 0; i < requests.length; i++) {
     const responseValues = extractResponseValues(requests[i]);
@@ -41,22 +46,41 @@ function detectValuePropagation(requests: StructuredRecord[]): RequestChain | nu
 
     for (let j = i + 1; j < requests.length; j++) {
       const injections = findInjections(responseValues, requests[j]);
-
       if (injections.length > 0) {
-        if (!usedIndices.has(i)) {
-          usedIndices.add(i);
-          steps.push({
-            skillRef: buildSkillRef(requests[i]),
-            extractsFrom: [],
-          });
-        }
-
-        usedIndices.add(j);
-        steps.push({
-          skillRef: buildSkillRef(requests[j]),
-          extractsFrom: injections,
-        });
+        pairs.push({ sourceIndex: i, targetIndex: j, extractions: injections });
       }
+    }
+  }
+
+  if (pairs.length === 0) return null;
+
+  // Pass 2: Build one ChainStep per unique request index, sorted by captureIndex.
+  // Two calls to the same endpoint are distinct steps.
+  const involvedIndices = new Set<number>();
+  for (const p of pairs) {
+    involvedIndices.add(p.sourceIndex);
+    involvedIndices.add(p.targetIndex);
+  }
+
+  const sortedIndices = [...involvedIndices].sort((a, b) => a - b);
+  const indexToStepPos = new Map<number, number>();
+  sortedIndices.forEach((idx, pos) => indexToStepPos.set(idx, pos));
+
+  const steps: ChainStep[] = sortedIndices.map((idx) => ({
+    skillRef: buildSkillRef(requests[idx]),
+    extractsFrom: [],
+    captureIndex: idx,
+  }));
+
+  // Attach extractions with sourceStepIndex remapped after sorting
+  for (const pair of pairs) {
+    const targetPos = indexToStepPos.get(pair.targetIndex)!;
+    const sourcePos = indexToStepPos.get(pair.sourceIndex)!;
+    for (const ext of pair.extractions) {
+      steps[targetPos].extractsFrom.push({
+        ...ext,
+        sourceStepIndex: sourcePos,
+      });
     }
   }
 
@@ -323,7 +347,7 @@ function extractRequestCookies(record: StructuredRecord): Map<string, string> {
 function buildSkillRef(record: StructuredRecord): string {
   try {
     const url = new URL(record.request.url);
-    return `${record.request.method} ${url.pathname}`;
+    return `${record.request.method} ${url.hostname} ${url.pathname}`;
   } catch {
     return `${record.request.method} ${record.request.url}`;
   }
