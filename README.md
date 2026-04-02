@@ -268,6 +268,61 @@ So the goal is not "force everything into direct HTTP." The goal is "use the fas
 
 That is why sites behind Cloudflare or other anti-bot systems can still be useful in Schrute. If direct replay is blocked, Schrute keeps them on a browser-backed path instead of pretending they should work the same way as a public API.
 
+## How Skills Stay Reliable
+
+Websites change. APIs add fields, remove endpoints, rotate auth tokens, or tighten bot detection. Schrute handles this automatically so learned skills do not silently rot.
+
+### Schema Drift Detection
+
+Every time a skill runs, Schrute compares the live response against the schema it learned during recording. Changes are classified as:
+
+- **Non-breaking** (field added, optional field removed) — the schema is updated in place and the skill keeps running.
+- **Breaking** (required field removed, type changed) — the skill is demoted to `STALE` and a notification is emitted.
+
+This happens in three phases based on how many times a skill has been validated:
+
+| Phase | Validations | Behavior |
+|-------|-------------|----------|
+| 1 | First run | Initial schema inferred from response |
+| 2 | 2-3 runs | Schema accumulated by merging new responses |
+| 3 | 4+ runs | Schema enforced — drift is detected and acted on |
+
+So Schrute does not enforce a schema it is not confident about. It builds confidence first, then locks down.
+
+### Confidence Decay
+
+Skills have a time-based confidence score. If a skill has not been verified recently, its confidence decays exponentially:
+
+```
+confidence = e^(-days_since_last_verified / 30)
+```
+
+- Below **0.3** (~36 days idle): skill is considered **stale** and hidden from the active catalog
+- Below **0.1** (~69 days idle): skill is considered **broken**
+
+This means unused skills fade out naturally instead of cluttering the catalog or breaking silently when finally called after months of inactivity.
+
+### Automatic Pruning
+
+When Schrute builds the list of available skills for a site, it filters out any skill whose confidence has decayed below the stale threshold — even if the skill's status is still `ACTIVE`. The remaining skills are sorted by most recent use and capped at a configurable limit per site.
+
+### Self-Healing Amendments
+
+When a skill starts failing, Schrute diagnoses the dominant failure cause from recent execution metrics and picks a repair strategy:
+
+| Failure Cause | Strategies Tried |
+|---------------|------------------|
+| Schema drift | Re-infer schema from scratch, or relax validation |
+| Auth expired | Force browser-proxied tier for fresh cookies |
+| Endpoint removed | Re-infer schema, try adding parameters |
+| Bot detection | Escalate to browser-only tier |
+
+Each amendment is evaluated over a window of executions (default: 10). If the success rate improves by at least 15%, the fix is kept. If not, the skill is rolled back to its pre-amendment state. This prevents a bad repair from making things worse.
+
+### Version Increments
+
+When drift is severe enough that the skill needs a fresh start, Schrute increments the skill version (e.g. `get_ip.v1` becomes `get_ip.v2`), resets all counters, and re-enters the learning phases from the beginning.
+
 ## Tested Workflows
 
 Real examples recorded and tested. These show what Schrute does on actual sites — not hypothetical scenarios.
