@@ -36,6 +36,7 @@ async function checkBrowserEngine(cfg: SchruteConfig): Promise<CheckResult> {
     playwright: 'npx playwright install chromium',
     patchright: 'npm install patchright && npx patchright install chromium',
     camoufox: 'npm install camoufox-js && npx camoufox-js fetch',
+    cloakbrowser: 'npm install cloakbrowser',
   };
 
   let browser: import('playwright').Browser | null = null;

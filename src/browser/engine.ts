@@ -87,6 +87,43 @@ export async function launchBrowserEngine(
       };
     }
 
+    case 'cloakbrowser': {
+      let cloakBrowser: typeof import('playwright')['chromium'];
+      try {
+        const mod = await import('cloakbrowser');
+        cloakBrowser = mod.chromium;
+      } catch (importErr) {
+        const isTopLevel = isModuleNotFound(importErr, 'cloakbrowser');
+        if (isTopLevel) {
+          log.warn('CloakBrowser package not found — falling back to vanilla Playwright. ' +
+            'Install cloakbrowser for stealth: npm install cloakbrowser');
+          const { chromium } = await import('playwright');
+          const browser = await chromium.launch({ headless });
+          return {
+            browser,
+            capabilities: {
+              supportsConsoleEvents: true,
+              supportsCDP: true,
+              configuredEngine: engine,
+              effectiveEngine: 'playwright',
+            },
+          };
+        }
+        throw importErr;
+      }
+      const browser = await cloakBrowser.launch({ headless });
+      log.info('Launched CloakBrowser (stealth Chromium)');
+      return {
+        browser,
+        capabilities: {
+          supportsConsoleEvents: true,
+          supportsCDP: true,
+          configuredEngine: engine,
+          effectiveEngine: 'cloakbrowser',
+        },
+      };
+    }
+
     case 'camoufox': {
       log.warn('Camoufox is EXPERIMENTAL — Firefox-based, no CDP');
       let browser: Browser;

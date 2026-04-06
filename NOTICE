@@ -12,3 +12,6 @@ This product optionally depends on:
 - camoufox-js (MPL-2.0) — optional browser engine, not installed by default.
   camoufox-js transitively depends on ua-parser-js (AGPL-3.0-or-later).
   These are only loaded when the user explicitly selects the camoufox browser engine.
+
+- cloakbrowser (license TBD) — optional BYO browser engine, not installed by default.
+  Only loaded when the user explicitly selects the cloakbrowser browser engine.
