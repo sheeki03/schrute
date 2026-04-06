@@ -21,6 +21,17 @@ export function isCloudflareChallengeSignal(signals: CloudflareChallengeSignals)
     return true;
   }
 
+  // Direct challenge headers — definitive CF signals
+  const cfChallenge = getHeader(signals.headers, 'cf-challenge');
+  if (cfChallenge !== undefined) {
+    return true;
+  }
+
+  const cfChlBypass = getHeader(signals.headers, 'cf-chl-bypass');
+  if (cfChlBypass !== undefined) {
+    return true;
+  }
+
   const location = getHeader(signals.headers, 'location') ?? '';
   const hasCdnCgiPath = /\/cdn-cgi\/challenge-platform|\/cdn-cgi\//i.test(url)
     || /\/cdn-cgi\/challenge-platform|\/cdn-cgi\//i.test(location)

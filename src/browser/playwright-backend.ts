@@ -22,6 +22,11 @@ export class PlaywrightBackend implements BrowserBackend {
   private authCoordinator?: AuthCoordinator;
   private authStore?: BrowserAuthStore;
   private registeredSites = new Set<string>();
+  private onChallengeResolved?: (siteId: string) => Promise<void> | void;
+
+  setOnChallengeResolved(cb: (siteId: string) => Promise<void> | void): void {
+    this.onChallengeResolved = cb;
+  }
 
   constructor(
     private manager: BrowserManager,
@@ -70,7 +75,10 @@ export class PlaywrightBackend implements BrowserBackend {
         this.registeredSites.add(siteId);
       }
 
-      return new PlaywrightMcpAdapter(page, domains);
+      return new PlaywrightMcpAdapter(page, domains, {
+        siteId,
+        onChallengeResolved: this.onChallengeResolved,
+      });
     } catch (err) {
       if (err instanceof TypeError || err instanceof ReferenceError) throw err;
       log.warn({ err, siteId }, 'PlaywrightBackend.createProvider failed');

@@ -93,10 +93,34 @@ export async function isCloudflareChallengePage(page: Page): Promise<boolean> {
 }
 
 /**
- * Detect Cloudflare challenge pages (JS challenges, Turnstile, interstitials)
- * and wait for them to resolve. Returns true if a challenge was detected.
+ * Attempt to click Turnstile checkbox inside the Cloudflare challenge iframe.
+ * Returns true if a checkbox was found and clicked.
+ * Returns false if no checkbox is found, if the iframe is inaccessible, or if the click times out.
  */
-export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): Promise<boolean> {
+async function attemptTurnstileClick(page: Page, timeoutMs: number): Promise<boolean> {
+  try {
+    const iframe = await page.$('iframe[src*="challenges.cloudflare.com"]');
+    if (!iframe) return false;
+    const frame = await iframe.contentFrame();
+    if (!frame) return false;
+    const checkbox = await frame.$('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage');
+    if (checkbox) {
+      await checkbox.click({ timeout: timeoutMs });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    log.debug({ err }, 'Turnstile checkbox click failed — falling back to passive wait');
+    return false;
+  }
+}
+
+/**
+ * Detect Cloudflare challenge pages (JS challenges, Turnstile, interstitials)
+ * and wait for them to resolve. Returns a structured result indicating whether
+ * a challenge was detected and whether it was resolved.
+ */
+export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): Promise<{ detected: boolean; resolved: boolean }> {
   const indicators = [
     '#challenge-running',
     '#challenge-spinner',
@@ -116,9 +140,9 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
       page.title(),
       page.content(),
     ]);
-  } catch {
-    // Page context destroyed or closed — safe to return false
-    return false;
+  } catch (err) {
+    log.debug({ err }, 'Challenge pre-check failed (page may be closed)');
+    return { detected: false, resolved: false };
   }
 
   // Cloudflare phishing/safety interstitial — auto-dismiss "Ignore & Proceed"
@@ -128,10 +152,10 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
     const dismissed = await dismissCloudflareInterstitial(page, timeoutMs);
     if (dismissed) {
       log.info('Cloudflare phishing interstitial dismissed');
-      return true;
+      return { detected: true, resolved: true };
     }
     log.warn('Could not auto-dismiss Cloudflare phishing interstitial — Turnstile challenge likely failed. Try importing cf_clearance cookies or switching to camoufox/patchright engine.');
-    return false;
+    return { detected: true, resolved: false };
   }
 
   const titleMatch = CF_EXPLICIT_CHALLENGE_TITLE_RE.test(title)
@@ -140,9 +164,16 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
       content: `${title}\n${content}`,
     });
 
-  if (!challengeElements && !titleMatch) return false;
+  if (!challengeElements && !titleMatch) return { detected: false, resolved: false };
 
   log.info('Cloudflare challenge detected, waiting for resolution...');
+
+  // Attempt to click Turnstile checkbox before passive wait
+  const turnstileClicked = await attemptTurnstileClick(page, Math.floor(Math.min(timeoutMs * 0.4, 10_000)));
+  if (turnstileClicked) {
+    log.debug('Turnstile checkbox clicked, continuing with passive wait');
+  }
+
   const deadline = Date.now() + timeoutMs;
   try {
     await page.waitForFunction(
@@ -161,10 +192,10 @@ export async function detectAndWaitForChallenge(page: Page, timeoutMs = 15000): 
       await page.waitForLoadState('domcontentloaded', { timeout: remaining });
     }
     log.info('Cloudflare challenge resolved');
-    return true;
-  } catch {
-    log.warn('Cloudflare challenge did not resolve within timeout');
-    return false;
+    return { detected: true, resolved: true };
+  } catch (err) {
+    log.warn({ err }, 'Cloudflare challenge did not resolve within timeout');
+    return { detected: true, resolved: false };
   }
 }
 
@@ -327,6 +358,10 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
   // Configurable handler timeout (applied to individual Playwright actions)
   protected handlerTimeoutMs: number;
 
+  // Challenge resolution callback fields
+  protected siteId?: string;
+  private onChallengeResolved?: (siteId: string) => Promise<void> | void;
+
   constructor(
     page: Page,
     domainAllowlist: string[],
@@ -335,6 +370,8 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
       benchmark?: BrowserBenchmark;
       capabilities?: EngineCapabilities;
       handlerTimeoutMs?: number;
+      siteId?: string;
+      onChallengeResolved?: (siteId: string) => Promise<void> | void;
     },
   ) {
     this.page = page;
@@ -353,6 +390,8 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     this.benchmark = options?.benchmark ?? null;
     this.capabilities = options?.capabilities ?? null;
     this.handlerTimeoutMs = options?.handlerTimeoutMs ?? 30_000;
+    this.siteId = options?.siteId;
+    this.onChallengeResolved = options?.onChallengeResolved;
     this.refState = createRefState();
     this.modalTracker = new ModalStateTracker();
 
@@ -1055,7 +1094,15 @@ export abstract class BaseBrowserAdapter implements BrowserProvider {
     }
 
     await this.page.goto(url, gotoOpts);
-    await detectAndWaitForChallenge(this.page);
+    const cfResult = await detectAndWaitForChallenge(this.page);
+    if (cfResult.resolved && this.onChallengeResolved && this.siteId) {
+      try {
+        void Promise.resolve(this.onChallengeResolved(this.siteId))
+          .catch(err => log.warn({ err, siteId: this.siteId }, 'Failed to snapshot auth after challenge resolved'));
+      } catch (err) {
+        log.warn({ err, siteId: this.siteId }, 'Failed to snapshot auth after challenge resolved');
+      }
+    }
   }
 
   async snapshot(options?: SnapshotOptions): Promise<PageSnapshot> {

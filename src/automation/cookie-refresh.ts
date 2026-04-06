@@ -57,6 +57,19 @@ export async function refreshCookies(
       log.debug({ siteId, err }, 'Navigation timeout during cookie refresh (may be OK)');
     }
 
+    // Detect and wait for Cloudflare challenges after navigation
+    // Dynamic import to avoid circular dependency between cookie-refresh and browser-adapter
+    const { detectAndWaitForChallenge } = await import('../browser/base-browser-adapter.js');
+    const cfResult = await detectAndWaitForChallenge(page, 20_000);
+
+    // If CF challenge was detected but NOT resolved, skip cookie save —
+    // the cookies are likely challenge-page artifacts, not real auth.
+    if (cfResult.detected && !cfResult.resolved) {
+      log.warn({ siteId }, 'Cloudflare challenge unresolved during cookie refresh — skipping cookie save');
+      await page.close();
+      return false;
+    }
+
     // Extract cookies from the browser context
     const browserCookies = await context.cookies();
 
@@ -79,6 +92,11 @@ export async function refreshCookies(
     }));
 
     await jar.saveCookies(siteId, entries);
+
+    // Snapshot auth after successful cookie refresh (skip if CF challenge unresolved)
+    if (!cfResult.detected || cfResult.resolved) {
+      await manager.snapshotAuth(siteId);
+    }
 
     log.info(
       { siteId, count: entries.length },

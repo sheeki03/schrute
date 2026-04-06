@@ -826,6 +826,9 @@ export class Engine {
         this.config,
       );
       this.fallbackExecutionBackend.setAuthCoordinator(this.authCoordinator, this.authStore);
+      this.fallbackExecutionBackend.setOnChallengeResolved(async (siteId: string) => {
+        await dedicatedManager.snapshotAuth(siteId);
+      });
     }
     return this.fallbackExecutionBackend;
   }
@@ -844,6 +847,9 @@ export class Engine {
     let backend = this.sharedPlaywrightBackends.get(sessionName);
     if (!backend) {
       backend = new PlaywrightBackend(manager, this.config, { existingOnly: true });
+      backend.setOnChallengeResolved(async (siteId: string) => {
+        await manager.snapshotAuth(siteId);
+      });
       this.sharedPlaywrightBackends.set(sessionName, backend);
     }
     return backend;
@@ -1251,6 +1257,10 @@ export class Engine {
       flags: getFlags(this.config),
       capabilities: manager.getCapabilities() ?? undefined,
       handlerTimeoutMs: manager.getHandlerTimeoutMs(),
+      siteId,
+      onChallengeResolved: async (resolvedSiteId: string) => {
+        await manager.snapshotAuth(resolvedSiteId);
+      },
     });
     providerCache.set(siteId, { adapter, page, domainsKey });
     return adapter;
@@ -1390,13 +1400,20 @@ export class Engine {
       if (signal?.aborted) return;
       const challengePresent = await isCloudflareChallengePage(page);
       if (challengePresent) {
-        const resolved = await detectAndWaitForChallenge(page, 3000);
-        if (!resolved) {
+        const cfResult = await detectAndWaitForChallenge(page, 3000);
+        if (cfResult.detected && !cfResult.resolved) {
           const recovery = this.upsertPendingRecovery(siteId, page.url() || url, overrides);
           this.addWarning(`Cloudflare challenge is blocking ${siteId}. ${recovery.hint}`);
+        } else if (cfResult.resolved) {
+          const snapshotBm = browserManager ?? this.getExploreBrowserManager();
+          await snapshotBm.snapshotAuth(siteId);
         }
       } else {
-        await detectAndWaitForChallenge(page, 3000);
+        const cfResult = await detectAndWaitForChallenge(page, 3000);
+        if (cfResult.resolved) {
+          const snapshotBm = browserManager ?? this.getExploreBrowserManager();
+          await snapshotBm.snapshotAuth(siteId);
+        }
       }
       if (sessionId) this.sessionManager.updateUrl(sessionId, page.url());
     }).catch(err => {
@@ -3135,6 +3152,7 @@ export class Engine {
         browserProviderFactory,
         config: this.config,
         siteRecommendedTier,
+        authStore: this.authStore,
       };
 
       // 5. Execute — canary probe + tier escalation

@@ -23,6 +23,8 @@ interface BrowserProviderConfig {
   /** Runtime feature flags for the browser adapter */
   flags?: BrowserFeatureFlags;
   capabilities?: EngineCapabilities;
+  siteId?: string;
+  onChallengeResolved?: (siteId: string) => Promise<void> | void;
 }
 
 /**
@@ -49,6 +51,8 @@ class BrowserProviderFactory {
       {
         flags: providerConfig.flags,
         capabilities: providerConfig.capabilities,
+        siteId: providerConfig.siteId,
+        onChallengeResolved: providerConfig.onChallengeResolved,
       },
     );
   }
