@@ -86,6 +86,7 @@ const DEFAULT_CONFIG: SchruteConfig = {
   maxToolsPerSite: 20,
   maxSkillsPerRecording: 15,
   toolShortlistK: 10,
+  transport: { direct: 'auto' as const },
   slimMode: false,
 };
 
@@ -132,7 +133,7 @@ function parseStrictBool(v: string): boolean {
   throw new Error(`Invalid boolean value: '${v}'. Must be 'true' or 'false'.`);
 }
 
-const VALID_BROWSER_ENGINES = new Set(['playwright', 'patchright', 'camoufox']);
+const VALID_BROWSER_ENGINES = new Set(['playwright', 'patchright', 'camoufox', 'cloakbrowser']);
 
 function parseBrowserEngine(v: string): string {
   if (!VALID_BROWSER_ENGINES.has(v)) {
@@ -278,6 +279,11 @@ const ENV_OVERRIDES: Array<{
   { env: 'SCHRUTE_PROXY_BYPASS',   key: 'browser.proxy.bypass',    parse: String },
   { env: 'SCHRUTE_PROXY_USERNAME', key: 'browser.proxy.username',  parse: String },
   { env: 'SCHRUTE_PROXY_PASSWORD', key: 'browser.proxy.password',  parse: String },
+  { env: 'SCHRUTE_DIRECT_TRANSPORT', key: 'transport.direct', parse: (v: string) => {
+    const valid = ['native', 'cycletls', 'wreq', 'auto'];
+    if (!valid.includes(v)) throw new Error(`Invalid SCHRUTE_DIRECT_TRANSPORT: "${v}". Must be one of: ${valid.join(', ')}.`);
+    return v;
+  } },
   { env: 'SCHRUTE_GEO_LATITUDE',  key: 'browser.geo.geolocation.latitude',  parse: makeFloatParser('latitude', -90, 90) },
   { env: 'SCHRUTE_GEO_LONGITUDE', key: 'browser.geo.geolocation.longitude', parse: makeFloatParser('longitude', -180, 180) },
   { env: 'SCHRUTE_TIMEZONE',      key: 'browser.geo.timezoneId',   parse: makeTimezoneParser() },
@@ -528,6 +534,7 @@ const VALID_TOP_LEVEL_KEYS = new Set([
   'confirmationTimeoutMs', 'confirmationExpiryMs', 'promotionConsecutivePasses',
   'promotionVolatilityThreshold', 'maxToolsPerSite', 'toolShortlistK',
   'browserPool', 'managedCrawl', 'slimMode', 'maxSkillsPerRecording', 'autoValidation',
+  'transport',
 ]);
 
 /**
@@ -619,6 +626,17 @@ function validateConfigValue(keyPath: string, value: unknown): void {
       Intl.getCanonicalLocales(value);
     } catch {
       throw new Error(`Invalid config: '${value}' is not a valid locale.`);
+    }
+  }
+
+  // Validate transport.direct
+  if (keyPath === 'transport.direct' && typeof value === 'string') {
+    const VALID_DIRECT_TRANSPORTS = new Set(['native', 'cycletls', 'wreq', 'auto']);
+    if (!VALID_DIRECT_TRANSPORTS.has(value)) {
+      throw new Error(
+        `Invalid value for transport.direct: "${value}". ` +
+        `Must be one of: ${[...VALID_DIRECT_TRANSPORTS].join(', ')}.`,
+      );
     }
   }
 

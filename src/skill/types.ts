@@ -601,7 +601,7 @@ export interface EvidenceReport {
 }
 
 // ─── Browser Engine ──────────────────────────────────────────────
-export type BrowserEngine = 'playwright' | 'patchright' | 'camoufox';
+export type BrowserEngine = 'playwright' | 'patchright' | 'camoufox' | 'cloakbrowser';
 
 // ─── Browser Feature Flags (config shape) ─────────────────────────
 interface BrowserFeatureFlagsConfig {
@@ -702,6 +702,9 @@ export interface SchruteConfig {
   maxToolsPerSite: number;       // default: 20
   maxSkillsPerRecording: number; // default: 15
   toolShortlistK: number;        // default: 10
+  transport?: {
+    direct?: 'native' | 'cycletls' | 'wreq' | 'auto';
+  };
   slimMode?: boolean;
   autoValidation?: {
     enabled?: boolean;            // default: true

@@ -12,6 +12,10 @@ interface TlsOptions {
   userAgent?: string;
   /** Request timeout in milliseconds */
   timeout?: number;
+  /** Suppress automatic redirect following */
+  disableRedirect?: boolean;
+  /** Maximum response body size in bytes (fail-closed) */
+  maxResponseBytes?: number;
 }
 
 interface CycleTlsInstance {
@@ -92,6 +96,7 @@ async function cycleTlsFetch(
         ja3: options?.ja3,
         userAgent: options?.userAgent,
         timeout,
+        disableRedirect: options?.disableRedirect ?? false,
       }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`TLS fetch timed out after ${timeout}ms`)), timeout);
@@ -126,14 +131,51 @@ async function nativeFetch(
       method: req.method,
       headers,
       body: req.body ?? undefined,
+      redirect: 'manual',  // Transport contract: suppress redirects
       signal: controller.signal,
     });
 
-    const body = await response.text();
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
+      responseHeaders[key.toLowerCase()] = value;
     });
+
+    // Body cap: stream with size guard to match transport contract
+    let body: string;
+    const maxBytes = options?.maxResponseBytes;
+    if (maxBytes && response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > maxBytes) {
+            reader.cancel();
+            throw new Error(
+              `Response body exceeded maxResponseBodyBytes (${maxBytes}). ` +
+              `Read ${totalBytes} bytes before aborting.`,
+            );
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      // Concatenate raw buffers first, then decode once to avoid
+      // multi-byte UTF-8 corruption across chunk boundaries.
+      const combined = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      body = new TextDecoder().decode(combined);
+    } else {
+      body = await response.text();
+    }
 
     return { status: response.status, headers: responseHeaders, body };
   } finally {
@@ -161,7 +203,7 @@ export function isCycleTlsAvailable(): boolean {
 /**
  * Clean up the CycleTLS instance. Call on process shutdown.
  */
-async function closeTlsClient(): Promise<void> {
+export async function closeTlsClient(): Promise<void> {
   if (cycleTlsInstance) {
     try {
       await cycleTlsInstance.exit();

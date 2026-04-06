@@ -575,14 +575,23 @@ async function createGracefulShutdown(
       }
     }
 
-    // 4. Close Engine
+    // 4. Transport cleanup
+    try {
+      const { resolveTransport } = await import('../replay/transport.js');
+      const transport = resolveTransport();
+      await transport.cleanup?.();
+    } catch (err) {
+      log().warn({ err }, 'Error cleaning up transport during shutdown');
+    }
+
+    // 5. Close Engine
     try {
       await engine.close();
     } catch (err) {
       log().warn({ err }, 'Error closing engine during shutdown');
     }
 
-    // 5. Remove socket + PID + token files
+    // 6. Remove socket + PID + token files
     try { if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath); } catch (err) {
       log().warn({ err, socketPath }, 'Failed to remove daemon socket during shutdown');
     }

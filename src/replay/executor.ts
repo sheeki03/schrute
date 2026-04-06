@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import * as https from 'node:https';
-import * as http from 'node:http';
 import { getLogger } from '../core/logger.js';
 import { withTimeout } from '../core/utils.js';
 import { getEffectiveTier } from '../core/tiering.js';
@@ -39,6 +37,8 @@ import {
 } from '../core/policy.js';
 import { getConfig } from '../core/config.js';
 import type { MetricsRepository } from '../storage/metrics-repository.js';
+import type { BrowserAuthStore } from '../browser/auth-store.js';
+import type { CookieEntry } from '../browser/backend.js';
 
 const log = getLogger();
 
@@ -75,6 +75,8 @@ export interface ExecutorOptions {
   config?: import('../skill/types.js').SchruteConfig;
   /** Lazy browser provider factory — creates provider on demand */
   browserProviderFactory?: () => Promise<BrowserProvider | undefined>;
+  /** Auth cookie store for Cloudflare bypass cookie injection */
+  authStore?: BrowserAuthStore;
 }
 
 // ─── Execute Skill ──────────────────────────────────────────────
@@ -289,6 +291,8 @@ async function executeTier(
   }
 
   let response: SealedFetchResponse;
+  // Track the per-hop request (with injected cookies) so redirect re-filtering works.
+  let fetchRequest = request;
   try {
     if (tier === ExecutionTier.BROWSER_PROXIED || tier === ExecutionTier.FULL_BROWSER) {
       if (!resolvedBrowserProvider) {
@@ -314,11 +318,17 @@ async function executeTier(
     }
     } else {
       // ExecutionTier.DIRECT or unknown — use direct fetch.
-      // Both paths handle their own timeout cancellation:
-      // - Pinned IP: socket-level timeout via req.setTimeout() destroys the request
-      // - Non-pinned: AbortController.abort() tears down the fetch connection
+      // The transport layer handles its own timeout cancellation internally.
       // No outer withTimeout needed — avoids leaked I/O from promise races.
-      response = await directFetch(request, maxResponseBytes, options?.fetchFn, resolvedIp, timeoutMs);
+
+      // Inject auth cookies from BrowserAuthStore if available and no cookie already set
+      fetchRequest = request;
+      const cookieHeader = loadAuthCookieHeader(skill.siteId, request.url, options?.authStore);
+      if (cookieHeader && !request.headers['cookie']) {
+        fetchRequest = { ...request, headers: { ...request.headers, 'x-schrute-injected-cookie': '1', cookie: cookieHeader } };
+      }
+
+      response = await directFetch(fetchRequest, maxResponseBytes, options?.fetchFn, resolvedIp, timeoutMs);
     }
   } catch (err) {
     const latencyMs = Date.now() - startTime;
@@ -410,13 +420,33 @@ async function executeTier(
       resolvedIp = ipCheck.ip;
     }
 
+    // Re-filter injected cookies on redirect: only strip/re-filter cookies
+    // that WE injected (marker present). Skill-captured cookies (no marker)
+    // are preserved unchanged across hops.
+    // Use fetchRequest.headers (not request.headers) so the injected cookie
+    // marker from the initial injection is visible to the re-filter logic.
+    const redirectHeaders = { ...fetchRequest.headers };
+    if (redirectHeaders['x-schrute-injected-cookie']) {
+      delete redirectHeaders['x-schrute-injected-cookie'];
+      delete redirectHeaders['cookie'];
+      const hopCookie = loadAuthCookieHeader(skill.siteId, resolvedUrl, options?.authStore);
+      if (hopCookie) {
+        redirectHeaders['cookie'] = hopCookie;
+        redirectHeaders['x-schrute-injected-cookie'] = '1';
+      }
+    }
+    // Update fetchRequest for subsequent hops so re-filter continues to work
+    fetchRequest = { ...request, url: resolvedUrl, headers: redirectHeaders };
+    const redirectRequest = fetchRequest;
+
     let redirectResp: SealedFetchResponse;
     if ((tier === ExecutionTier.BROWSER_PROXIED) && resolvedBrowserProvider) {
       // Follow redirect through browser context (preserves cookies, TLS, CORS)
-      redirectResp = await withTimeout(resolvedBrowserProvider.evaluateFetch({ ...request, url: resolvedUrl }), timeoutMs);
+      const { 'x-schrute-injected-cookie': _redirectMarker, ...browserRedirectHeaders } = redirectRequest.headers;
+      redirectResp = await withTimeout(resolvedBrowserProvider.evaluateFetch({ ...redirectRequest, headers: browserRedirectHeaders }), timeoutMs);
     } else {
       redirectResp = await directFetch(
-        { ...request, url: resolvedUrl },
+        redirectRequest,
         maxResponseBytes,
         options?.fetchFn,
         resolvedIp,
@@ -590,12 +620,16 @@ function isCloudflareChallengeResponse(response: SealedFetchResponse): boolean {
 // ─── Fetch Implementations ──────────────────────────────────────
 
 async function directFetch(
-  request: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
+  rawRequest: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
   maxResponseBytes: number,
   fetchFn?: (req: SealedFetchRequest) => Promise<SealedFetchResponse>,
   pinnedIp?: string,
   timeoutMs?: number,
 ): Promise<SealedFetchResponse> {
+  // Strip internal marker header — must NOT be sent over the wire
+  const { 'x-schrute-injected-cookie': _marker, ...cleanHeaders } = rawRequest.headers;
+  const request = { ...rawRequest, headers: cleanHeaders };
+
   if (fetchFn) {
     // Injected fetch functions (e.g. test mocks) still need a timeout guard
     // since the caller no longer wraps directFetch in withTimeout.
@@ -605,176 +639,14 @@ async function directFetch(
     return fetchFn(request);
   }
 
-  // CR-01 + WS-1: When pinnedIp is set, use node:https/node:http directly.
-  // This allows setting `servername` for correct TLS SNI while connecting to
-  // the validated IP (preventing DNS rebinding TOCTOU attacks).
-  // Using fetch() with an IP-rewritten URL breaks TLS because undici derives
-  // SNI from the URL hostname, not the Host header.
-  if (pinnedIp) {
-    return pinnedIpFetch(request, pinnedIp, maxResponseBytes, timeoutMs);
-  }
-
-  // No pinned IP — use standard fetch() with redirect: 'manual'.
-  // AbortSignal ensures the underlying connection is torn down on timeout
-  // (without it, withTimeout races the promise but the fetch keeps running).
-  const abortController = new AbortController();
-  const abortTimeout = timeoutMs
-    ? setTimeout(() => abortController.abort(), timeoutMs)
-    : undefined;
-
-  let response: Response;
-  try {
-    response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      redirect: 'manual',  // never auto-follow redirects
-      signal: abortController.signal,
-    });
-  } catch (err) {
-    if (abortTimeout) clearTimeout(abortTimeout);
-    throw err;
-  }
-
-  try {
-    const headers: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-
-    // Read response body incrementally with size cap to prevent memory exhaustion.
-    // If the body exceeds maxResponseBytes, abort reading and throw.
-    let body: string;
-    if (response.body) {
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let totalBytes = 0;
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          totalBytes += value.byteLength;
-          if (totalBytes > maxResponseBytes) {
-            reader.cancel();
-            throw new Error(
-              `Response body exceeded maxResponseBodyBytes (${maxResponseBytes}). ` +
-              `Read ${totalBytes} bytes before aborting.`,
-            );
-          }
-          chunks.push(value);
-        }
-      } finally {
-        reader.releaseLock();
-      }
-      const decoder = new TextDecoder();
-      body = chunks.map((c) => decoder.decode(c, { stream: true })).join('') +
-        decoder.decode();
-    } else {
-      body = await response.text();
-    }
-
-    return { status: response.status, headers, body };
-  } finally {
-    if (abortTimeout) clearTimeout(abortTimeout);
-  }
-}
-
-/**
- * WS-1: Fetch using node:https/node:http with pinned IP and correct TLS SNI.
- *
- * Connects to `pinnedIp` (the pre-validated IP) while setting `servername`
- * to the original hostname so TLS certificate validation succeeds.
- * This fixes the cert mismatch that occurred when fetch() was given an
- * IP-rewritten URL (undici derives SNI from the URL hostname, ignoring Host).
- */
-function pinnedIpFetch(
-  request: SealedFetchRequest & { url: string; method: string; headers: Record<string, string>; body?: string },
-  pinnedIp: string,
-  maxResponseBytes: number,
-  timeoutMs?: number,
-): Promise<SealedFetchResponse> {
-  return new Promise<SealedFetchResponse>((resolve, reject) => {
-    const parsed = new URL(request.url);
-    const isHttps = parsed.protocol === 'https:';
-    const originalHost = parsed.hostname;
-    const port = parsed.port
-      ? Number(parsed.port)
-      : (isHttps ? 443 : 80);
-    const path = parsed.pathname + parsed.search;
-
-    const reqHeaders: Record<string, string> = { ...request.headers };
-    // Ensure Host header is set for correct virtual-host routing
-    if (!reqHeaders['Host'] && !reqHeaders['host']) {
-      reqHeaders['Host'] = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
-    }
-
-    const baseOptions: http.RequestOptions = {
-      hostname: pinnedIp,
-      port,
-      path,
-      method: request.method,
-      headers: reqHeaders,
-    };
-
-    // For HTTPS: set servername for correct TLS SNI and cert validation.
-    // For IPv6 pinned IPs, hostname already works (node handles brackets internally).
-    const options = isHttps
-      ? { ...baseOptions, servername: originalHost, rejectUnauthorized: true } as https.RequestOptions
-      : baseOptions;
-
-    const transport = isHttps ? https : http;
-    const effectiveTimeout = timeoutMs ?? 30_000;
-
-    const req = transport.request(options, (res) => {
-      const chunks: Buffer[] = [];
-      let totalBytes = 0;
-      let aborted = false;
-
-      res.on('data', (chunk: Buffer) => {
-        if (aborted) return;
-        totalBytes += chunk.length;
-        if (totalBytes > maxResponseBytes) {
-          aborted = true;
-          res.destroy();
-          reject(new Error(
-            `Response body exceeded maxResponseBodyBytes (${maxResponseBytes}). ` +
-            `Read ${totalBytes} bytes before aborting.`,
-          ));
-          return;
-        }
-        chunks.push(chunk);
-      });
-
-      res.on('end', () => {
-        if (aborted) return;
-        const headers: Record<string, string> = {};
-        if (res.headers) {
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (value != null) {
-              headers[key] = Array.isArray(value) ? value.join(', ') : value;
-            }
-          }
-        }
-        const body = Buffer.concat(chunks).toString('utf-8');
-        resolve({ status: res.statusCode ?? 0, headers, body });
-      });
-
-      res.on('error', (err) => {
-        if (!aborted) reject(err);
-      });
-    });
-
-    req.setTimeout(effectiveTimeout, () => {
-      req.destroy(new Error(`Request timed out after ${effectiveTimeout}ms`));
-    });
-
-    req.on('error', (err) => reject(err));
-
-    if (request.body) {
-      req.write(request.body);
-    }
-    req.end();
-  });
+  // Delegate to the transport layer which handles pinnedIp, redirect
+  // suppression, header normalisation, and body size caps.
+  const { resolveTransport } = await import('./transport.js');
+  const transport = resolveTransport();
+  return transport.fetch(
+    { url: request.url, method: request.method, headers: cleanHeaders, body: request.body },
+    { maxResponseBytes, timeoutMs: timeoutMs ?? 30_000, pinnedIp },
+  );
 }
 
 async function fullBrowserExecution(
@@ -872,6 +744,42 @@ function failureResult(startTime: number, tier: ExecutionTierName, cause: Failur
     failureCause: cause,
     failureDetail: detail,
   };
+}
+
+/**
+ * Load auth cookies from BrowserAuthStore and build a Cookie header value.
+ * Filters by domain (exact or dot-boundary suffix), path, expiry, and secure flag.
+ * Cookies with no explicit domain are matched against the siteId.
+ * Returns null if no matching cookies are found.
+ * @internal Exported for testing only.
+ */
+export function loadAuthCookieHeader(siteId: string, requestUrl: string, authStore?: BrowserAuthStore): string | null {
+  if (!authStore) return null;
+  try {
+    const state = authStore.load(siteId);
+    if (!state?.cookies.length) return null;
+    const url = new URL(requestUrl);
+    const now = Date.now() / 1000;
+    const matching = state.cookies.filter((c: CookieEntry) => {
+      if (c.expires && c.expires > 0 && c.expires < now) return false;
+      // Domain matching: exact or dot-boundary suffix
+      const cookieDomain = c.domain?.startsWith('.') ? c.domain.slice(1) : (c.domain ?? siteId);
+      if (url.hostname !== cookieDomain && !url.hostname.endsWith('.' + cookieDomain)) return false;
+      // RFC 6265 §5.1.4: path must be a prefix with a '/' boundary.
+      // e.g. cookie path '/api' matches '/api' and '/api/foo' but NOT '/api2'.
+      if (c.path) {
+        if (url.pathname !== c.path && !url.pathname.startsWith(c.path.endsWith('/') ? c.path : c.path + '/')) return false;
+      }
+      if (c.secure && url.protocol !== 'https:') return false;
+      return true;
+    });
+    if (!matching.length) return null;
+    return matching.map((c: CookieEntry) => `${c.name}=${c.value}`).join('; ');
+  } catch (err) {
+    if (err instanceof TypeError || err instanceof ReferenceError) throw err;
+    log.debug({ err, siteId, requestUrl }, 'Failed to load auth cookies for injection');
+    return null;
+  }
 }
 
 // Shared redaction helper: prefers native (sync) redactor when salt is cached,

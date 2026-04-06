@@ -1491,6 +1491,12 @@ program
           execSync('npx camoufox-js fetch', { stdio: 'inherit' });
           break;
         }
+        case 'cloakbrowser': {
+          console.log('  CloakBrowser is a BYO (bring-your-own) browser.');
+          console.log('  Install manually: npm install cloakbrowser');
+          // No automatic installation — user must install themselves
+          break;
+        }
         default:
           console.error(`  Unknown engine: ${engine}`);
           process.exit(1);
@@ -1700,6 +1706,13 @@ program
           // No daemon — close MCP handles directly
           for (const handle of closeHandles.mcpCloseHandles ?? []) {
             try { await handle.close(); } catch (err) { console.warn('MCP close error:', err); }
+          }
+          try {
+            const { resolveTransport } = await import('./replay/transport.js');
+            const transport = resolveTransport();
+            await transport.cleanup?.();
+          } catch (err) {
+            console.warn('Transport cleanup error:', err);
           }
           await engine.close();
         }
