@@ -35,9 +35,50 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Setup Rust toolchain
+        if: ${{ matrix.task.needs_build }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.85.0'
       - run: npm install
       - name: Build compiled entrypoints
         if: ${{ matrix.task.needs_build }}
         run: npm run build
       - name: Run ${{ matrix.task.name }}
         run: ${{ matrix.task.command }}
+
+  native-build:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.85.0'
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - run: npm install
+      - name: Build native module
+        run: npm run build:native
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.os }}
+          path: native/index.node
+          if-no-files-found: error
