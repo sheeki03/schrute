@@ -1,5 +1,6 @@
 mod audit_chain;
 mod canonicalizer;
+pub(crate) mod chrome_emulation;
 mod har_parser;
 mod ip_policy;
 mod noise_filter;
@@ -8,6 +9,7 @@ mod path_risk;
 mod redactor;
 mod schema_inference;
 mod semantic_diff;
+mod tls_fetch;
 mod volatility;
 
 pub use audit_chain::*;
@@ -20,4 +22,5 @@ pub use path_risk::*;
 pub use redactor::*;
 pub use schema_inference::*;
 pub use semantic_diff::*;
+pub use tls_fetch::*;
 pub use volatility::*;

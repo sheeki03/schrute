@@ -42,6 +42,8 @@ interface NativeBindings {
   inferSchema?: NativeBindingFn;
   // path-risk
   checkPathRisk?: NativeBindingFn;
+  // tls-fetch (wreq)
+  tlsFetch?: NativeBindingFn;
   // ip-policy
   isPublicIp?: NativeBindingFn;
   normalizeDomainNative?: NativeBindingFn;

@@ -1,7 +1,7 @@
 [package]
 name = "schrute-native"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
@@ -17,6 +17,9 @@ regex = "1"
 idna = "1"
 ipnet = "2"
 url = "2"
+wreq = "6.0.0-rc.28"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [build-dependencies]
 napi-build = "2"
