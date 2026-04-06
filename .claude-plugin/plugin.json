@@ -1,6 +1,6 @@
 {
   "name": "schrute",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Universal Self-Learning Browser Agent — record browser interactions, generate API skills, and replay them via MCP tools with progressive tier optimization.",
   "author": {
     "name": "Schrute Contributors"
