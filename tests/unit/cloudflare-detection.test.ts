@@ -34,6 +34,7 @@ function createMockPage(overrides: {
     title: vi.fn().mockResolvedValue(titleResult),
     content: vi.fn().mockResolvedValue(contentResult),
     url: vi.fn().mockReturnValue(urlResult),
+    $: vi.fn().mockResolvedValue(null), // For attemptTurnstileClick iframe lookup
     waitForFunction: vi.fn().mockImplementation(() => {
       if (!waitForFunctionResolves) {
         return Promise.reject(new Error('Timeout'));
@@ -56,12 +57,12 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
     expect(page.evaluate).toHaveBeenCalled();
     expect(page.waitForFunction).toHaveBeenCalled();
   });
 
-  it('should detect title-only match (no selectors) and return true when title changes', async () => {
+  it('should detect title-only match (no selectors) and return resolved when title changes', async () => {
     const page = createMockPage({
       evaluateResult: false,
       titleResult: 'Just a moment...',
@@ -70,7 +71,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
     expect(page.waitForFunction).toHaveBeenCalled();
     // Verify the waitForFunction was called with hadSelectors=false
     const call = vi.mocked(page.waitForFunction).mock.calls[0];
@@ -88,7 +89,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: false, resolved: false });
     expect(page.waitForFunction).not.toHaveBeenCalled();
   });
 
@@ -100,11 +101,11 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: false, resolved: false });
     expect(page.waitForFunction).not.toHaveBeenCalled();
   });
 
-  it('should return false immediately when neither title nor selectors match', async () => {
+  it('should return not-detected when neither title nor selectors match', async () => {
     const page = createMockPage({
       evaluateResult: false,
       titleResult: 'My Website - Home',
@@ -112,11 +113,11 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: false, resolved: false });
     expect(page.waitForFunction).not.toHaveBeenCalled();
   });
 
-  it('should return true when challenge selectors disappear', async () => {
+  it('should return resolved when challenge selectors disappear', async () => {
     const page = createMockPage({
       evaluateResult: true,
       titleResult: 'Some title',
@@ -125,7 +126,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
     // Verify the waitForFunction was called with hadSelectors=true
     const call = vi.mocked(page.waitForFunction).mock.calls[0];
     const ctx = call[1] as { hadSelectors: boolean };
@@ -141,7 +142,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
   });
 
   it('should detect "Attention Required! | Cloudflare" title', async () => {
@@ -152,7 +153,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
   });
 
   it('should still wait when selectors present even if title changes', async () => {
@@ -165,13 +166,13 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ detected: true, resolved: true });
     const call = vi.mocked(page.waitForFunction).mock.calls[0];
     const ctx = call[1] as { hadSelectors: boolean };
     expect(ctx.hadSelectors).toBe(true);
   });
 
-  it('should return false when challenge does not resolve within timeout', async () => {
+  it('should return detected-but-not-resolved when challenge does not resolve within timeout', async () => {
     const page = createMockPage({
       evaluateResult: true,
       titleResult: 'Just a moment...',
@@ -180,7 +181,7 @@ describe('detectAndWaitForChallenge', () => {
 
     const result = await detectAndWaitForChallenge(page, 100);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: true, resolved: false });
   });
 
   it('should call waitForLoadState after challenge resolves if time remains', async () => {
@@ -212,7 +213,7 @@ describe('detectAndWaitForChallenge selector vs title resolution', () => {
     const result = await detectAndWaitForChallenge(page, 100);
 
     // Even if the title might change, selectors present means we wait for them
-    expect(result).toBe(false); // timeout — challenge not resolved
+    expect(result).toEqual({ detected: true, resolved: false }); // timeout — challenge not resolved
     const call = vi.mocked(page.waitForFunction).mock.calls[0];
     const ctx = call[1] as { hadSelectors: boolean };
     expect(ctx.hadSelectors).toBe(true);
@@ -273,20 +274,20 @@ describe('challenge-aware snapshot content', () => {
 });
 
 describe('detectAndWaitForChallenge pre-check error handling', () => {
-  it('returns false when page.evaluate throws (context destroyed)', async () => {
+  it('returns not-detected when page.evaluate throws (context destroyed)', async () => {
     const page = createMockPage();
     (page.evaluate as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Execution context was destroyed'));
 
     const result = await detectAndWaitForChallenge(page, 1000);
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: false, resolved: false });
   });
 
-  it('returns false when page.title throws (page closed)', async () => {
+  it('returns not-detected when page.title throws (page closed)', async () => {
     const page = createMockPage();
     (page.title as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Page closed'));
 
     const result = await detectAndWaitForChallenge(page, 1000);
-    expect(result).toBe(false);
+    expect(result).toEqual({ detected: false, resolved: false });
   });
 });
 

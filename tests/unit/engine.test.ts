@@ -142,7 +142,7 @@ vi.mock('../../src/browser/playwright-mcp-adapter.js', () => ({
 }));
 
 // Mock detectAndWaitForChallenge from base-browser-adapter
-const mockDetectAndWaitForChallenge = vi.fn().mockResolvedValue(false);
+const mockDetectAndWaitForChallenge = vi.fn().mockResolvedValue({ detected: false, resolved: false });
 const mockIsCloudflareChallengePage = vi.fn().mockResolvedValue(false);
 vi.mock('../../src/browser/base-browser-adapter.js', () => ({
   detectAndWaitForChallenge: (...args: unknown[]) => mockDetectAndWaitForChallenge(...args),
@@ -479,7 +479,7 @@ describe('Engine', () => {
     mockSessionRemove.mockReturnValue(undefined);
 
     mockDetectAndWaitForChallenge.mockReset();
-    mockDetectAndWaitForChallenge.mockResolvedValue(false);
+    mockDetectAndWaitForChallenge.mockResolvedValue({ detected: false, resolved: false });
     mockIsCloudflareChallengePage.mockReset();
     mockIsCloudflareChallengePage.mockResolvedValue(false);
     mockCleanupManagedChromeLaunches.mockReset();
@@ -637,6 +637,27 @@ describe('Engine', () => {
 
       expect(first).toBe(second);
       expect(adapterCtor).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes siteId and onChallengeResolved callback to adapter (Fix 4)', async () => {
+      const page = { isClosed: vi.fn().mockReturnValue(false) };
+      const context = { pages: () => [page], newPage: vi.fn() };
+      mockBrowserManager.getOrCreateContext.mockResolvedValue(context as any);
+
+      const adapterCtor = PlaywrightMcpAdapter as unknown as ReturnType<typeof vi.fn>;
+      adapterCtor.mockImplementation(() => ({ id: 'adapter-fix4' } as any));
+
+      await engine.createBrowserProvider('my-site.com', ['my-site.com'], {
+        browserManager: mockBrowserManager as any,
+        lazy: true,
+      });
+
+      expect(adapterCtor).toHaveBeenCalledOnce();
+      // Third argument is the options object
+      const ctorOptions = adapterCtor.mock.calls[0][2];
+      expect(ctorOptions).toBeDefined();
+      expect(ctorOptions.siteId).toBe('my-site.com');
+      expect(typeof ctorOptions.onChallengeResolved).toBe('function');
     });
 
     it('recreates adapter when active page object changes', async () => {

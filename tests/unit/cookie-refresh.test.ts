@@ -29,6 +29,11 @@ vi.mock('../../src/browser/cookie-jar.js', () => ({
   CookieJar: vi.fn().mockImplementation(() => mockCookieJar),
 }));
 
+const mockDetectAndWaitForChallenge = vi.fn().mockResolvedValue({ detected: false, resolved: false });
+vi.mock('../../src/browser/base-browser-adapter.js', () => ({
+  detectAndWaitForChallenge: (...args: unknown[]) => mockDetectAndWaitForChallenge(...args),
+}));
+
 import { refreshCookies } from '../../src/automation/cookie-refresh.js';
 import type { BrowserManager } from '../../src/browser/manager.js';
 
@@ -92,6 +97,7 @@ describe('cookie-refresh', () => {
 
       const mockBrowserManager = {
         getOrCreateContext: vi.fn().mockResolvedValue(context),
+        snapshotAuth: vi.fn().mockResolvedValue(undefined),
       } as unknown as BrowserManager;
 
       const result = await refreshCookies('example.com', undefined, mockBrowserManager);
@@ -129,6 +135,7 @@ describe('cookie-refresh', () => {
       const { context } = makeMockContext(cookies);
       const mockBrowserManager = {
         getOrCreateContext: vi.fn().mockResolvedValue(context),
+        snapshotAuth: vi.fn().mockResolvedValue(undefined),
       } as unknown as BrowserManager;
 
       await refreshCookies('example.com', mockCookieJar as any, mockBrowserManager);
@@ -145,6 +152,7 @@ describe('cookie-refresh', () => {
       const { context, page } = makeMockContext([]);
       const mockBrowserManager = {
         getOrCreateContext: vi.fn().mockResolvedValue(context),
+        snapshotAuth: vi.fn().mockResolvedValue(undefined),
       } as unknown as BrowserManager;
 
       const result = await refreshCookies('no-cookies.com', undefined, mockBrowserManager);
@@ -171,6 +179,7 @@ describe('cookie-refresh', () => {
 
       const mockBrowserManager = {
         getOrCreateContext: vi.fn().mockResolvedValue(context),
+        snapshotAuth: vi.fn().mockResolvedValue(undefined),
       } as unknown as BrowserManager;
 
       // Should still return true if cookies are found despite timeout
@@ -181,6 +190,7 @@ describe('cookie-refresh', () => {
     it('returns false on browser context creation failure', async () => {
       const mockBrowserManager = {
         getOrCreateContext: vi.fn().mockRejectedValue(new Error('Browser crashed')),
+        snapshotAuth: vi.fn().mockResolvedValue(undefined),
       } as unknown as BrowserManager;
 
       const result = await refreshCookies('example.com', undefined, mockBrowserManager);

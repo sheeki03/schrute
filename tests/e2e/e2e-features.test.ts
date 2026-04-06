@@ -448,7 +448,7 @@ vi.mock('../../src/skill/dependency-graph.js', () => ({
   getCascadeAffected: vi.fn().mockReturnValue([]),
 }));
 vi.mock('../../src/browser/base-browser-adapter.js', () => ({
-  detectAndWaitForChallenge: vi.fn().mockResolvedValue(false),
+  detectAndWaitForChallenge: vi.fn().mockResolvedValue({ detected: false, resolved: false }),
   isCloudflareChallengePage: vi.fn().mockResolvedValue(false),
 }));
 

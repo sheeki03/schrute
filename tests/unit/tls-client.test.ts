@@ -74,6 +74,24 @@ describe('tls-client', () => {
     });
   });
 
+  describe('nativeFetch redirect suppression (Fix 3)', () => {
+    it('passes redirect: "manual" to global fetch', async () => {
+      const mockResponse = new Response('ok', {
+        status: 302,
+        headers: { location: 'https://api.example.com/redirect' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockResponse);
+
+      await tlsFetch(makeRequest());
+
+      // Verify the fetch was called with redirect: 'manual'
+      const callArgs = fetchSpy.mock.calls[0][1];
+      expect(callArgs?.redirect).toBe('manual');
+
+      vi.restoreAllMocks();
+    });
+  });
+
   describe('isCycleTlsAvailable', () => {
     it('returns false before any fetch', () => {
       expect(isCycleTlsAvailable()).toBe(false);
