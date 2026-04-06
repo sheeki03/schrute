@@ -204,6 +204,15 @@ Schrute is no longer just "record and replay." Here is what the current product 
 - **Handles sites that still need a live browser**
   Some sites cannot be cleanly replayed as direct HTTP calls because of Cloudflare, anti-bot checks, or other browser-only behavior. Schrute does not pretend otherwise. It keeps those tasks on a browser-backed path so they still work.
 
+- **Solves Cloudflare challenges automatically**
+  When Schrute hits a Cloudflare Turnstile challenge during navigation, it attempts to solve it. If the challenge resolves, the resulting auth cookies are persisted and fed into future direct-tier requests so subsequent runs can skip the challenge entirely.
+
+- **Supports pluggable TLS transports for direct replay**
+  The direct-tier execution layer supports multiple HTTP transports. The default uses Node's built-in fetch. For sites that inspect TLS fingerprints, an experimental Rust-based transport (`wreq`) presents a Chrome-identical TLS and HTTP/2 fingerprint. A Go-based CycleTLS transport is also available for JA3 spoofing.
+
+- **Supports multiple browser engines**
+  You can choose between Playwright (default), Patchright (stealth Chromium), Camoufox (Firefox-based stealth), or CloakBrowser (BYO stealth) depending on what a site requires.
+
 - **Lets you call the same learned skills from different places**
   The same learned actions can be used from MCP, the CLI, REST, and the Python or TypeScript client packages. That means you do not have to re-teach the task separately for each integration.
 
@@ -256,6 +265,49 @@ If you are trying to understand "what is actually included here?", this is the p
 - **Client access**
   Use the same learned actions through MCP, CLI, REST, Python, and TypeScript.
 
+## Browser Engines
+
+Schrute uses a browser engine for recording, exploration, and browser-backed execution. You can choose which engine to use:
+
+| Engine | What it is | Install |
+|--------|-----------|---------|
+| `playwright` | Vanilla Chromium via Playwright (default fallback) | `npx playwright install chromium` |
+| `patchright` | Stealth Chromium that reduces bot-detection fingerprints | `npm install patchright && npx patchright install chromium` |
+| `camoufox` | Firefox-based stealth engine | `npm install camoufox-js && npx camoufox-js fetch` |
+| `cloakbrowser` | BYO stealth browser (user-installed, never bundled) | `npm install cloakbrowser` |
+
+Set the engine in your config:
+
+```bash
+schrute config set browser.engine patchright
+```
+
+If the configured engine is not installed, Schrute falls back to vanilla Playwright and logs a warning. Run `schrute doctor` to check whether your engine is available.
+
+## Transport Layer
+
+When Schrute replays a learned skill via direct HTTP (no browser), it uses a transport layer to make the request. By default this is Node's built-in `fetch`. Two alternative transports are available for sites that inspect TLS fingerprints:
+
+| Transport | What it does | Status |
+|-----------|-------------|--------|
+| `native` | Node.js built-in fetch (default) | Stable |
+| `cycletls` | Go-based TLS client with JA3 spoofing | Opt-in |
+| `wreq` | Rust-based TLS client with full Chrome TLS/HTTP2 emulation | Experimental, opt-in |
+
+Select a transport via environment variable or config:
+
+```bash
+# Environment variable
+export SCHRUTE_DIRECT_TRANSPORT=wreq
+
+# Or config
+schrute config set transport.direct wreq
+```
+
+The default (`auto`) uses `native` only. Neither `cycletls` nor `wreq` activate unless you explicitly choose them.
+
+`wreq` requires the native Rust module to be built (see [Development](#development)). If the native module is not available, Schrute falls back to the native transport.
+
 ## How Schrute Runs A Task
 
 Schrute tries to use the simplest reliable path:
@@ -267,6 +319,12 @@ Schrute tries to use the simplest reliable path:
 So the goal is not "force everything into direct HTTP." The goal is "use the fastest safe execution mode that actually works."
 
 That is why sites behind Cloudflare or other anti-bot systems can still be useful in Schrute. If direct replay is blocked, Schrute keeps them on a browser-backed path instead of pretending they should work the same way as a public API.
+
+When a Cloudflare challenge is encountered during navigation, Schrute attempts to solve Turnstile automatically. If the challenge resolves, the resulting cookies are captured and published through the auth coordinator so that:
+
+- future browser contexts for the same site start with those cookies already loaded
+- direct-tier replays inject the cookies into requests, filtered by domain and path
+- redirects re-evaluate cookies for each hop to prevent leaking auth to unrelated domains
 
 ## How Skills Stay Reliable
 
@@ -375,7 +433,7 @@ The 3 noise requests (CSS, favicon, scripts) were discarded automatically.
 
 **Task:** Get Bitcoin 24-hour price data
 
-CoinGecko is protected by Cloudflare Turnstile. Schrute detects the challenge, applies a permanent `browser_required` lock, and uses live Chrome for execution.
+CoinGecko is protected by Cloudflare Turnstile. Schrute detects the challenge, attempts to solve it automatically, captures the resulting auth cookies, and applies a permanent `browser_required` lock. Subsequent runs reuse the persisted cookies, which often lets the browser skip the challenge entirely.
 
 - Pipeline: 16 requests, 7 noise filtered, 7 signal, **3 skills generated**
 - Key skill: `www_coingecko_com.get_24_hours_json.v1`
@@ -424,6 +482,8 @@ Schrute is a weaker fit when:
 - the site is mostly server-rendered HTML with no meaningful backend calls to learn
 - the workflow depends heavily on canvas, WebSockets, or visual-only interactions
 - the task is truly one-time and not worth teaching
+
+For sites that inspect TLS fingerprints and reject non-browser clients, the `wreq` transport (experimental) can present a Chrome-identical TLS and HTTP/2 fingerprint during direct replay. See [Transport Layer](#transport-layer).
 
 ## Common Use Cases
 
@@ -517,7 +577,9 @@ For the full security model, see [SECURITY.md](SECURITY.md).
 
 ## Development
 
-**Prerequisites:** Node.js >= 22
+**Prerequisites:**
+- Node.js >= 22
+- Rust >= 1.85 (optional — only needed for the native module / wreq transport)
 
 ```bash
 git clone https://github.com/sheeki03/schrute.git
@@ -529,9 +591,31 @@ npm run build
 Useful commands:
 
 ```bash
-npm run build
-npm test
-npm run dev
+npm run build          # Compile TypeScript
+npm run build:native   # Build the Rust native module (requires Rust toolchain)
+npm test               # Run tests
+npm run dev            # Watch mode
+```
+
+### Native Module
+
+Schrute includes an optional Rust native module (`native/`) that provides:
+
+- `wreq` transport — Chrome-grade TLS/HTTP2 fingerprinting for direct-tier replay
+- Performance-critical operations (hashing, schema diffing, redaction)
+
+The native module is not required. All bindings fall back to TypeScript when it is unavailable. To build it:
+
+```bash
+npm run build:native
+```
+
+This compiles the Rust code and produces `native/index.node`. The Rust toolchain version is pinned in `rust-toolchain.toml` (currently 1.85.0).
+
+For standalone binary builds, the native addon is automatically included:
+
+```bash
+npm run build:binary
 ```
 
 ## Release Channels
